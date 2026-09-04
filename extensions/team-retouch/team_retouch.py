@@ -25,9 +25,9 @@ _LIGHTWEIGHT_STARTUP = len(sys.argv) > 1 and sys.argv[1] in _LIGHTWEIGHT_ACTIONS
 if not _LIGHTWEIGHT_STARTUP:
     import cv2
     import numpy as np
-    from PIL import Image, ImageOps
+    from PIL import Image
+    from image_safety import load_array, open_validated
     from identity_engine import CompactPairMetrics, IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
-    Image.MAX_IMAGE_PIXELS = None
 
 RTMDET_INPUT_SIZE = 640
 RTMDET_SCORE_THRESHOLD = 0.45
@@ -40,6 +40,7 @@ MAX_PEOPLE_PER_TILE = 4
 MASK_PROXY_EDGE = 4096
 RTMDET_MODEL_NAME = "rtmdet-ins_m_640x640.onnx"
 PROGRESS_CONTEXT = {}
+SESSION_FALLBACK_REASONS = {}
 
 
 def emit(result):
@@ -67,6 +68,17 @@ def asset_path(*parts):
         if candidate.is_file():
             return candidate
     raise FileNotFoundError(f"团片协作模型或脚本不存在：{candidates[0]}")
+
+
+def packaged_advanced_available():
+    manifest_path = component_directory() / "component.json"
+    if not manifest_path.is_file():
+        return True
+    try:
+        offline = json.loads(manifest_path.read_text(encoding="utf-8")).get("advancedRuntime", {}).get("offlinePackage", {})
+        return bool(offline.get("path") and offline.get("sha256"))
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def model_path(name=RTMDET_MODEL_NAME):
@@ -100,6 +112,7 @@ def create_session(preference="auto"):
         raise RuntimeError("人物检测组件缺少 ONNX Runtime 运行库（onnxruntime-directml）") from error
     providers = ort.get_available_providers()
     options = ort.SessionOptions()
+    initialization_error = None
     if preference != "cpu" and "DmlExecutionProvider" in providers:
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -109,27 +122,26 @@ def create_session(preference="auto"):
                 providers=["DmlExecutionProvider", "CPUExecutionProvider"],
             )
             return session, providers, "gpu"
-        except Exception:
+        except Exception as error:
             if preference == "gpu":
                 raise
+            initialization_error = error
     elif preference == "gpu":
         raise RuntimeError(f"DirectML GPU 不可用；当前运行库提供：{', '.join(providers) or '无'}")
     if "CPUExecutionProvider" not in providers:
         raise RuntimeError(f"ONNX CPU 执行器不可用；当前运行库提供：{', '.join(providers) or '无'}")
     session = ort.InferenceSession(str(model_path()), providers=["CPUExecutionProvider"])
+    if initialization_error is not None:
+        SESSION_FALLBACK_REASONS[id(session)] = f"DirectML 初始化失败，已从原始输入切换 CPU：{initialization_error}"
     return session, providers, "cpu"
 
 
-def load_rgb(path):
-    with Image.open(path) as source:
-        source.load()
-        return np.asarray(ImageOps.exif_transpose(source).convert("RGB"))
+def load_rgb(path, role="original"):
+    return load_array(path, role=role, mode="RGB")
 
 
 def load_mask(path):
-    with Image.open(path) as source:
-        source.load()
-        return np.asarray(source.convert("L"))
+    return load_array(path, role="work", mode="L", peak_bytes_per_pixel=4)
 
 
 def save_mask(path, mask):
@@ -926,7 +938,6 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
         for person_index, member in zip(tile["indices"], members):
             member_payload.append({
                 "personIndex": person_index + 1,
-                "previousPersonIndex": int(member.get("previousPersonIndex") or person_index + 1),
                 "confidence": float(member.get("score", 1)),
                 "faceBox": box_payload(member["faceBox"]) if member.get("faceBox") else None,
                 "bbox": box_payload(member["box"]),
@@ -977,12 +988,16 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
 def detect(input_path, output_dir, preference="auto", delivery_dir=None, delivery_prefix=None,
            oversize_crop_mode="expand", advanced_runner=None, session_bundle=None,
            advanced_mode="auto", excluded_boxes=None):
+    if advanced_mode != "basic" and not packaged_advanced_available():
+        advanced_mode = "basic"
     emit_progress(2, "正在读取原图")
     rgb = load_rgb(input_path)
     height, width = rgb.shape[:2]
     emit_progress(8, "正在加载人物检测模型")
     session, providers, backend = session_bundle or create_session(preference)
     fallback_reasons = []
+    if SESSION_FALLBACK_REASONS.get(id(session)):
+        fallback_reasons.append(SESSION_FALLBACK_REASONS[id(session)])
     emit_progress(14, "正在检测图片中的人物")
     try:
         rtmdet = infer_rtmdet(session, rgb)
@@ -1174,7 +1189,7 @@ def _perceptual_hash(gray):
 
 def describe_match_image(image_path):
     """Build edit-tolerant visual descriptors without relying on names or metadata."""
-    rgb = load_rgb(image_path)
+    rgb = load_rgb(image_path, role="work")
     height, width = rgb.shape[:2]
     scale = min(1.0, 960.0 / max(width, height))
     proxy = cv2.resize(
@@ -1188,6 +1203,21 @@ def describe_match_image(image_path):
     edges = cv2.Canny(structure, 55, 145)
     sift = cv2.SIFT_create(nfeatures=900, contrastThreshold=0.025, edgeThreshold=12)
     keypoints, descriptors = sift.detectAndCompute(normalized, None)
+    histogram = np.bincount(gray.reshape(-1), minlength=256).astype(np.float64)
+    probabilities = histogram[histogram > 0] / max(1, gray.size)
+    entropy = float(-np.sum(probabilities * np.log2(probabilities)))
+    edge_fraction = float(np.count_nonzero(edges)) / max(1, edges.size)
+    edge_cells = 0
+    for y_cell in range(4):
+        for x_cell in range(4):
+            cell = edges[y_cell * 24:(y_cell + 1) * 24, x_cell * 24:(x_cell + 1) * 24]
+            if float(np.count_nonzero(cell)) / max(1, cell.size) >= 0.003:
+                edge_cells += 1
+    if len(keypoints or []) >= 3:
+        hull = cv2.convexHull(np.asarray([point.pt for point in keypoints], dtype=np.float32))
+        keypoint_coverage = min(1.0, float(cv2.contourArea(hull)) / max(1, proxy.shape[0] * proxy.shape[1]))
+    else:
+        keypoint_coverage = 0.0
     comparison = cv2.resize(rgb, (192, 192), interpolation=cv2.INTER_AREA)
     return {
         "path": str(image_path), "width": width, "height": height,
@@ -1195,7 +1225,16 @@ def describe_match_image(image_path):
         "proxyWidth": proxy.shape[1], "proxyHeight": proxy.shape[0],
         "structure": structure, "edges": edges, "hash": _perceptual_hash(normalized),
         "keypoints": keypoints or [], "descriptors": descriptors,
+        "grayStd": float(np.std(gray)), "entropy": entropy, "edgeFraction": edge_fraction,
+        "edgeCellCount": edge_cells, "keypointCount": len(keypoints or []),
+        "keypointCoverage": keypoint_coverage,
     }
+
+
+def match_information_sufficient(descriptor):
+    return (descriptor["grayStd"] >= 8.0 and descriptor["entropy"] >= 2.5 and
+            ((descriptor["keypointCount"] >= 12 and descriptor["keypointCoverage"] >= .01) or
+             (descriptor["edgeFraction"] >= .008 and descriptor["edgeCellCount"] >= 6)))
 
 
 def return_edit_evidence(returned, candidate):
@@ -1383,6 +1422,10 @@ def match_returned_batch(manifest_path):
         candidate = candidates[candidate_index]
         edit_evidence = return_edit_evidence(returned_descriptors[row_index], candidate_descriptors[candidate_index])
         warnings = []
+        returned_informative = match_information_sufficient(returned_descriptors[row_index])
+        candidate_informative = match_information_sufficient(candidate_descriptors[candidate_index])
+        if not returned_informative or not candidate_informative:
+            warnings.append("图片有效纹理信息不足，禁止自动归档，请人工确认候选")
         if edit_evidence["exactSame"]:
             warnings.append("返图与原始工作图完全相同，未检测到实际修改")
         elif edit_evidence["nearUnchanged"]:
@@ -1424,6 +1467,7 @@ def match_returned_batch(manifest_path):
             "matchConfidence": "high" if score >= 0.68 and margin >= 0.075 else ("medium" if score >= 0.55 and margin >= 0.025 else "low"),
             "score": round(score, 4), "margin": round(margin, 4), "editEvidence": edit_evidence,
             "returnWarnings": warnings, "needsReview": bool(warnings), "alternatives": alternatives,
+            "informationGate": {"returned": returned_informative, "candidate": candidate_informative},
         })
     emit_progress(100, "内容比对完成")
     return {
@@ -1514,27 +1558,39 @@ def identify_people(manifest_path, runtime=None, provider="auto"):
         return {"success": True, "clusters": [], "subjectCount": 0, "method": "face-osnet-gallery-v3"}
     if len(subjects) > 2000:
         raise ValueError("单次人物识别最多支持 2000 个主体；请拆分批次以限制两两比较内存")
-    runtime = runtime or IdentityRuntime(asset_path("models", "face_detection_yunet_2023mar.onnx").parent, provider)
+    owns_runtime = runtime is None
+    model_directory = asset_path("models", "face_detection_yunet_2023mar.onnx").parent
+    runtime = runtime or IdentityRuntime(model_directory, provider)
     image_shapes, descriptors = {}, []
     for item in subjects:
         image_path = os.path.abspath(item["path"])
-        with Image.open(image_path) as source:
+        with open_validated(image_path, role="original") as source:
             image_shapes[str(item.get("photoId") or "")] = (source.height, source.width)
     add_occlusion_estimates(subjects, image_shapes)
     subjects_by_image = {}
     for item in subjects:
         subjects_by_image.setdefault(os.path.abspath(item["path"]), []).append(item)
     described_count = 0
-    for image_path, image_subjects in subjects_by_image.items():
-        rgb = load_rgb(image_path)
-        image_descriptors = []
-        for item in image_subjects:
-            image_descriptors.append(runtime.describe(rgb, item))
-            described_count += 1
-            emit_progress(5 + 38 * described_count / len(subjects), f"检测并对齐人脸 {described_count}/{len(subjects)}")
-        runtime.embed_bodies(image_descriptors)
-        descriptors.extend(image_descriptors)
-        del rgb
+    try:
+        for image_path, image_subjects in subjects_by_image.items():
+            rgb = load_rgb(image_path)
+            for start in range(0, len(image_subjects), 12):
+                image_descriptors = []
+                for item in image_subjects[start:start + 12]:
+                    image_descriptors.append(runtime.describe(rgb, item))
+                    described_count += 1
+                    emit_progress(5 + 38 * described_count / len(subjects), f"检测并对齐人脸 {described_count}/{len(subjects)}")
+                runtime.embed_bodies(image_descriptors)
+                descriptors.extend(image_descriptors)
+                del image_descriptors
+            del rgb
+    except Exception as error:
+        accelerator_error = not isinstance(error, (ValueError, KeyError, OSError, FileNotFoundError)) and ("Dml" in str(error) or error.__class__.__module__.startswith("onnxruntime"))
+        if not owns_runtime or provider != "auto" or runtime.provider != "DmlExecutionProvider" or not accelerator_error:
+            raise
+        result = identify_people(manifest_path, runtime=IdentityRuntime(model_directory, "cpu"), provider="cpu")
+        result["fallbackReason"] = f"DirectML 运行失败，已从原始 manifest 全量重跑 CPU：{error}"
+        return result
     emit_progress(72, "已提取 OSNet 人体特征，正在执行受约束聚类")
     pair_cache = CompactPairMetrics(len(descriptors))
     clusters = constrained_clusters(descriptors, pair_cache)
@@ -1549,6 +1605,7 @@ def identify_people(manifest_path, runtime=None, provider="auto"):
         "faceBackend": getattr(runtime, "face_backend", "test-face"),
         "bodyBackend": getattr(runtime, "body_backend", "test-body"),
         "provider": runtime.provider,
+        "fallbackReason": getattr(runtime, "fallback_reason", ""),
     }
 
 

@@ -11,6 +11,7 @@ import re
 import queue
 import threading
 import time
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -104,6 +105,7 @@ class _WslJsonService:
         self.stdout_lines = None
         self.stderr_tail = None
         self.reader_threads = []
+        self.request_lock = threading.Lock()
         errors = []
         command = f"{python_path} {shlex.quote(wsl_path(script))} --serve"
         for candidate in distro_candidates():
@@ -133,7 +135,7 @@ class _WslJsonService:
                 except json.JSONDecodeError:
                     output_chunks.append(line)
                     continue
-                if message.get("type") == "ready":
+                if message.get("type") == "ready" and message.get("protocolVersion") == 1:
                     self.process = process
                     self.distro = candidate
                     return
@@ -187,42 +189,44 @@ class _WslJsonService:
                 worker.join(timeout=2)
 
     def request(self, payload, timeout=20 * 60):
-        if self.process is None or self.process.poll() is not None:
-            raise RuntimeError("WSL 推理服务已经退出")
-        encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
-        self.process.stdin.write((json.dumps({"payload_b64": encoded}) + "\n").encode("ascii"))
-        self.process.stdin.flush()
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError(f"WSL inference service did not respond within {timeout} seconds")
-                line = self._readline(remaining)
-            except TimeoutError:
-                self._close_process(force=True)
-                raise
-            if not line:
-                detail = decode_process_output(b"".join(self.stderr_tail)[-8000:])
-                raise RuntimeError(detail or "WSL 推理服务未返回结果")
-            try:
-                message = json.loads(line.decode("utf-8", errors="replace"))
-            except json.JSONDecodeError:
-                continue
-            if "success" not in message:
-                continue
-            if not message["success"]:
-                raise RuntimeError(message.get("error") or "WSL 推理失败")
-            return message
+        with self.request_lock:
+            if self.process is None or self.process.poll() is not None:
+                raise RuntimeError("WSL 推理服务已经退出")
+            request_id = uuid.uuid4().hex
+            request_payload = {**payload, "requestId": request_id, "protocolVersion": 1}
+            encoded = base64.b64encode(json.dumps(request_payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+            self.process.stdin.write((json.dumps({"payload_b64": encoded}) + "\n").encode("ascii"))
+            self.process.stdin.flush()
+            deadline = time.monotonic() + timeout
+            stale_count = 0
+            while True:
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(f"WSL inference service did not respond within {timeout} seconds")
+                    line = self._readline(remaining)
+                except TimeoutError:
+                    self._close_process(force=True)
+                    raise
+                if not line:
+                    detail = decode_process_output(b"".join(self.stderr_tail)[-8000:])
+                    raise RuntimeError(detail or "WSL 推理服务未返回结果")
+                try: message = json.loads(line.decode("utf-8", errors="replace"))
+                except json.JSONDecodeError: continue
+                if "success" not in message: continue
+                if message.get("protocolVersion") != 1 or message.get("requestId") != request_id:
+                    stale_count += 1
+                    if stale_count > 32: raise RuntimeError("WSL 推理服务返回过多不匹配响应")
+                    continue
+                if not message["success"]: raise RuntimeError(message.get("error") or "WSL 推理失败")
+                return message
 
     def close(self):
         if self.process is None:
             return
         try:
             if self.process.poll() is None:
-                self.process.stdin.write(b'{"action":"shutdown"}\n')
-                self.process.stdin.flush()
-                self.process.wait(timeout=20)
+                self.request({"action": "shutdown"}, timeout=20)
         except Exception:
             self._close_process()
         finally:
@@ -250,37 +254,45 @@ class AdvancedBatchSession:
             raise
 
     def __exit__(self, _type, _value, _traceback):
-        if self.sam:
-            self.sam.close()
-        if self.pair:
-            self.pair.close()
+        errors = []
+        for service in (self.sam, self.pair):
+            if service:
+                try: service.close()
+                except Exception as error: errors.append(error)
+        if errors and _value is None: raise errors[0]
 
     def run_pairdetr(self, input_path, output_root, threshold):
-        output_path = Path(output_root) / "pairdetr-boxes.json"
-        self.pair.request({
-            "image": wsl_path(input_path), "boxes_output": wsl_path(output_path),
-            "pair_threshold": float(threshold),
-        })
-        payload = json.loads(output_path.read_text(encoding="utf-8"))
-        return payload.get("boxes", [])
+        payload, output_path = _prepare_pair_request(input_path, output_root, threshold)
+        self.pair.request(payload)
+        return _parse_pair_output(output_path)
 
     def run_sam2(self, input_path, fused, output_root):
-        boxes_path = Path(output_root) / "fused-boxes.json"
-        boxes_path.write_text(json.dumps({
-            "image": str(input_path),
-            "boxes": [{"box_xyxy": item["box"], "pair_score": item["score"]} for item in fused],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        sam_root = Path(output_root) / "sam2"
-        sam_root.mkdir(parents=True, exist_ok=True)
-        for stale in sam_root.glob("mask-*.png"):
-            stale.unlink(missing_ok=True)
-        for stale_name in ("report.json", "overlay.jpg"):
-            (sam_root / stale_name).unlink(missing_ok=True)
-        self.sam.request({
-            "image": wsl_path(input_path), "boxes": wsl_path(boxes_path),
-            "output_dir": wsl_path(sam_root), "max_image_edge": 4096,
-        })
-        return sorted(sam_root.glob("mask-*.png"), key=_mask_sort_key)
+        payload, sam_root = _prepare_sam_request(input_path, fused, output_root)
+        self.sam.request(payload)
+        return _parse_sam_masks(sam_root)
+
+
+def _prepare_pair_request(input_path, output_root, threshold):
+    output_path = Path(output_root) / "pairdetr-boxes.json"
+    return {"image": wsl_path(input_path), "boxes_output": wsl_path(output_path), "pair_threshold": float(threshold)}, output_path
+
+
+def _parse_pair_output(output_path):
+    payload = json.loads(Path(output_path).read_text(encoding="utf-8"))
+    return payload.get("boxes", [])
+
+
+def _prepare_sam_request(input_path, fused, output_root):
+    boxes_path = Path(output_root) / "fused-boxes.json"
+    boxes_path.write_text(json.dumps({"image": str(input_path), "boxes": [{"box_xyxy": item["box"], "pair_score": item["score"]} for item in fused]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    sam_root = Path(output_root) / "sam2"; sam_root.mkdir(parents=True, exist_ok=True)
+    for stale in sam_root.glob("mask-*.png"): stale.unlink(missing_ok=True)
+    for stale_name in ("report.json", "overlay.jpg"): (sam_root / stale_name).unlink(missing_ok=True)
+    return {"image": wsl_path(input_path), "boxes": wsl_path(boxes_path), "output_dir": wsl_path(sam_root), "max_image_edge": 4096}, sam_root
+
+
+def _parse_sam_masks(sam_root):
+    return sorted(Path(sam_root).glob("mask-*.png"), key=_mask_sort_key)
 
 
 def probe_advanced(timeout=12, retry_timeout=12):
@@ -309,34 +321,21 @@ def probe_advanced(timeout=12, retry_timeout=12):
 
 def run_pairdetr(input_path, output_root, threshold):
     script = wsl_path(script_path("pairdetr_service.py"))
-    image = wsl_path(input_path)
-    output_path = Path(output_root) / "pairdetr-boxes.json"
-    output = wsl_path(output_path)
+    _payload, output_path = _prepare_pair_request(input_path, output_root, threshold)
+    image = wsl_path(input_path); output = wsl_path(output_path)
     command = " ".join([
         PAIR_PYTHON, shlex.quote(script), "--image", shlex.quote(image),
         "--pair-threshold", shlex.quote(str(threshold)),
         "--boxes-output", shlex.quote(output),
     ])
     run_shell(command, 15 * 60)
-    payload = json.loads(output_path.read_text(encoding="utf-8"))
-    return payload.get("boxes", [])
+    return _parse_pair_output(output_path)
 
 
 def run_sam2(input_path, fused, output_root):
     script = wsl_path(script_path("sam2_service.py"))
-    image = wsl_path(input_path)
-    boxes_path = Path(output_root) / "fused-boxes.json"
-    boxes_path.write_text(json.dumps({
-        "image": str(input_path),
-        "boxes": [{"box_xyxy": item["box"], "pair_score": item["score"]} for item in fused],
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    boxes = wsl_path(boxes_path)
-    sam_root = Path(output_root) / "sam2"
-    sam_root.mkdir(parents=True, exist_ok=True)
-    for stale in sam_root.glob("mask-*.png"):
-        stale.unlink(missing_ok=True)
-    for stale_name in ("report.json", "overlay.jpg"):
-        (sam_root / stale_name).unlink(missing_ok=True)
+    _payload, sam_root = _prepare_sam_request(input_path, fused, output_root)
+    image = wsl_path(input_path); boxes = wsl_path(Path(output_root) / "fused-boxes.json")
     output = wsl_path(sam_root)
     command = " ".join([
         SAM2_PYTHON, shlex.quote(script), "--image", shlex.quote(image),
@@ -344,5 +343,4 @@ def run_sam2(input_path, fused, output_root):
         "--max-image-edge", "4096",
     ])
     run_shell(command, 20 * 60)
-    masks = sorted(sam_root.glob("mask-*.png"), key=_mask_sort_key)
-    return masks
+    return _parse_sam_masks(sam_root)

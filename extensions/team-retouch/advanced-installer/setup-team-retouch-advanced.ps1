@@ -1,6 +1,6 @@
 # Byte-exact lifecycle payload: keep this file LF-only; the component manifest hashes its raw packaged bytes.
 param(
-    [string]$DistroName = 'PhotoFlowNative', [string]$LinuxUser = 'photoflowlab',
+    [string]$DistroName = 'PhotoFlowNative', [string]$LinuxUser = 'photoflow',
     [string]$InstallRoot = '', [string]$PackagePath = '',
     [string]$ExpectedComponentVersion = '', [int]$ExpectedAdvancedRuntimeApiVersion = 0,
     [string]$ExpectedPackageSha256 = '', [switch]$Repair, [switch]$CheckOnly,
@@ -18,6 +18,37 @@ $MaxArchiveBytes = 64GB
 $MaxVhdBytes = 128GB
 $MaxTotalExpandedBytes = $MaxVhdBytes + 1MB
 $MaxCompressionRatio = 200
+function Assert-SafeLocalPath([string]$PathValue) {
+    $full = [IO.Path]::GetFullPath($PathValue)
+    if ($full.StartsWith('\\', [StringComparison]::Ordinal) -or $full.Substring([Math]::Min(2, $full.Length)).Contains(':')) { throw "UNC and alternate-data-stream paths are forbidden: $full" }
+    $cursor = if (Test-Path -LiteralPath $full) { $full } else { Split-Path -Parent $full }
+    while ($cursor) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Reparse-point path is forbidden: $cursor" }
+        }
+        $next = Split-Path -Parent $cursor
+        if (-not $next -or $next -eq $cursor) { break }
+        $cursor = $next
+    }
+    return $full
+}
+function Invoke-TestFault([string]$Point) {
+    if ([string]$env:PHOTOFLOW_TEST_INSTALL_FAULT -eq $Point) { throw "Injected advanced installer fault: $Point" }
+}
+function Assert-ExactJsonFields($Value, [string[]]$Expected, [string]$Label) {
+    $actual = @($Value.PSObject.Properties.Name | Sort-Object)
+    $required = @($Expected | Sort-Object)
+    if (($actual -join "`n") -cne ($required -join "`n")) { throw "$Label contains missing or unknown fields." }
+}
+function Write-JsonAtomic([string]$PathValue, $Value) {
+    $target = Assert-SafeLocalPath $PathValue
+    $temporary = "$target.$([Guid]::NewGuid().ToString('N')).tmp"
+    $bytes = [Text.Encoding]::UTF8.GetBytes(($Value | ConvertTo-Json))
+    $stream = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    if (Test-Path -LiteralPath $target) { [IO.File]::Replace($temporary, $target, $null) } else { [IO.File]::Move($temporary, $target) }
+}
 if (-not ('PhotoFlowAdvancedStagingLock' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -70,7 +101,14 @@ function Remove-OwnedRegistrationIfPresent([string]$Name, [string]$ExpectedRoot)
 function Test-Distro([string]$Name, [string]$User) {
     & wsl.exe --manage $Name --set-default-user $User
     if ($LASTEXITCODE -ne 0) { throw "Unable to set the default user for $Name" }
-    & wsl.exe -d $Name -u $User -- bash -lc 'test -x $HOME/miniforge3/envs/pairdetr/bin/python && test -x $HOME/miniforge3/envs/sam2/bin/python && test -s $HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin && test -s $HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt'
+    $componentRoot = Split-Path -Parent $PSScriptRoot
+    $pairWindows = Join-Path $componentRoot 'advanced\pairdetr_service.py'
+    $samWindows = Join-Path $componentRoot 'advanced\sam2_service.py'
+    $pairLinux = (& wsl.exe -d $Name -u $User -- wslpath -a $pairWindows).Trim()
+    $samLinux = (& wsl.exe -d $Name -u $User -- wslpath -a $samWindows).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $pairLinux -or -not $samLinux) { throw 'Unable to resolve component self-test scripts inside WSL.' }
+    $probe = "set -e; test -x `$HOME/miniforge3/envs/pairdetr/bin/python; test -x `$HOME/miniforge3/envs/sam2/bin/python; test -s `$HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin; test -s `$HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt; timeout 180 `$HOME/miniforge3/envs/pairdetr/bin/python '$pairLinux' --self-test; timeout 240 `$HOME/miniforge3/envs/sam2/bin/python '$samLinux' --self-test"
+    & wsl.exe -d $Name -u $User -- bash -lc $probe
     if ($LASTEXITCODE -ne 0) { throw "The imported advanced environment failed its runtime probe: $Name" }
 }
 function Open-ValidatedAdvancedArchive([string]$ArchivePath) {
@@ -78,9 +116,20 @@ function Open-ValidatedAdvancedArchive([string]$ArchivePath) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archiveFullPath = [IO.Path]::GetFullPath($ArchivePath)
     if ($archiveFullPath.StartsWith('\\', [StringComparison]::Ordinal)) { throw 'The advanced package must be a local component file, not a UNC path.' }
-    $archiveSize = (Get-Item -LiteralPath $archiveFullPath -Force).Length
+    $archiveItem = Get-Item -LiteralPath $archiveFullPath -Force
+    if ($archiveItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'The advanced package must not be a reparse point.' }
+    $archiveSize = $archiveItem.Length
     if ($archiveSize -le 0 -or $archiveSize -gt $MaxArchiveBytes) { throw 'The advanced package compressed size is outside the release limit.' }
-    $archive = [IO.Compression.ZipFile]::OpenRead($archiveFullPath)
+    $packageStream = [IO.FileStream]::new($archiveFullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 8MB, [IO.FileOptions]::SequentialScan)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $buffer = [byte[]]::new(8MB)
+        while (($count = $packageStream.Read($buffer, 0, $buffer.Length)) -gt 0) { $sha.TransformBlock($buffer, 0, $count, $null, 0) | Out-Null }
+        $sha.TransformFinalBlock($buffer, 0, 0) | Out-Null
+        $packageHash = ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+        $packageStream.Position = 0
+    } finally { $sha.Dispose() }
+    $archive = [IO.Compression.ZipArchive]::new($packageStream, [IO.Compression.ZipArchiveMode]::Read, $false)
     try {
         $entries = @($archive.Entries)
         if ($entries.Count -ne 2) { throw 'The advanced package must contain exactly two root files.' }
@@ -116,8 +165,34 @@ function Open-ValidatedAdvancedArchive([string]$ArchivePath) {
         $installedSize = [int64]$manifest.installedSizeBytes
         if ($installedSize -ne [int64]$vhdEntry.Length -or $installedSize -le 0 -or $installedSize -gt $MaxVhdBytes) { throw 'The advanced manifest installedSizeBytes does not match the VHD.' }
         if ($totalCompressed -le 0 -or ([double]$totalExpanded / [double]$totalCompressed) -gt $MaxCompressionRatio) { throw 'The advanced package compression ratio is unsafe.' }
-        return @{ Archive=$archive; Manifest=$manifest; VhdName=$vhdName }
-    } catch { $archive.Dispose(); throw }
+        return @{ Archive=$archive; PackageStream=$packageStream; PackageSha256=$packageHash; Manifest=$manifest; VhdName=$vhdName; VhdEntry=$vhdEntry }
+    } catch { $archive.Dispose(); $packageStream.Dispose(); throw }
+}
+function Close-ValidatedAdvancedArchive($Validated) {
+    if (-not $Validated) { return }
+    if ($Validated.Archive) { $Validated.Archive.Dispose() }
+    if ($Validated.PackageStream) { $Validated.PackageStream.Dispose() }
+}
+function Copy-ValidatedVhdEntry($Validated, [string]$Destination) {
+    Assert-SafeStagingPath (Split-Path -Parent $Destination) $Destination
+    $input = $Validated.VhdEntry.Open()
+    $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 8MB, [IO.FileOptions]::SequentialScan)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $buffer = [byte[]]::new(8MB); [int64]$written = 0
+        while (($count = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $written += $count
+            if ($written -gt [int64]$Validated.VhdEntry.Length -or $written -gt $MaxVhdBytes) { throw 'Advanced VHD exceeded its declared extraction bound.' }
+            $sha.TransformBlock($buffer, 0, $count, $null, 0) | Out-Null
+            $output.Write($buffer, 0, $count)
+        }
+        $sha.TransformFinalBlock($buffer, 0, 0) | Out-Null
+        if ($written -ne [int64]$Validated.VhdEntry.Length) { throw 'Advanced VHD length did not match the trusted ZIP entry.' }
+        $output.Flush($true)
+        $digest = ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+        if ($digest -ne ([string]$Validated.Manifest.vhdSha256).ToLowerInvariant()) { throw 'Advanced VHD checksum mismatch.' }
+        return $digest
+    } finally { $sha.Dispose(); $output.Dispose(); $input.Dispose() }
 }
 function Assert-SafeStagingPath([string]$StagingRoot, [string]$Destination = '') {
     $root = [IO.Path]::GetFullPath($StagingRoot).TrimEnd('\')
@@ -176,47 +251,6 @@ function Assert-StagingEntities([string]$StagingRoot, [string[]]$AllowedNames) {
         }
     }
 }
-function Expand-SafeAdvancedArchive([string]$ArchivePath, [string]$StagingRoot) {
-    $validated = Open-ValidatedAdvancedArchive $ArchivePath
-    $stagingLock = $null
-    try {
-        Assert-SafeStagingPath $StagingRoot
-        New-Item -ItemType Directory -Path $StagingRoot -Force | Out-Null
-        $stagingLock = Open-StagingDirectoryLock $StagingRoot
-        Assert-SafeStagingPath $StagingRoot
-        [int64]$writtenTotal = 0
-        foreach ($entry in $validated.Archive.Entries) {
-            $destination = [IO.Path]::GetFullPath((Join-Path $StagingRoot $entry.FullName))
-            Assert-SafeStagingPath $StagingRoot $destination
-            $input = $entry.Open()
-            $output = [IO.FileStream]::new($destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            try {
-                $buffer = [byte[]]::new(1MB)
-                [int64]$entryWritten = 0
-                while (($count = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
-                    $entryWritten += $count; $writtenTotal += $count
-                    if ($entryWritten -gt [int64]$entry.Length -or $writtenTotal -gt $MaxTotalExpandedBytes -or ($entry.FullName -ceq $validated.VhdName -and $entryWritten -gt $MaxVhdBytes)) { throw 'The advanced package exceeded its declared extraction bounds.' }
-                    $output.Write($buffer, 0, $count)
-                }
-                if ($entryWritten -ne [int64]$entry.Length) { throw 'The advanced package entry length did not match bytes extracted.' }
-            } finally { $output.Dispose(); $input.Dispose() }
-            Assert-SafeStagingPath $StagingRoot $destination
-        }
-        Close-StagingDirectoryLock $stagingLock -KeepDirectoryHandle
-        Assert-StagingEntities $StagingRoot @('manifest.json', $validated.VhdName)
-        return $validated.Manifest
-    } catch {
-        if (Test-Path -LiteralPath $StagingRoot) { Remove-Item -LiteralPath $StagingRoot -Recurse -Force -ErrorAction SilentlyContinue }
-        throw
-    } finally {
-        if ($stagingLock) { Close-StagingDirectoryLock $stagingLock }
-        $validated.Archive.Dispose()
-        # Windows PowerShell 5 can retain a ZipArchiveEntry wrapper until the
-        # finalizer pass even after its archive is disposed.
-        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
-    }
-}
-
 if ($TestHelpersOnly) { return }
 
 $hostAction = [string]$env:PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION
@@ -239,15 +273,17 @@ $stateRoot = Join-Path $componentDataRoot 'advanced'
 $statePath = Join-Path $stateRoot 'install-state.json'
 $markerPath = Join-Path $InstallRoot '.photoflow-team-retouch-owner.json'
 $stableVhd = Join-Path $InstallRoot 'ext4.vhdx'
+foreach ($safePath in @($componentDataRoot,$InstallRoot,$stateRoot,$statePath,$markerPath,$stableVhd)) { Assert-SafeLocalPath $safePath | Out-Null }
+$registration = Get-DistroRegistration $DistroName
 
 if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { throw 'WSL 2 is not installed.' }
 & wsl.exe --status *> $null
 if ($LASTEXITCODE -ne 0) { throw 'WSL 2 is not ready.' }
-if ($CheckOnly) { Write-Host 'OFFLINE_PREFLIGHT_OK|WSL 2 ready'; exit 0 }
 $componentRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd('\')
 $componentRootItem = Get-Item -LiteralPath $componentRoot
 if ($componentRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Installed component root must not be a reparse point.' }
 $componentManifestPath = [IO.Path]::GetFullPath((Join-Path $componentRoot 'component.json'))
+foreach ($safePath in @($componentRoot,$componentManifestPath)) { Assert-SafeLocalPath $safePath | Out-Null }
 if (-not $componentManifestPath.StartsWith($componentRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Installed component manifest escaped the component root.' }
 if (-not (Test-Path -LiteralPath $componentManifestPath -PathType Leaf)) { throw 'Installed component manifest is missing.' }
 $componentManifestItem = Get-Item -LiteralPath $componentManifestPath
@@ -261,26 +297,51 @@ if ($ExpectedComponentVersion -ne $manifestComponentVersion -or $ExpectedAdvance
 $declaredPackage = [string]$componentManifest.advancedRuntime.offlinePackage.path
 $declaredPackageSha256 = [string]$componentManifest.advancedRuntime.offlinePackage.sha256
 if (-not $declaredPackage -or [IO.Path]::GetFileName($declaredPackage) -ne $declaredPackage -or $declaredPackageSha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Component manifest does not declare one safe advanced package and digest.' }
-$ExpectedPackageSha256 = $declaredPackageSha256
 $declaredPackagePath = [IO.Path]::GetFullPath((Join-Path $componentRoot $declaredPackage))
 if (-not $PackagePath.Trim()) { $PackagePath = $declaredPackagePath }
 $PackagePath = [IO.Path]::GetFullPath($PackagePath)
+Assert-SafeLocalPath $PackagePath | Out-Null
 if (-not [IO.Path]::GetExtension($PackagePath).Equals('.zip', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw 'Only the component advanced .zip package is accepted.' }
 if (-not $PackagePath.Equals($declaredPackagePath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Only the advanced package embedded in this installed component is accepted.' }
-$packageHash = (Get-FileHash -LiteralPath $PackagePath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($packageHash -ne $ExpectedPackageSha256.ToLowerInvariant() -or $packageHash -ne $declaredPackageSha256.ToLowerInvariant()) { throw 'The advanced package does not match both the component manifest and Host-trusted SHA256 anchors.' }
+$validatedPackage = Open-ValidatedAdvancedArchive $PackagePath
+$packageHash = [string]$validatedPackage.PackageSha256
+if ($ExpectedPackageSha256.Trim() -and $packageHash -ne $ExpectedPackageSha256.ToLowerInvariant()) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced package does not match the Host-pinned SHA256.' }
+if ($packageHash -ne $declaredPackageSha256.ToLowerInvariant()) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced package does not match the installed component manifest.' }
+$manifest = $validatedPackage.Manifest
+if ([int]$manifest.formatVersion -ne 1 -or [string]$manifest.componentId -ne 'team-retouch' -or [string]$manifest.architecture -ne 'x64') { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Unsupported advanced package manifest.' }
+if (-not $ExpectedComponentVersion -or [string]$manifest.componentVersion -ne $ExpectedComponentVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced package component version does not match exactly.' }
+if ($ExpectedAdvancedRuntimeApiVersion -le 0 -or [int]$manifest.advancedRuntimeApiVersion -ne $ExpectedAdvancedRuntimeApiVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced runtime API version does not match exactly.' }
 
-$registration = Get-DistroRegistration $DistroName
+if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -notmatch 'AMD64|x86') { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Windows x64 is required.' }
+$nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+if (-not $nvidia) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'A CUDA-capable NVIDIA driver is required.' }
+$compute = @(& $nvidia.Source --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
+if ($LASTEXITCODE -ne 0 -or -not $compute -or [double]$compute[0] -lt 7.0) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The NVIDIA GPU must support validated FP16 or BF16 CUDA inference.' }
+$drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($componentDataRoot))
+if ($drive.DriveType -ne [IO.DriveType]::Fixed) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced environment must be installed on a fixed local volume.' }
+$existingBytes = if ($registration -and (Test-Path -LiteralPath $stableVhd -PathType Leaf)) { (Get-Item -LiteralPath $stableVhd).Length } else { 0 }
+$peakBytes = [int64]([Math]::Ceiling(([int64]$manifest.installedSizeBytes * 2 + $existingBytes) * 1.15) + 2GB)
+if ($drive.AvailableFreeSpace -lt $peakBytes) { Close-ValidatedAdvancedArchive $validatedPackage; throw "Insufficient disk space for the transactional install peak: $peakBytes bytes required." }
+if ($CheckOnly) { Close-ValidatedAdvancedArchive $validatedPackage; Write-Host 'OFFLINE_PREFLIGHT_OK|trusted package, WSL 2, NVIDIA CUDA, precision and disk ready'; exit 0 }
+
 $priorState = $null; $priorMarker = $null
 if ($registration) {
     if (-not $Repair) { throw 'The advanced environment is already registered. Use Repair.' }
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { throw 'Repair refused: component ownership state is incomplete.' }
     $priorState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
     $priorMarker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-ExactJsonFields $priorMarker @('componentId','distroName','installRoot','ownerToken','version') 'Ownership marker'
+    Assert-ExactJsonFields $priorState @('componentId','distroName','installRoot','ownerToken','installedAt','version','componentVersion','advancedRuntimeApiVersion','packageSha256','vhdSha256','offline') 'Install state'
     $stateInstallRoot = [IO.Path]::GetFullPath([string]$priorState.installRoot).TrimEnd('\')
-    if ([string]$priorState.componentId -ne 'team-retouch' -or [string]$priorState.distroName -ne $DistroName -or -not $stateInstallRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase) -or [string]$priorState.ownerToken -ne [string]$priorMarker.ownerToken) { throw 'Repair refused: install-state and ownership marker do not bind this distribution.' }
+    $installedAt = [DateTime]::MinValue
+    $validInstalledAt = [DateTime]::TryParse([string]$priorState.installedAt, [ref]$installedAt)
+    if ([int]$priorState.version -ne 3 -or [int]$priorMarker.version -ne 1 -or [string]$priorState.componentId -ne 'team-retouch' -or [string]$priorMarker.componentId -ne 'team-retouch' -or [string]$priorState.distroName -ne $DistroName -or [string]$priorMarker.distroName -ne $DistroName -or -not $stateInstallRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase) -or [string]$priorMarker.installRoot -ne $InstallRoot -or [string]$priorState.ownerToken -notmatch '^[a-f0-9]{32}$' -or [string]$priorState.ownerToken -ne [string]$priorMarker.ownerToken -or -not $validInstalledAt -or [string]$priorState.componentVersion -notmatch '^\d+(?:\.\d+)+$' -or [int]$priorState.advancedRuntimeApiVersion -lt 1 -or [string]$priorState.packageSha256 -notmatch '^[a-f0-9]{64}$' -or [string]$priorState.vhdSha256 -notmatch '^[a-f0-9]{64}$' -or $priorState.offline -ne $true) { throw 'Repair refused: install-state and ownership marker do not bind this distribution.' }
     Assert-RegistrationBasePath $DistroName $InstallRoot | Out-Null
-} elseif ($Repair) { throw 'Repair refused: the component-owned WSL distribution is not registered.' }
+} else {
+    $residualState = (Test-Path -LiteralPath $statePath) -or (Test-Path -LiteralPath $markerPath) -or (Test-Path -LiteralPath $stableVhd)
+    if ($residualState) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Install refused: incomplete or foreign advanced ownership state exists.' }
+    $Repair = $false
+}
 
 if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) { throw 'Windows tar.exe is required.' }
 $stagingRoot = Join-Path $stateRoot ('.offline-stage-' + [Guid]::NewGuid().ToString('N'))
@@ -292,40 +353,47 @@ try {
     Assert-SafeStagingPath $stagingRoot
     Assert-SafeStagingPath $candidateRoot
     New-Item -ItemType Directory -Path $stagingRoot,$candidateRoot -Force | Out-Null
-    $manifest = Expand-SafeAdvancedArchive $PackagePath $stagingRoot
-    $sourceVhd = Join-Path $stagingRoot ([string]$manifest.vhdFile)
-    if ([int]$manifest.formatVersion -ne 1 -or [string]$manifest.componentId -ne 'team-retouch' -or [string]$manifest.architecture -ne 'x64') { throw 'Unsupported advanced package manifest.' }
-    if (-not $ExpectedComponentVersion -or [string]$manifest.componentVersion -ne $ExpectedComponentVersion) { throw 'Advanced package component version does not match exactly.' }
-    if ($ExpectedAdvancedRuntimeApiVersion -le 0 -or [int]$manifest.advancedRuntimeApiVersion -ne $ExpectedAdvancedRuntimeApiVersion) { throw 'Advanced runtime API version does not match exactly.' }
-    $vhdHash = (Get-FileHash -LiteralPath $sourceVhd -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($vhdHash -ne ([string]$manifest.vhdSha256).ToLowerInvariant()) { throw 'Advanced VHD checksum mismatch.' }
     $candidateVhd = Join-Path $candidateRoot 'ext4.vhdx'
-    Copy-Item -LiteralPath $sourceVhd -Destination $candidateVhd
+    $vhdHash = Copy-ValidatedVhdEntry $validatedPackage $candidateVhd
+    Invoke-TestFault 'candidate-copy'
+    Assert-SafeStagingPath $candidateRoot $candidateVhd
     & wsl.exe --import-in-place $candidateName $candidateVhd
+    Invoke-TestFault 'candidate-import'
     $candidateRegistered = [bool](Get-DistroRegistration $candidateName)
     if ($LASTEXITCODE -ne 0 -or -not $candidateRegistered) { throw 'Unable to register the staged advanced candidate.' }
     Assert-RegistrationBasePath $candidateName $candidateRoot | Out-Null
     Test-Distro $candidateName $LinuxUser
+    Invoke-TestFault 'candidate-probe'
     Unregister-OwnedDistro $candidateName $candidateRoot
     $candidateRegistered = $false
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     if ($registration) {
         & wsl.exe --terminate $DistroName 2>$null
         Copy-Item -LiteralPath $stableVhd -Destination $backupVhd
+        Invoke-TestFault 'backup'
         Unregister-OwnedDistro $DistroName $InstallRoot
         $oldUnregistered = $true
+        Invoke-TestFault 'old-unregister'
     }
-    Copy-Item -LiteralPath $sourceVhd -Destination $stableVhd -Force
+    if (Test-Path -LiteralPath $stableVhd) { Remove-Item -LiteralPath $stableVhd -Force }
+    $finalVhdHash = Copy-ValidatedVhdEntry $validatedPackage $stableVhd
+    Invoke-TestFault 'final-copy'
+    Assert-SafeLocalPath $stableVhd | Out-Null
+    if ($finalVhdHash -ne $vhdHash) { throw 'Candidate and final VHD digests differ.' }
     $finalImportAttempted = $true
     & wsl.exe --import-in-place $DistroName $stableVhd
+    Invoke-TestFault 'final-import'
     $finalRegistered = [bool](Get-DistroRegistration $DistroName)
     if ($LASTEXITCODE -ne 0 -or -not $finalRegistered) { throw 'Unable to register the final advanced environment.' }
     Assert-RegistrationBasePath $DistroName $InstallRoot | Out-Null
+    foreach ($safePath in @($InstallRoot,$stableVhd,$markerPath,$statePath)) { Assert-SafeLocalPath $safePath | Out-Null }
     Test-Distro $DistroName $LinuxUser
+    Invoke-TestFault 'final-probe'
     $ownerToken = [Guid]::NewGuid().ToString('N')
-    @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; version=1 } | ConvertTo-Json | Set-Content -LiteralPath $markerPath -Encoding UTF8
+    Write-JsonAtomic $markerPath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; version=1 }
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
-    @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; installedAt=[DateTime]::UtcNow.ToString('o'); version=3; componentVersion=[string]$manifest.componentVersion; advancedRuntimeApiVersion=[int]$manifest.advancedRuntimeApiVersion; packageSha256=$packageHash; vhdSha256=$vhdHash; offline=$true } | ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+    Invoke-TestFault 'state-write'
+    Write-JsonAtomic $statePath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; installedAt=[DateTime]::UtcNow.ToString('o'); version=3; componentVersion=[string]$manifest.componentVersion; advancedRuntimeApiVersion=[int]$manifest.advancedRuntimeApiVersion; packageSha256=$packageHash; vhdSha256=$vhdHash; offline=$true }
     Write-Host "PhotoFlow advanced offline environment is ready in $InstallRoot"
 } catch {
     $originalFailure = $_
@@ -344,9 +412,14 @@ try {
             Write-Warning "Rollback failed; recovery VHD was preserved at $backupVhd"
         }
     }
+    if (-not $registration -and -not $preserveBackup) {
+        foreach ($partial in @($statePath,$markerPath,$stableVhd)) { if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue } }
+        if ((Test-Path -LiteralPath $InstallRoot) -and (Get-Item -LiteralPath $InstallRoot -Force).PSIsContainer -and -not @(Get-ChildItem -LiteralPath $InstallRoot -Force).Count) { Remove-Item -LiteralPath $InstallRoot -Force -ErrorAction SilentlyContinue }
+    }
     if ($preserveBackup) { throw "$($originalFailure.Exception.Message) Recovery VHD: $backupVhd" }
     throw $originalFailure
 } finally {
+    Close-ValidatedAdvancedArchive $validatedPackage
     foreach ($target in @($stagingRoot,$candidateRoot)) { if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force } }
     if (-not $preserveBackup -and (Test-Path -LiteralPath $backupVhd -PathType Leaf)) { Remove-Item -LiteralPath $backupVhd -Force }
 }

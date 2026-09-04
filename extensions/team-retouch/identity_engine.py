@@ -98,15 +98,27 @@ class IdentityRuntime:
         except ImportError as error:
             raise RuntimeError("人物身份识别缺少 ONNX Runtime") from error
         available = ort.get_available_providers()
+        if provider == "gpu" and "DmlExecutionProvider" not in available:
+            raise RuntimeError(f"DirectML GPU 不可用；当前运行库提供：{', '.join(available) or '无'}")
         providers = ["CPUExecutionProvider"]
         options = ort.SessionOptions()
         if provider != "cpu" and "DmlExecutionProvider" in available:
             options.enable_mem_pattern = False
             options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
-        self.body_session = ort.InferenceSession(str(body_reid_path), sess_options=options, providers=providers)
+        self.fallback_reason = ""
+        try:
+            self.body_session = ort.InferenceSession(str(body_reid_path), sess_options=options, providers=providers)
+            self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
+        except Exception as error:
+            if provider != "auto" or providers == ["CPUExecutionProvider"]:
+                raise
+            providers = ["CPUExecutionProvider"]
+            options = ort.SessionOptions()
+            self.body_session = ort.InferenceSession(str(body_reid_path), sess_options=options, providers=providers)
+            self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
+            self.fallback_reason = f"DirectML 初始化失败，已从原始输入切换 CPU：{error}"
         self.body_input_name = self.body_session.get_inputs()[0].name
-        self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
         self.adaface_input_name = self.adaface_session.get_inputs()[0].name
         self.adaface_output_count = len(self.adaface_session.get_outputs())
         self.provider = self.body_session.get_providers()[0]
@@ -348,6 +360,9 @@ class CompactPairMetrics:
     def __contains__(self, key):
         return bool(self.flags[self._index(key)] & 1)
 
+    def mark_skipped(self, key):
+        self.flags[self._index(key)] = 1 | 16
+
     def __setitem__(self, key, value):
         index = self._index(key)
         self.values[index] = (
@@ -364,6 +379,9 @@ class CompactPairMetrics:
         flags = int(self.flags[index])
         if not flags & 1:
             raise KeyError(key)
+        if flags & 16:
+            return {"skipped": True, "score": 0.0, "faceScore": None, "bodyScore": 0.0,
+                    "faceQuality": 0.0, "qualifies": False, "contradiction": False, "evidence": "same-image"}
         score, face_score, body_score, face_quality = self.values[index]
         return {
             "score": float(score),
@@ -419,6 +437,10 @@ def constrained_clusters(descriptors, metrics_cache=None):
     metrics = metrics_cache if metrics_cache is not None else {}
     for left in range(len(descriptors)):
         for right in range(left + 1, len(descriptors)):
+            if descriptors[left]["photoId"] == descriptors[right]["photoId"]:
+                if hasattr(metrics, "mark_skipped"):
+                    metrics.mark_skipped((left, right))
+                continue
             if (left, right) not in metrics:
                 metrics[(left, right)] = pair_metrics(descriptors[left], descriptors[right])
 

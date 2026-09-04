@@ -14,7 +14,7 @@ if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { throw 'WSL is no
 if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) { throw 'Windows tar.exe is required.' }
 $names = @(& wsl.exe --list --quiet) | ForEach-Object { $_.Replace([string][char]0, '').Trim() } | Where-Object { $_ }
 if ($names -notcontains $DistroName) { throw "WSL distribution not found: $DistroName" }
-& wsl.exe -d $DistroName -u photoflowlab -- bash -lc "test -x `$HOME/miniforge3/envs/pairdetr/bin/python && test -x `$HOME/miniforge3/envs/sam2/bin/python && test -f `$HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin && test -f `$HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt"
+& wsl.exe -d $DistroName -u photoflow -- bash -lc "test -x `$HOME/miniforge3/envs/pairdetr/bin/python && test -x `$HOME/miniforge3/envs/sam2/bin/python && test -f `$HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin && test -f `$HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt"
 if ($LASTEXITCODE -ne 0) { throw 'PairDETR, SAM 2.1, or their checkpoints are incomplete; refusing to create a deployment package.' }
 
 $stage = Join-Path $env:TEMP ('photoflow-advanced-package-' + [Guid]::NewGuid().ToString('N'))
@@ -53,7 +53,7 @@ try {
         advancedRuntimeApiVersion = $AdvancedRuntimeApiVersion
         architecture = 'x64'
         distroName = $DistroName
-        linuxUser = 'photoflowlab'
+        linuxUser = 'photoflow'
         vhdFile = 'PhotoFlowNative.vhdx'
         vhdSha256 = $hash
         installedSizeBytes = $size

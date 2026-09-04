@@ -36,38 +36,44 @@ const deleteLease = async () => { for (let attempt = 0; attempt < 50; attempt +=
     assert.equal(renewed.success, true, 'normal long operation renews through multiple TTL windows');
 
     const zeroUpdate = first.request('team.test.revision-lease.v1', { delayMs: 350, boundary: 'host', marker: 'zero' });
+    const zeroRejected = assert.rejects(zeroUpdate, /租约已失效/);
     await waitForLease(); await deleteLease();
-    await assert.rejects(zeroUpdate, /租约已失效/);
+    await zeroRejected;
     assert.equal(lifecycleCalls, 0, 'zero-row renewal aborts before the Host side effect');
 
     const blocked = first.request('team.test.revision-lease.v1', { delayMs: 1000, blockEventLoop: true, boundary: 'host', marker: 'blocked' });
+    const blockedRejected = assert.rejects(blocked, /租约已失效/, 'event-loop stalls beyond TTL fail closed');
     await waitForLease(); await deleteLease();
-    await assert.rejects(blocked, /租约已失效/, 'event-loop stalls beyond TTL fail closed');
+    await blockedRejected;
     assert.equal(lifecycleCalls, 0);
 
     const oldDb = first.request('team.test.revision-lease.v1', { delayMs: 1100, marker: 'old-db' });
+    const oldDbRejected = assert.rejects(oldDb, /租约已失效/, 'the old process cannot write after takeover');
     await waitForLease(); await deleteLease();
     const takeover = await second.request('team.test.revision-lease.v1', { marker: 'new-owner' });
     assert.equal(takeover.success, true, 'a second process can take over an abandoned lease');
-    await assert.rejects(oldDb, /租约已失效/, 'the old process cannot write after takeover');
+    await oldDbRejected;
 
     const oldFile = first.request('team.test.revision-lease.v1', { delayMs: 1100, boundary: 'file', marker: 'old-file' });
+    const oldFileRejected = assert.rejects(oldFile, /租约已失效/, 'the old process cannot publish a persistent file after takeover');
     await waitForLease(); await deleteLease();
     await second.request('team.test.revision-lease.v1', { boundary: 'file', marker: 'new-owner-file' });
-    await assert.rejects(oldFile, /租约已失效/, 'the old process cannot publish a persistent file after takeover');
+    await oldFileRejected;
     assert.equal(JSON.parse(fs.readFileSync(path.join(dataPath, 'lease-test.json'), 'utf8')).request, 'new-owner-file', 'stale rollback cannot delete or overwrite the successor file');
 
     const oldJournal = first.request('team.test.revision-lease.v1', { delayMs: 1100, boundary: 'journal', marker: 'old-journal' });
+    const oldJournalRejected = assert.rejects(oldJournal, /租约已失效/, 'stale owner cannot append a misleading committed journal record');
     await waitForLease(); await deleteLease();
     await second.request('team.test.revision-lease.v1', { boundary: 'journal', marker: 'new-journal' });
-    await assert.rejects(oldJournal, /租约已失效/, 'stale owner cannot append a misleading committed journal record');
+    await oldJournalRejected;
     const journal = fs.readFileSync(path.join(dataPath, 'command-log', 'operations.ndjson'), 'utf8');
     assert.match(journal, /new-journal/); assert.doesNotMatch(journal, /old-journal/);
 
     const oldWorkflow = first.request('team.test.revision-lease.v1', { delayMs: 1100, boundary: 'workflow-stage', marker: 'old-workflow' });
+    const oldWorkflowRejected = assert.rejects(oldWorkflow, /租约已失效/, 'stale workflow owner cannot publish or roll back after takeover');
     await waitForLease(); await deleteLease();
     await second.request('team.test.revision-lease.v1', { boundary: 'workflow-stage', marker: 'new-workflow' });
-    await assert.rejects(oldWorkflow, /租约已失效/, 'stale workflow owner cannot publish or roll back after takeover');
+    await oldWorkflowRejected;
     assert.equal(fs.readFileSync(path.join(dataPath, 'lease-workflow-test', 'workflow', 'owner.txt'), 'utf8'), 'new-workflow');
     assert.equal(fs.readdirSync(path.join(dataPath, 'lease-workflow-test')).some(name => name.startsWith('.stage-')), true, 'stale owner stage remains isolated for validated resume or bounded collection');
 

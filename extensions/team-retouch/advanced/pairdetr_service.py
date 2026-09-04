@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
-from PIL import Image
+import numpy as np
+from image_safety import open_validated
 from torchvision.ops import nms
 
-Image.MAX_IMAGE_PIXELS = None
 from transformers import AutoImageProcessor, DeformableDetrConfig
 from transformers import DeformableDetrForObjectDetection
 
@@ -32,6 +35,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shortest-edge", type=int, default=480)
     parser.add_argument("--longest-edge", type=int, default=768)
     parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
 
@@ -54,6 +58,7 @@ def load_runtime(args: argparse.Namespace):
     model = PairDetr(DeformableDetrForObjectDetection(config), 1500, 3)
 
     checkpoint_path = checkpoint_dir / "pytorch_model.bin"
+    verify_locked_checkpoint(checkpoint_path)
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     incompatible = model.load_state_dict(checkpoint, strict=False)
 
@@ -67,9 +72,24 @@ def load_runtime(args: argparse.Namespace):
     return model, processor, device, incompatible, forward
 
 
+def verify_locked_checkpoint(checkpoint_path: Path):
+    lock_path = Path.home() / "model-lab/release-locks/checkpoints.sha256"
+    if not lock_path.is_file():
+        raise RuntimeError("Reviewed checkpoint SHA-256 lock is missing")
+    expected = next((line.split()[0].lower() for line in lock_path.read_text(encoding="utf-8").splitlines() if line.strip() and line.split()[-1].lstrip("*").endswith(checkpoint_path.name)), "")
+    if len(expected) != 64:
+        raise RuntimeError(f"Checkpoint SHA-256 is not locked: {checkpoint_path.name}")
+    digest = hashlib.sha256()
+    with checkpoint_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""): digest.update(chunk)
+    if digest.hexdigest() != expected:
+        raise RuntimeError(f"Checkpoint SHA-256 mismatch: {checkpoint_path.name}")
+
+
 def infer_image(runtime, image_path: Path, args: argparse.Namespace):
     model, processor, device, incompatible, forward = runtime
-    image = Image.open(image_path).convert("RGB")
+    with open_validated(image_path, role="original", mode="RGB", max_edge=args.longest_edge) as opened:
+        image = opened.copy()
     inputs = processor(images=image, return_tensors="pt")
     pixel_values = inputs["pixel_values"].to(device)
     torch.cuda.reset_peak_memory_stats(device)
@@ -182,15 +202,17 @@ def write_result(output_path: Path | None, payload):
 
 
 def serve(args: argparse.Namespace, runtime) -> None:
-    print(json.dumps({"type": "ready", "device": torch.cuda.get_device_name(runtime[2])}), flush=True)
+    print(json.dumps({"type": "ready", "protocolVersion": 1, "device": torch.cuda.get_device_name(runtime[2])}), flush=True)
     for line in sys.stdin:
         try:
             request = json.loads(line)
             if request.get("payload_b64"):
                 request = json.loads(base64.b64decode(request["payload_b64"]).decode("utf-8"))
             if request.get("action") == "shutdown":
-                print(json.dumps({"type": "stopped"}), flush=True)
+                print(json.dumps({"success": True, "requestId": request.get("requestId"), "protocolVersion": 1, "type": "stopped"}), flush=True)
                 return
+            if request.get("protocolVersion") != 1 or not request.get("requestId"):
+                raise ValueError("protocolVersion=1 and requestId are required")
             request_args = argparse.Namespace(**{
                 **vars(args),
                 "pair_threshold": float(request.get("pair_threshold", args.pair_threshold)),
@@ -199,14 +221,24 @@ def serve(args: argparse.Namespace, runtime) -> None:
             image_path = Path(request["image"]).resolve()
             report, payload = infer_image(runtime, image_path, request_args)
             write_result(Path(request["boxes_output"]).resolve(), payload)
-            print(json.dumps({"success": True, "report": report}, ensure_ascii=False), flush=True)
+            print(json.dumps({"success": True, "requestId": request["requestId"], "protocolVersion": 1, "report": report}, ensure_ascii=False), flush=True)
         except Exception as error:
-            print(json.dumps({"success": False, "error": str(error)}, ensure_ascii=False), flush=True)
+            print(json.dumps({"success": False, "requestId": request.get("requestId") if isinstance(request, dict) else None, "protocolVersion": 1, "error": str(error)}, ensure_ascii=False), flush=True)
 
 
 def main() -> None:
     args = parse_args()
     runtime = load_runtime(args)
+    if args.self_test:
+        with tempfile.TemporaryDirectory() as directory:
+            image_path = Path(directory) / "self-test.png"
+            pixels = np.indices((64, 64)).sum(axis=0) % 2 * 255
+            Image.fromarray(pixels.astype("uint8"), "L").convert("RGB").save(image_path)
+            report, _payload = infer_image(runtime, image_path, args)
+            if not report["finite_logits"] or not report["finite_boxes"] or not all(report["logits_shape"]) or not all(report["boxes_shape"]):
+                raise RuntimeError("PairDETR self-test failed")
+        print("PAIRDETR_SELF_TEST_OK")
+        return
     if args.serve:
         serve(args, runtime)
         return

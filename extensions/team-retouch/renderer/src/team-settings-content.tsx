@@ -58,7 +58,8 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
   };
   const advanced = advancedEnvironmentPresentation(environment, environmentLoading, environmentFailed);
   const developmentRuntime = environment?.runtimeSource === 'development';
-  const canManageEnvironment = !environmentLoading && !environmentFailed && !developmentRuntime;
+  const buildWithoutAdvanced = environment?.errorCategory === 'advanced-package-not-in-build';
+  const canManageEnvironment = !environmentLoading && !environmentFailed && !developmentRuntime && !buildWithoutAdvanced;
   return <>
     <SettingsGroup title="人物检测增强版">
       <SettingsRow title="PairDETR + SAM 2.1" description="改善多人、遮挡和精细分割效果。" align="start">
@@ -68,7 +69,7 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
           <div className="team-settings-actions">
             {(advanced.state === 'error' || advanced.state === 'unavailable') && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void refreshEnvironment()} disabled={Boolean(busy)}><RotateCcw size={14}/>重新检查</button>}
             {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('检查安装条件', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败')); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>}
-            {canManageEnvironment && <button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.install.v1', { repair: true }), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>}
+            {canManageEnvironment && <button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.install.v1'), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>}
             {canManageEnvironment && <button type="button" className="pf-button pf-button-danger" onClick={() => void run('卸载增强版', async () => { if (!await appDialog.confirm({ title: '卸载人物检测增强版吗？', message: '将删除 PairDETR、SAM 2.1 和独立运行环境；基础检测和身份识别不受影响。', confirmLabel: '卸载增强版', tone: 'danger' })) return false; assertSuccess(await durableRpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); applyLifecycleResult({ success: true, state: 'not-installed', installed: false, runtimeSource: 'packaged' }); return true; })} disabled={Boolean(busy)}>卸载</button>}
           </div>
         </div>

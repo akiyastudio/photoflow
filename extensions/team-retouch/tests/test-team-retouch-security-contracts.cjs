@@ -18,7 +18,10 @@ for (const scriptPath of [setupPath, uninstallPath]) {
 }
 
 assert.doesNotMatch(setup, /PHOTOFLOW_COMPONENT_ADVANCED_PACKAGE_SHA256/);
-assert.match(setup, /\$ExpectedPackageSha256 = \$declaredPackageSha256/);
+assert.doesNotMatch(setup, /\$ExpectedPackageSha256 = \$declaredPackageSha256/);
+assert.match(setup, /FileShare\]::Read, 8MB/);
+assert.match(setup, /ZipArchive\]::new\(\$packageStream/);
+assert.match(setup, /Copy-ValidatedVhdEntry/);
 assert.match(setup, /Installed component root must not be a reparse point/);
 assert.match(setup, /Installed component manifest escaped the component root/);
 assert.match(setup, /Assert-RegistrationBasePath \$DistroName \$InstallRoot/);
@@ -32,6 +35,8 @@ assert.match(packaging, /offlinePackage=\{path:advancedPackageName,sha256:/);
 assert.match(packaging, /ZIP_STORED if item\.suffix\.lower\(\)=="\.zip"/);
 assert.match(setup, /\$candidateRegistered = \[bool\]\(Get-DistroRegistration \$candidateName\)/);
 assert.match(setup, /Rollback failed; recovery VHD was preserved/);
+for (const point of ['candidate-copy','candidate-import','candidate-probe','backup','old-unregister','final-copy','final-import','final-probe','state-write']) assert(setup.includes(`Invoke-TestFault '${point}'`), `installer fault point missing: ${point}`);
+assert.match(setup, /-not \$registration -and -not \$preserveBackup/);
 for (const digest of [
   '6041dded9177d5bd0bca9e3aa264ceb99ec1ff7b0d53320d2433587704840fca',
   '8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4',

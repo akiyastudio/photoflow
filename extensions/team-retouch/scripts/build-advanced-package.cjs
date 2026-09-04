@@ -5,6 +5,10 @@ const { spawnSync } = require('child_process');
 
 if (process.platform !== 'win32') throw new Error('The prepared advanced engine package can only be exported on Windows with WSL 2.');
 const root = path.resolve(__dirname, '..');
+const releaseLock = path.join(root, 'advanced', 'release-lock.json');
+if (!fs.existsSync(releaseLock)) throw new Error('Reviewed advanced dependency/checkpoint lock is missing; refusing to export an advanced release package.');
+const lock = JSON.parse(fs.readFileSync(releaseLock, 'utf8'));
+if (lock.version !== 1 || !Array.isArray(lock.artifacts) || !lock.artifacts.length) throw new Error('Advanced release lock is incomplete.');
 const componentManifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
 const version = componentManifest.version;
 const advancedRuntimeApiVersion = Number(componentManifest.advancedRuntime?.apiVersion);

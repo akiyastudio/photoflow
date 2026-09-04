@@ -10,9 +10,9 @@ import sys
 import cv2
 import numpy as np
 from PIL import ExifTags, Image, ImageOps
+from image_safety import open_validated
 
 
-Image.MAX_IMAGE_PIXELS = None
 
 
 # TIFF's primary IFD also contains image-layout fields such as strip offsets.
@@ -77,8 +77,8 @@ def safe_exif_bytes(image):
         return None
 
 
-def load_rgb(path):
-    with Image.open(path) as source:
+def load_rgb(path, role="original"):
+    with open_validated(path, role=role) as source:
         source.load()
         oriented = ImageOps.exif_transpose(source)
         metadata = {
@@ -338,7 +338,7 @@ def task_mask_weights(task, image_width, image_height, crop):
     if not mask_path or not os.path.isfile(mask_path):
         raise ValueError(f"Patch {task.get('id')} 缺少可信人物遮罩，已拒绝合并")
     try:
-        with Image.open(mask_path) as source:
+        with open_validated(mask_path, role="work", peak_bytes_per_pixel=4) as source:
             source.load()
             full_proxy = np.asarray(source.convert("L"))
     except (OSError, ValueError) as error:
@@ -433,10 +433,12 @@ def merge(input_path, manifest_path, output_path):
             continue
         crop = task["crop"]
         x, y, crop_width, crop_height = (int(crop[key]) for key in ("x", "y", "width", "height"))
+        if crop_width <= 0 or crop_height <= 0:
+            raise ValueError(f"人物 {task.get('id') or ''} 的合并尺寸必须大于零")
         if x < 0 or y < 0 or x + crop_width > width or y + crop_height > height:
             raise ValueError(f"Patch {task.get('id')} 的坐标超出原图")
         base_crop = base_rgb[y:y + crop_height, x:x + crop_width]
-        edited_rgb, _ = load_rgb(edited_path)
+        edited_rgb, _ = load_rgb(edited_path, role="work")
         returned_height, returned_width = edited_rgb.shape[:2]
         aspect_delta = abs(np.log(max(1e-6, (returned_width / max(1, returned_height)) / (crop_width / max(1, crop_height)))))
         dimension_scale = float(np.sqrt((returned_width * returned_height) / max(1, crop_width * crop_height)))

@@ -8,7 +8,7 @@ from PIL import Image
 import sys
 ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT))
 import advanced_bridge
-import identity_engine, team_retouch
+import identity_engine, team_retouch, image_safety
 from team_retouch import bounded_planning_box, emit_progress, identify_people, match_returned_batch, maximize_assignment, plan_work_tiles, spatially_order_people
 from patch_merge import align_patch, constrain_person_boundary, edit_weight_and_delta, fuse_patch_delta, merge
 
@@ -31,6 +31,19 @@ def main():
         manifest.write_text(json.dumps({'returned':[{'path':str(returned),'returnId':'r'}],'candidates':[{'patchPath':str(candidate),'taskId':'t'}]}),encoding='utf-8')
         with redirect_stdout(io.StringIO()): matched=match_returned_batch(str(manifest))
         assert matched['matches'][0]['confidence']!='high', 'constant black and white images must not auto-match at high confidence'
+        patterns={
+            'constant':np.zeros((128,128),np.uint8),
+            'two-color':np.pad(np.zeros((128,64),np.uint8),((0,0),(0,64)),constant_values=255),
+            'gradient':np.tile(np.arange(128,dtype=np.uint8),(128,1)),
+            'low-noise':np.random.default_rng(7).integers(124,130,(128,128),dtype=np.uint8),
+            'normal':np.random.default_rng(11).integers(0,256,(128,128),dtype=np.uint8),
+        }
+        quality={}
+        for name,pixels in patterns.items():
+            target=root/f'{name}.png'; Image.fromarray(pixels,'L').save(target)
+            quality[name]=team_retouch.match_information_sufficient(team_retouch.describe_match_image(target))
+        assert not any(quality[name] for name in ('constant','two-color','gradient','low-noise')), quality
+        assert quality['normal'], quality
     with mock.patch.object(advanced_bridge, 'script_path', side_effect=lambda name: ROOT/'advanced'/name), \
          mock.patch.object(advanced_bridge, 'wsl_path', side_effect=lambda path: f"/mnt/c/{Path(path).name}"), \
          mock.patch.object(advanced_bridge, 'run_shell', side_effect=[subprocess.TimeoutExpired(['wsl.exe'], 12), '']) as run_shell:
@@ -44,23 +57,42 @@ def main():
     assert [path.name for path in sorted([Path('mask-100.png'),Path('mask-2.png'),Path('mask-11.png')],key=advanced_bridge._mask_sort_key)]==['mask-2.png','mask-11.png','mask-100.png']
     class FakeProcess:
         def __init__(self, stdout=None, stderr=None):
-            self.stdin=io.BytesIO(); self.stdout=io.BytesIO(stdout if stdout is not None else b'{"type":"ready"}\n{"success":true,"value":7}\n'); self.stderr=io.BytesIO(stderr if stderr is not None else b'diagnostic-tail')
+            self.stdin=io.BytesIO(); self.stdout=io.BytesIO(stdout if stdout is not None else b'{"type":"ready","protocolVersion":1}\n{"success":true,"protocolVersion":1,"requestId":"req","value":7}\n{"success":true,"protocolVersion":1,"requestId":"req","type":"stopped"}\n'); self.stderr=io.BytesIO(stderr if stderr is not None else b'diagnostic-tail')
             self.returncode=None
         def poll(self): return self.returncode
         def wait(self,timeout=None): self.returncode=0; return 0
         def terminate(self): self.returncode=0
         def kill(self): self.returncode=-9
-    burst=b''.join(f'diagnostic-{index}\n'.encode() for index in range(400))+b'{"type":"ready"}\n{"success":true,"value":7}\n'
+    burst=b''.join(f'diagnostic-{index}\n'.encode() for index in range(400))+b'{"type":"ready","protocolVersion":1}\n{"success":true,"protocolVersion":1,"requestId":"stale","value":1}\n{"success":true,"protocolVersion":1,"requestId":"req","value":7}\n{"success":true,"protocolVersion":1,"requestId":"req","type":"stopped"}\n'
     fake_process=FakeProcess(burst, b'x'*20000)
     with mock.patch.object(advanced_bridge,'distro_candidates',return_value=('FakeDistro',)), \
          mock.patch.object(advanced_bridge,'wsl_path',return_value='/component/service.py'), \
-         mock.patch.object(advanced_bridge.subprocess,'Popen',return_value=fake_process):
+         mock.patch.object(advanced_bridge.subprocess,'Popen',return_value=fake_process), \
+         mock.patch.object(advanced_bridge.uuid,'uuid4',return_value=type('Id',(),{'hex':'req'})()):
         bridge=advanced_bridge._WslJsonService('/python',Path('service.py'))
         assert len(bridge.reader_threads)==2, 'one fixed reader per stdout/stderr is created for the process'
         assert bridge.request({'action':'test'},timeout=1)['value']==7
         readers=list(bridge.reader_threads)
         bridge.close()
         assert all(not worker.is_alive() for worker in readers), 'normal close joins both fixed reader threads'
+    concurrent_process=FakeProcess(b'{"type":"ready","protocolVersion":1}\n{"success":true,"protocolVersion":1,"requestId":"a","value":1}\n{"success":true,"protocolVersion":1,"requestId":"b","value":2}\n')
+    ids=[type('Id',(),{'hex':'a'})(),type('Id',(),{'hex':'b'})()]
+    with mock.patch.object(advanced_bridge,'distro_candidates',return_value=('FakeDistro',)), \
+         mock.patch.object(advanced_bridge,'wsl_path',return_value='/component/service.py'), \
+         mock.patch.object(advanced_bridge.subprocess,'Popen',return_value=concurrent_process), \
+         mock.patch.object(advanced_bridge.uuid,'uuid4',side_effect=ids):
+        bridge=advanced_bridge._WslJsonService('/python',Path('service.py')); values=[]
+        workers=[threading.Thread(target=lambda: values.append(bridge.request({'action':'test'},timeout=1)['value'])) for _ in range(2)]
+        for worker in workers: worker.start()
+        for worker in workers: worker.join()
+        assert sorted(values)==[1,2], values
+        bridge._close_process(force=True)
+    closed=[]
+    session=advanced_bridge.AdvancedBatchSession(); session.sam=type('Bad',(),{'close':lambda _self:(_ for _ in ()).throw(RuntimeError('sam close'))})(); session.pair=type('Good',(),{'close':lambda _self:closed.append('pair')})()
+    try: session.__exit__(None,None,None)
+    except RuntimeError: pass
+    else: raise AssertionError('close failure must remain observable')
+    assert closed==['pair'], 'both advanced services close best-effort even if one fails'
     startup_process=FakeProcess(b'', b'startup-timeout')
     existing_reader_ids={worker.ident for worker in threading.enumerate() if worker.name.startswith('photoflow-wsl-')}
     with mock.patch.object(advanced_bridge,'distro_candidates',return_value=('FakeDistro',)), \
@@ -71,7 +103,7 @@ def main():
         except RuntimeError as error: assert 'startup timed out' in str(error)
         else: raise AssertionError('startup timeout must fail')
         assert all(worker.ident in existing_reader_ids for worker in threading.enumerate() if worker.name.startswith('photoflow-wsl-')), 'startup timeout leaves no reader thread alive'
-    timeout_process=FakeProcess(b'{"type":"ready"}\n', b'request-timeout')
+    timeout_process=FakeProcess(b'{"type":"ready","protocolVersion":1}\n', b'request-timeout')
     with mock.patch.object(advanced_bridge,'distro_candidates',return_value=('FakeDistro',)), \
          mock.patch.object(advanced_bridge,'wsl_path',return_value='/component/service.py'), \
          mock.patch.object(advanced_bridge.subprocess,'Popen',return_value=timeout_process):
@@ -89,13 +121,16 @@ def main():
         assert output.exists() and Image.open(output).size==(32,32)
         assert merged['metrics'][0]['resized'], 'different return dimensions must still be normalized to the work crop'
         for invalid_name, invalid_setup in [('missing', lambda: None), ('zero', lambda: Image.new('L',(16,16),0).save(mask)), ('corrupt', lambda: mask.write_bytes(b'not-an-image'))]:
+            output.unlink(missing_ok=True)
             mask.unlink(missing_ok=True); invalid_setup()
             try: merge(str(base),str(manifest),str(output))
             except ValueError as error: assert '遮罩' in str(error), invalid_name
             else: raise AssertionError(f'{invalid_name} person mask must fail closed')
+            assert not output.exists(), f'{invalid_name} mask failure must not leave output'
     # A successful PairDETR pass is not committed unless SAM also succeeds.
     fake_rtm=[{'box':[1,1,9,19],'score':.9,'mask':np.ones((20,20),np.uint8)}]
-    advanced=type('Advanced',(),{'run_pairdetr':lambda *_:[{'box':[1,1,9,19],'score':.9},{'box':[11,1,19,19],'score':.8}], 'run_sam2':lambda *_:(_ for _ in ()).throw(RuntimeError('sam failed'))})()
+    calls=[]
+    advanced=type('Advanced',(),{'run_pairdetr':lambda *_:(calls.append('pair') or [{'box_xyxy':[1,1,9,19],'pair_score':.9},{'box_xyxy':[11,1,19,19],'pair_score':.8}]), 'run_sam2':lambda *_:(calls.append('sam') or (_ for _ in ()).throw(RuntimeError('sam failed')))})()
     with tempfile.TemporaryDirectory() as temporary, \
          mock.patch.object(team_retouch,'load_rgb',return_value=np.zeros((20,20,3),np.uint8)), \
          mock.patch.object(team_retouch,'infer_rtmdet',return_value=fake_rtm), \
@@ -103,6 +138,7 @@ def main():
         fake_session=type('Session',(),{'get_providers':lambda _self:['CPUExecutionProvider']})()
         result=team_retouch.detect('input.jpg',temporary,session_bundle=(fake_session,['CPUExecutionProvider'],'cpu'),advanced_runner=advanced,advanced_mode='auto')
         assert result['personCount']==1 and result['detector']=='rtmdet-ins-m' and not result['advancedBackend']
+        assert calls==['pair','sam'], calls
     # The current identity contract uses path/manualIdentityId; sourcePath is rejected.
     with tempfile.TemporaryDirectory() as temporary:
         root=Path(temporary); image=root/'photo.png'; Image.new('RGB',(24,24),'gray').save(image)
@@ -120,8 +156,26 @@ def main():
                 for descriptor in descriptors: descriptor.pop('bodyInput'); descriptor['body']=np.ones(4,np.float32)/2; descriptor['bodyBackend']='fake-body'
         valid=root/'valid.json'; valid.write_text(json.dumps({'subjects':[{'key':'x','photoId':'p','path':str(image),'manualIdentityId':'known','bbox':{'x':0,'y':0,'width':20,'height':20}}]}),encoding='utf-8')
         assert identify_people(str(valid),runtime=FakeRuntime())['subjectCount']==1
+        many_subjects=[{'key':str(index),'photoId':'many','path':str(image),'manualIdentityId':None,'bbox':{'x':0,'y':0,'width':20,'height':20}} for index in range(37)]
+        valid.write_text(json.dumps({'subjects':many_subjects}),encoding='utf-8')
+        batches=[]
+        class BatchRuntime(FakeRuntime):
+            def describe(self,rgb,item):
+                return {'key':item['key'],'photoId':item['photoId'],'manualIdentityId':None,'face':None,'faceQuality':0,'bodyInput':np.zeros((3,256,128),np.float32),'bodyQuality':0}
+            def embed_bodies(self,descriptors):
+                batches.append(len(descriptors))
+                for descriptor in descriptors: descriptor.pop('bodyInput'); descriptor['body']=np.ones(4,np.float32)/2; descriptor['bodyBackend']='fake-body'
+        identify_people(str(valid),runtime=BatchRuntime())
+        assert batches==[12,12,12,1], batches
     compact=identity_engine.CompactPairMetrics(2000)
     assert compact.values.nbytes+compact.flags.nbytes < 40*1024*1024, '2000-subject pair cache must stay compact and bounded'
+    compact.mark_skipped((0,1)); assert compact[(0,1)]['skipped'] and compact[(0,1)]['evidence']=='same-image'
+    with mock.patch.dict('os.environ',{'PHOTOFLOW_TEST_PHYSICAL_MEMORY_BYTES':str(8*1024**3)}):
+        image_safety.validate_dimensions(100,100)
+        for dimensions,role in [((0,10),'original'),((65536,1),'original'),((8000,6000),'work')]:
+            try: image_safety.validate_dimensions(*dimensions,role=role)
+            except ValueError: pass
+            else: raise AssertionError(f'unsafe dimensions accepted: {dimensions} {role}')
     # Supplied face boxes on constant pixels must not become high-quality evidence.
     runtime=identity_engine.IdentityRuntime.__new__(identity_engine.IdentityRuntime)
     runtime._detect_faces=lambda *_: []

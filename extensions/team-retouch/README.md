@@ -7,10 +7,10 @@ This directory is the complete source, test, and release boundary for the option
 ```powershell
 npm ci
 npm test
-npm run package
+npm run package:base
 ```
 
-`npm test` runs renderer typechecking, ESLint, the production Vite build, Node service/UI contracts, and Python algorithm tests. `npm run package` validates the four required ONNX assets, builds the renderer and PyInstaller runtime, copies only the service modules and two advanced-runtime lifecycle scripts, refreshes lifecycle SHA-256 values, verifies `requiredFiles`, and creates `dist/PhotoFlow-*.zip`.
+`npm test` runs renderer typechecking, ESLint, the production Vite build, Node service/UI contracts, and Python algorithm tests. `npm run package` and `npm run package:base` intentionally create a basic-only developer package: its generated manifest has no advanced lifecycle, no `offlinePackage`, and no install/repair capability. `npm run package:host` is the only formal Host-release command; it requires a reviewed advanced release lock, builds or locates the version-matched offline ZIP, packages with `--with-advanced`, and verifies the final manifest, digest, `requiredFiles`, and embedded ZIP. Every packaging path runs typecheck, lint, Node/Python behavior tests, and the renderer build before producing an archive.
 
 The manifest keeps its package `apiVersion`, Component Host manifest `contractVersion`, and the advanced runtime's private `apiVersion`. Public Host capabilities themselves are unversioned; `team.*.v1` names are private renderer-to-service RPC names owned by this component.
 
@@ -21,3 +21,5 @@ New databases are created directly as `schema_version=10`. Existing schema-10 de
 No previous-component storage adoption, project-output adoption, name/status workflow lookup, or old Host-field fallback is shipped. `migration-backups/` contains user/developer archives only and is never listed in the manifest or copied into a package.
 
 The advanced backend uses only the `PhotoFlowNative` WSL distribution. Its failure still falls back to the basic RTMDet path. End-user lifecycle scripts consume only the signed offline archive inside the component and never perform a network build.
+
+Advanced release preparation is deliberately fail-closed until the reviewed `advanced/release-lock.json` and hash-complete `advanced/locks/{pairdetr-requirements.lock,sam2-requirements.lock,checkpoints.sha256}` are present. Freeze output is retained only as evidence; it is never accepted as an installation input. These reviewed locks are not generated from the network during packaging.

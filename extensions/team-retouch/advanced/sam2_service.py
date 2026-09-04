@@ -5,16 +5,20 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
+import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
 from PIL import Image, ImageDraw
+from image_safety import inspect_dimensions, open_validated
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-Image.MAX_IMAGE_PIXELS = None
 
 COLORS = [
     (255, 99, 71),
@@ -42,28 +46,40 @@ def parse_args() -> argparse.Namespace:
         default=Path.home() / "model-lab/checkpoints/sam2/sam2.1_hiera_large.pt",
     )
     parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
 
 def load_runtime(args: argparse.Namespace):
     device = torch.device("cuda:0")
+    precision = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    verify_locked_checkpoint(args.checkpoint.resolve())
     model = build_sam2(
         "configs/sam2.1/sam2.1_hiera_l.yaml",
         str(args.checkpoint.resolve()),
         device=device,
         apply_postprocessing=False,
     )
-    return SAM2ImagePredictor(model), device
+    return SAM2ImagePredictor(model), device, precision
+
+
+def verify_locked_checkpoint(checkpoint_path: Path):
+    lock_path = Path.home() / "model-lab/release-locks/checkpoints.sha256"
+    if not lock_path.is_file(): raise RuntimeError("Reviewed checkpoint SHA-256 lock is missing")
+    expected = next((line.split()[0].lower() for line in lock_path.read_text(encoding="utf-8").splitlines() if line.strip() and line.split()[-1].lstrip("*").endswith(checkpoint_path.name)), "")
+    if len(expected) != 64: raise RuntimeError(f"Checkpoint SHA-256 is not locked: {checkpoint_path.name}")
+    digest = hashlib.sha256()
+    with checkpoint_path.open("rb") as source:
+        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""): digest.update(chunk)
+    if digest.hexdigest() != expected: raise RuntimeError(f"Checkpoint SHA-256 mismatch: {checkpoint_path.name}")
 
 
 def infer_image(runtime, image_path: Path, boxes_path: Path, max_image_edge: int):
-    predictor, device = runtime
-    source_image = Image.open(image_path).convert("RGB")
-    original_size = source_image.size
+    predictor, device, precision = runtime
+    original_size = inspect_dimensions(image_path, role="original")
+    with open_validated(image_path, role="original", mode="RGB", max_edge=max_image_edge) as opened:
+        source_image = opened.copy()
     proxy_scale = min(1.0, max_image_edge / max(original_size))
-    if proxy_scale < 1.0:
-        proxy_size = tuple(round(value * proxy_scale) for value in original_size)
-        source_image = source_image.resize(proxy_size, Image.Resampling.LANCZOS)
     image = np.asarray(source_image).copy()
     box_payload = json.loads(boxes_path.read_text(encoding="utf-8"))
     boxes = np.asarray(
@@ -74,7 +90,7 @@ def infer_image(runtime, image_path: Path, boxes_path: Path, max_image_edge: int
         raise RuntimeError("PairDETR produced no body boxes for SAM 2.1")
 
     torch.cuda.reset_peak_memory_stats(device)
-    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+    with torch.inference_mode(), torch.autocast("cuda", dtype=precision):
         predictor.set_image(image)
         masks, scores, _ = predictor.predict(box=boxes, multimask_output=False)
     torch.cuda.synchronize(device)
@@ -86,6 +102,7 @@ def infer_image(runtime, image_path: Path, boxes_path: Path, max_image_edge: int
     report = {
         "device": torch.cuda.get_device_name(device),
         "torch": torch.__version__,
+        "precision": "bf16" if precision == torch.bfloat16 else "fp16",
         "checkpoint": str(Path.home() / "model-lab/checkpoints/sam2/sam2.1_hiera_large.pt"),
         "original_image_size": list(original_size),
         "inference_image_shape": list(image.shape),
@@ -133,28 +150,41 @@ def write_result(output_dir: Path | None, result):
 
 
 def serve(args: argparse.Namespace, runtime) -> None:
-    print(json.dumps({"type": "ready", "device": torch.cuda.get_device_name(runtime[1])}), flush=True)
+    print(json.dumps({"type": "ready", "protocolVersion": 1, "device": torch.cuda.get_device_name(runtime[1])}), flush=True)
     for line in __import__("sys").stdin:
         try:
             request = json.loads(line)
             if request.get("payload_b64"):
                 request = json.loads(base64.b64decode(request["payload_b64"]).decode("utf-8"))
             if request.get("action") == "shutdown":
-                print(json.dumps({"type": "stopped"}), flush=True)
+                print(json.dumps({"success": True, "requestId": request.get("requestId"), "protocolVersion": 1, "type": "stopped"}), flush=True)
                 return
+            if request.get("protocolVersion") != 1 or not request.get("requestId"):
+                raise ValueError("protocolVersion=1 and requestId are required")
             result = infer_image(
                 runtime, Path(request["image"]).resolve(), Path(request["boxes"]).resolve(),
                 int(request.get("max_image_edge", args.max_image_edge)),
             )
             write_result(Path(request["output_dir"]).resolve(), result)
-            print(json.dumps({"success": True, "report": result[0]}, ensure_ascii=False), flush=True)
+            print(json.dumps({"success": True, "requestId": request["requestId"], "protocolVersion": 1, "report": result[0]}, ensure_ascii=False), flush=True)
         except Exception as error:
-            print(json.dumps({"success": False, "error": str(error)}, ensure_ascii=False), flush=True)
+            print(json.dumps({"success": False, "requestId": request.get("requestId") if isinstance(request, dict) else None, "protocolVersion": 1, "error": str(error)}, ensure_ascii=False), flush=True)
 
 
 def main() -> None:
     args = parse_args()
     runtime = load_runtime(args)
+    if args.self_test:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); image_path = root / "self-test.png"; boxes_path = root / "boxes.json"
+            pixels = np.zeros((64, 64, 3), dtype=np.uint8); pixels[16:48, 20:44] = 255
+            Image.fromarray(pixels, "RGB").save(image_path)
+            boxes_path.write_text(json.dumps({"boxes": [{"box_xyxy": [16, 12, 48, 52]}]}), encoding="utf-8")
+            report = infer_image(runtime, image_path, boxes_path, 64)[0]
+            if not report["finite_scores"] or report["nonempty_masks"] != 1:
+                raise RuntimeError("SAM 2.1 self-test failed")
+        print("SAM2_SELF_TEST_OK")
+        return
     if args.serve:
         serve(args, runtime)
         return

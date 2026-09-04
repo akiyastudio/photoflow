@@ -37,11 +37,12 @@
     "test:python": ".venv\\Scripts\\python.exe tests/test-team-retouch.py && .venv\\Scripts\\python.exe tests/test-team-retouch-progress-folder-policy.py",
     "test": "npm run setup:python && npm run typecheck && npm run lint && npm run build && npm run test:node && npm run test:python",
     "setup:python": "node scripts/setup-python.cjs",
-    "package": "node scripts/package-component.cjs",
-    "package:host": "node scripts/package-component.cjs",
+    "package": "npm run package:base",
+    "package:base": "node scripts/package-component.cjs",
+    "package:host": "node scripts/package-host.cjs",
     "package:advanced": "node scripts/build-advanced-package.cjs",
-    "package:bundle": "npm run package:advanced && node scripts/package-component.cjs --with-advanced",
-    "package:with-advanced": "npm run package:bundle"
+    "package:bundle": "node scripts/package-host.cjs",
+    "package:with-advanced": "node scripts/package-host.cjs"
   },
   "devDependencies": {
     "@eslint/js": "^8.57.1",

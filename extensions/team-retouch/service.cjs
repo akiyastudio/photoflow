@@ -341,7 +341,21 @@ const hostTask = async (parentId, operationId, action, update = {}, topic = '') 
   if (topic) await emitProgress(parentId, topic, update).catch(() => undefined);
   return result;
 };
-const lifecycleAction = (parentId, action) => callHost(parentId, 'component.lifecycle', { action });
+const packagedAdvancedDescriptor = (() => {
+  const manifestPath = path.join(__dirname, 'component.json');
+  if (!fs.existsSync(manifestPath)) return null; // source/development runtime
+  try {
+    const value = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const offline = value?.advancedRuntime?.offlinePackage;
+    return offline && typeof offline.path === 'string' && /^[a-f0-9]{64}$/i.test(String(offline.sha256 || '')) ? offline : false;
+  } catch { return false; }
+})();
+const advancedBuildUnavailable = () => packagedAdvancedDescriptor === false;
+const advancedBuildUnavailableStatus = () => ({ success: true, advancedAvailable: false, installed: false, state: 'unavailable', errorCategory: 'advanced-package-not-in-build', runtimeSource: 'packaged', pairDetrReady: false, sam2Ready: false, message: '此构建不含增强包；基础人物检测可正常使用' });
+const lifecycleAction = (parentId, action) => {
+  if (advancedBuildUnavailable()) throw Object.assign(new Error('此构建不含增强包，无法检查、安装或修复增强环境'), { code: 'ADVANCED_PACKAGE_NOT_IN_BUILD' });
+  return callHost(parentId, 'component.lifecycle', { action });
+};
 const OUTPUT_OUTBOX = Symbol('team-output-outbox');
 const attachOutputOutbox = (receipt, record) => { if (receipt && typeof receipt === 'object') Object.defineProperty(receipt, OUTPUT_OUTBOX, { value: record, enumerable: false }); return receipt; };
 
@@ -1088,6 +1102,7 @@ const advancedRuntimeFailureStatus = (error, { development = Boolean(hostAlgorit
   };
 };
 const performAdvancedRuntimeStatus = async (parentId, { full = false } = {}) => {
+  if (advancedBuildUnavailable()) return advancedBuildUnavailableStatus();
   const now = Date.now();
   try {
     // Page-open status is intentionally a lightweight WSL/file probe. A full
@@ -1109,6 +1124,7 @@ const performAdvancedRuntimeStatus = async (parentId, { full = false } = {}) => 
   }
 };
 const advancedRuntimeStatus = async (parentId, { refresh = false, full = false } = {}) => {
+  if (advancedBuildUnavailable()) return advancedBuildUnavailableStatus();
   const now = Date.now();
   if (!refresh && advancedRuntimeProbeCache?.expiresAt > now) return advancedRuntimeProbeCache.value;
   const key = full ? 'full' : 'installation';
@@ -1912,7 +1928,6 @@ const suggestIdentities = async (parentId, _payload, context) => {
       const assignment = assignmentBySubject.get(`${photo.photoId}:${photo.baseVersionId}:${Number(member.personIndex)}`);
       return assignment?.identityId && ['manual', 'manual-group'].includes(String(assignment.source || '')) ? String(assignment.identityId) : null;
     })(),
-    patchPath: task.patchPath,
     bbox: member.bbox || task.bbox,
     faceBox: member.faceBox || null,
   }))));
@@ -3483,8 +3498,10 @@ const handlers = {
     catch (error) { return { success: false, state: 'repair-needed', errorCategory: 'installation-prerequisite', message: String(error?.message || '增强人物检测安装条件未满足') }; }
   },
   'team.advanced.install.v1': async (parentId, payload, context) => {
-    if (payload.acceptOnly) return acceptAdvancedLifecycle(parentId, payload, payload.repair === true ? 'repair' : 'install');
-    const installed = await withKeyedOperation(advancedLifecycleRuns, 'application.settings', () => lifecycleAction(parentId, payload.repair === true ? 'repair' : 'install'), context.signal);
+    const current = await advancedRuntimeStatus(parentId, { refresh: true });
+    const action = current.state === 'not-installed' ? 'install' : 'repair';
+    if (payload.acceptOnly) return acceptAdvancedLifecycle(parentId, payload, action);
+    const installed = await withKeyedOperation(advancedLifecycleRuns, 'application.settings', () => lifecycleAction(parentId, action), context.signal);
     advancedRuntimeProbeCache = null;
     const probe = await advancedRuntimeStatus(parentId, { refresh: true, full: true });
     if (!probe.advancedAvailable) return { ...installed, success: false, state: probe.state, error: probe.advancedError || probe.message };
