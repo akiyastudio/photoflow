@@ -691,21 +691,11 @@ const registerSystemIpc = context => {
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
     const taskMetadata = { targets, title, ...(restartTask?.metadata?.dataCleanupComplete === true ? { dataCleanupComplete: true } : {}) };
-    const run = async () => {
-      const completion = await backgroundTasks.run({
-      ...(restartTask?.id ? { id: restartTask.id } : {}),
-      type: 'system-filesystem-cleanup',
-      title,
-      dedupeKey,
-      cancellable: false,
-      metadata: taskMetadata,
-      }, execute, run);
-      if (completion?.task?.state === 'completed') {
-        if (backgroundTasks.flush?.() !== true) throw Object.assign(new Error('组件清理任务完成状态无法同步持久化'), { cleanupPendingReceipts: targets });
-      }
-      return completion;
-    };
-    const admission = createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(restartTask?.id ? { id: restartTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata }, worker, run), flush: () => backgroundTasks.flush?.(), worker: execute, receipts: targets });
+    const definition = worker => ({ ...(restartTask?.id ? { id: restartTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata, worker });
+    let retryFactory;
+    const admit = () => createDurableCleanupAdmission({ start: worker => { const task = definition(worker); return backgroundTasks.run(task, task.worker, retryFactory); }, flush: () => backgroundTasks.flush?.(), worker: execute, receipts: targets });
+    retryFactory = () => awaitDurableCleanupRestart(Promise.resolve(admit()));
+    const admission = admit();
     const launched = admission.completion;
     if (!admission.admitted) {
       void launched.catch(error => writeLog('warn', 'Rejected component cleanup admission', { error: error.message || String(error) }));

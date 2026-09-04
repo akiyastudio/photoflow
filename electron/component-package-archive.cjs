@@ -56,6 +56,7 @@ const readBoundedSidecar = async (filePath, { missing = '', maxBytes = MAX_CLEAN
 };
 const relativeEscapes = relative => path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`);
 const abortError = message => Object.assign(new Error(message), { name: 'AbortError' });
+const cleanupBoundaryError = (code, message, details = {}) => Object.assign(new Error(message), { code, ...details });
 const assertOperationActive = ({ signal, deadlineAt } = {}) => {
   if (signal?.aborted) throw abortError('组件包操作已取消');
   if (deadlineAt !== undefined && Date.now() >= deadlineAt) throw abortError('组件包操作超时');
@@ -638,8 +639,8 @@ const persistComponentCleanupProof = async (receipt, paths, captureNativeProof) 
   let proof;
   if (receipt.kind === 'directory') proof = { schemaVersion: 1, kind: 'directory', entries: await captureComponentTreeIdentity(paths.isolatedPath) };
   else { const stat = await fs.promises.lstat(paths.isolatedPath); proof = { schemaVersion: 1, kind: 'file', size: stat.size, sha256: await fileDigest(paths.isolatedPath, fileIdentity(stat)), node: nodeIdentity(stat), mode: stat.mode & 0o777 }; }
-  if (receipt.kind === 'directory' && componentTreeIdentityDigest(proof.entries) !== receipt.treeDigest) throw new Error('组件清理完整证明与原始目录收据不一致');
-  if (receipt.kind === 'file' && (proof.size !== receipt.size || proof.sha256 !== receipt.sha256 || proof.mode !== receipt.mode || !sameNodeIdentity(proof.node, receipt.nodeIdentity))) throw new Error('组件清理完整证明与原始文件收据不一致');
+  if (receipt.kind === 'directory' && componentTreeIdentityDigest(proof.entries) !== receipt.treeDigest) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理完整证明与原始目录收据不一致');
+  if (receipt.kind === 'file' && (proof.size !== receipt.size || proof.sha256 !== receipt.sha256 || proof.mode !== receipt.mode || !sameNodeIdentity(proof.node, receipt.nodeIdentity))) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理完整证明与原始文件收据不一致');
   if (typeof captureNativeProof !== 'function') throw new Error('组件清理缺少首次 native identity proof provider');
   proof.native = await captureNativeProof({ receipt, isolatedPath: paths.isolatedPath, proof });
   if (!proof.native || typeof proof.native.rootIdentity !== 'string' || !proof.native.rootIdentity || proof.kind === 'directory' && (!Array.isArray(proof.native.entries) || proof.native.entries.length !== proof.entries.length || proof.native.entries.some((entry, index) => entry?.path !== proof.entries[index].path || typeof entry.identity !== 'string' || !entry.identity))) throw new Error('组件清理 native identity proof 不完整');
@@ -663,20 +664,20 @@ const readComponentCleanupProof = async (paths, receipt) => {
   let proof; try { proof = JSON.parse(text); } catch { throw new Error('组件清理完整证明损坏'); }
   if (proof?.schemaVersion !== 1 || !['file', 'directory'].includes(proof.kind) || proof.kind === 'directory' && (!Array.isArray(proof.entries) || proof.entries.length > MAX_TREE_ENTRIES)) throw new Error('组件清理完整证明结构无效');
   if (!proof.native || typeof proof.native.rootIdentity !== 'string' || !proof.native.rootIdentity || proof.kind === 'directory' && (!Array.isArray(proof.native.entries) || proof.native.entries.length !== proof.entries.length || proof.native.entries.some((entry, index) => entry?.path !== proof.entries[index].path || typeof entry.identity !== 'string' || !entry.identity))) throw new Error('组件清理完整证明缺少 native identity');
-  if (proof.kind !== receipt.kind || proof.kind === 'directory' && componentTreeIdentityDigest(proof.entries) !== receipt.treeDigest) throw new Error('组件清理完整证明未绑定原始收据');
-  if (proof.kind === 'file' && (proof.size !== receipt.size || proof.sha256 !== receipt.sha256 || proof.mode !== receipt.mode || !sameNodeIdentity(proof.node, receipt.nodeIdentity))) throw new Error('组件清理文件证明未绑定原始收据');
+  if (proof.kind !== receipt.kind || proof.kind === 'directory' && componentTreeIdentityDigest(proof.entries) !== receipt.treeDigest) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理完整证明未绑定原始收据');
+  if (proof.kind === 'file' && (proof.size !== receipt.size || proof.sha256 !== receipt.sha256 || proof.mode !== receipt.mode || !sameNodeIdentity(proof.node, receipt.nodeIdentity))) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理文件证明未绑定原始收据');
   return { proof, text, binding: { schemaVersion: 1, bytes: Buffer.byteLength(text), sha256: crypto.createHash('sha256').update(text).digest('hex') } };
 };
 const verifyRemainingCleanupSubset = async (receipt, paths, proof) => {
-  if (receipt.kind === 'file') { const stat = await fs.promises.lstat(paths.isolatedPath); const current = { schemaVersion: 1, kind: 'file', size: stat.size, sha256: await fileDigest(paths.isolatedPath, fileIdentity(stat)), node: nodeIdentity(stat), mode: stat.mode & 0o777 }; const { native: _native, ...portableProof } = proof; if (JSON.stringify(current) !== JSON.stringify(portableProof)) throw new Error('组件清理剩余文件不属于原始证明'); return; }
+  if (receipt.kind === 'file') { const stat = await fs.promises.lstat(paths.isolatedPath); const current = { schemaVersion: 1, kind: 'file', size: stat.size, sha256: await fileDigest(paths.isolatedPath, fileIdentity(stat)), node: nodeIdentity(stat), mode: stat.mode & 0o777 }; const { native: _native, ...portableProof } = proof; if (JSON.stringify(current) !== JSON.stringify(portableProof)) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理剩余文件不属于原始证明'); return; }
   const original = new Map(proof.entries.map(entry => [entry.path, entry]));
   const remaining = await captureComponentTreeIdentity(paths.isolatedPath);
-  if (remaining.some(entry => !original.has(entry.path) || !compareComponentTreeIdentity([entry], [original.get(entry.path)], { includeNode: true }))) throw new Error('组件清理剩余目录包含新增或变化节点');
+  if (remaining.some(entry => !original.has(entry.path) || !compareComponentTreeIdentity([entry], [original.get(entry.path)], { includeNode: true }))) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理剩余目录包含新增或变化节点');
 };
 const verifyCompleteCleanupProof = async (receipt, paths, proof) => {
   if (receipt.kind === 'file') return verifyRemainingCleanupSubset(receipt, paths, proof);
   const current = await captureComponentTreeIdentity(paths.isolatedPath);
-  if (!compareComponentTreeIdentity(current, proof.entries, { includeNode: true })) throw new Error('组件清理当前树不再等于完整原始证明');
+  if (!compareComponentTreeIdentity(current, proof.entries, { includeNode: true })) throw cleanupBoundaryError('COMPONENT_CLEANUP_PROOF_MISMATCH', '组件清理当前树不再等于完整原始证明');
 };
 const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativeProof } = {}) => {
   if (!receipt || typeof receipt.path !== 'string' || !receipt.nodeIdentity || !['file', 'directory'].includes(receipt.kind)) throw new Error('拒绝清理缺少身份收据的组件路径');
@@ -709,7 +710,7 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
   if (!isolatedTypeValid || isolated.isSymbolicLink() || !sameNodeIdentity(receipt.nodeIdentity, nodeIdentity(isolated))) {
     const occupant = await fs.promises.lstat(paths.originalPath).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
     if (!occupant) await fs.promises.rename(paths.isolatedPath, paths.originalPath);
-    throw Object.assign(new Error('组件清理隔离对象身份已变化，replacement 未删除'), { recoveryPath: occupant ? paths.isolatedPath : paths.originalPath });
+    throw cleanupBoundaryError('COMPONENT_CLEANUP_REPLACEMENT_CONFLICT', '组件清理隔离对象身份已变化，replacement 未删除', { recoveryPath: occupant ? paths.isolatedPath : paths.originalPath });
   }
   let proofRecord = await readComponentCleanupProof(paths, receipt);
   if (!proofRecord && typeof captureNativeProof !== 'function') throw Object.assign(new Error('组件清理缺少首次 native identity proof provider'), { recoveryPath: paths.isolatedPath, cleanupPendingPaths: [paths.isolatedPath], cleanupPendingReceipts: [receipt] });
@@ -733,7 +734,7 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
     const remaining = await fs.promises.lstat(paths.isolatedPath).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError));
     if (!remaining) return { cleaned: true, intentPath: paths.intentPath };
     const remainingTypeValid = receipt.kind === 'directory' ? remaining.isDirectory() : remaining.isFile();
-    if (!remainingTypeValid || remaining.isSymbolicLink() || !sameNodeIdentity(receipt.nodeIdentity, nodeIdentity(remaining))) throw Object.assign(error, { recoveryPath: paths.isolatedPath });
+    if (!remainingTypeValid || remaining.isSymbolicLink() || !sameNodeIdentity(receipt.nodeIdentity, nodeIdentity(remaining))) throw cleanupBoundaryError('COMPONENT_CLEANUP_REPLACEMENT_CONFLICT', '组件清理最终删除路径被 replacement 占用', { cause: error, recoveryPath: paths.isolatedPath });
     await verifyRemainingCleanupSubset(receipt, paths, cleanupProof);
     const updated = { ...receipt, path: paths.originalPath };
     throw Object.assign(error, { recoveryPath: paths.isolatedPath, cleanupPendingPaths: [paths.isolatedPath], cleanupPendingReceipts: [updated] });
