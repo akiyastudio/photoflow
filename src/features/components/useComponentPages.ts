@@ -20,6 +20,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   const [actions, setActions] = useState<ComponentHostAction[]>([]);
   const [contributions, setContributions] = useState<ComponentContribution[]>([]);
   const [pages, setPages] = useState<ComponentPageInstance[]>([]);
+  const pagesRef = useRef<ComponentPageInstance[]>([]);
   const [activeIdentity, setActiveIdentity] = useState('');
   const activeIdentityRef = useRef('');
   const activationGeneration = useRef(0);
@@ -28,6 +29,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   const inflightOwners = useRef(new Map<string, symbol>());
   const inflightFingerprints = useRef(new Map<string, string>());
   const openScopes = useRef(new Map<string, { workspacePath: string; projectId: string }>());
+  const reopenRequests = useRef(new Map<string, () => Promise<boolean>>());
   const catalogKey = componentHostCatalogKey(components);
 
   useEffect(() => {
@@ -38,11 +40,12 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   }, [catalogKey]);
   useEffect(() => { let active = true; void window.electronAPI.getComponentContributions().then(result => { if (active) setContributions(result.success ? result.contributions || [] : []); }).catch(() => { if (active) setContributions([]); }); return () => { active = false; }; }, [catalogKey]);
   useEffect(() => { activeIdentityRef.current = activeIdentity; }, [activeIdentity]);
+  useEffect(() => { pagesRef.current=pages; }, [pages]);
 
   useEffect(() => {
     const unavailablePages = pages.filter(page => !componentPageIsAvailable(page, components));
     if (!unavailablePages.length) return;
-    unavailablePages.forEach(page => openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1));
+    unavailablePages.forEach(page => {openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1);reopenRequests.current.delete(page.identity);});
     unavailablePages.forEach(page => { if (page.instanceId) void window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined); });
     setPages(current => current.filter(page => componentPageIsAvailable(page, components)));
     const activeUnavailable = unavailablePages.find(page => page.identity === activeIdentity);
@@ -55,11 +58,13 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
 
   const deactivate = useCallback(() => { activationGeneration.current += 1; activeIdentityRef.current = ''; return window.electronAPI.activateComponentPage('').catch(() => ({ success: false })); }, []);
   const activate = useCallback(async (page: ComponentPageInstance) => {
+    let candidate=page;
+    if(!candidate.instanceId){const inflight=inflightOpens.current.get(page.identity);if(inflight)await inflight;candidate=pagesRef.current.find(item=>item.identity===page.identity)||candidate;if(!candidate.instanceId){const retry=reopenRequests.current.get(page.identity);if(!retry||!await retry())return false;candidate=pagesRef.current.find(item=>item.identity===page.identity)||candidate;if(!candidate.instanceId)return false;}}
     const generation = ++activationGeneration.current;
-    const result = page.instanceId ? await window.electronAPI.activateComponentPage(page.instanceId).catch(() => ({ success: false })) : { success: false };
+    const result = await window.electronAPI.activateComponentPage(candidate.instanceId).catch(() => ({ success: false }));
     if (generation !== activationGeneration.current) return false;
     if (componentPageActivationSucceeded(result)) { activeIdentityRef.current = page.identity; setActiveIdentity(page.identity); return true; }
-    if (page.instanceId) void window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined);
+    if (candidate.instanceId) void window.electronAPI.closeComponentPage(candidate.instanceId).catch(() => undefined);
     setPages(current => closeComponentPage(current, page.identity));
     setActiveIdentity(current => { const next = current === page.identity ? '' : current; activeIdentityRef.current = next; return next; });
     toast.show('组件页已失效，请重新打开', { tone: 'warning', dedupeKey: 'component-page-stale' });
@@ -77,7 +82,8 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     const activationToken = ++activationGeneration.current;
     openGenerations.current.set(ensured.page.identity, generation);
     openScopes.current.set(ensured.page.identity, { workspacePath, projectId: project.id });
-    setPages(current => ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages);
+    reopenRequests.current.set(ensured.page.identity,()=>open(action,project,workspacePath,insertAfterTabId,scope));
+    setPages(current => {const next=ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages;pagesRef.current=next;return next;});
     activeIdentityRef.current = ensured.page.identity;
     setActiveIdentity(ensured.page.identity);
     const owner = Symbol(ensured.page.identity);
@@ -93,7 +99,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
         setActiveIdentity(current => { const next = activationToken === activationGeneration.current && current === ensured.page.identity && ensured.created ? '' : current; activeIdentityRef.current = next; return next; });
         toast.show(`打开组件页失败：${result.error || '未知错误'}`, { tone: 'error', dedupeKey: `component-page-open:${action.componentId}:${action.pageId}` }); return false;
       }
-      setPages(current => bindComponentPageInstance(current, ensured.page.identity, result.page!.instanceId));
+      pagesRef.current=bindComponentPageInstance(pagesRef.current,ensured.page.identity,result.page.instanceId);setPages(current => {const next=bindComponentPageInstance(current,ensured.page.identity,result.page!.instanceId);pagesRef.current=next;return next;});
       return true;
     })().finally(() => { if (inflightOwners.current.get(ensured.page.identity) === owner) { inflightOpens.current.delete(ensured.page.identity); inflightOwners.current.delete(ensured.page.identity); inflightFingerprints.current.delete(ensured.page.identity); openScopes.current.delete(ensured.page.identity); } });
     inflightOpens.current.set(ensured.page.identity, operation);
@@ -103,7 +109,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   }, [pages, toast]);
   const close = useCallback(async (page: ComponentPageInstance) => {
     openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1);
-    inflightOpens.current.delete(page.identity); inflightOwners.current.delete(page.identity); inflightFingerprints.current.delete(page.identity); openScopes.current.delete(page.identity);
+    inflightOpens.current.delete(page.identity); inflightOwners.current.delete(page.identity); inflightFingerprints.current.delete(page.identity); openScopes.current.delete(page.identity);reopenRequests.current.delete(page.identity);
     activationGeneration.current += 1;
     setPages(current => closeComponentPage(current, page.identity));
     if (activeIdentityRef.current === page.identity) {
@@ -114,8 +120,8 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     if (page.instanceId) await window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined);
   }, [browserPages, onHomeFallback, onProjectFallback]);
   const disposeProject = useCallback((workspacePath: string, projectId: string) => {
-    for (const page of pages) if (page.projectId === projectId && page.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) { openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1); inflightOpens.current.delete(page.identity); }
-    for (const [identity, scope] of openScopes.current) if (scope.projectId === projectId && scope.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) { openGenerations.current.set(identity, (openGenerations.current.get(identity) || 0) + 1); inflightOpens.current.delete(identity); openScopes.current.delete(identity); }
+    for (const page of pages) if (page.projectId === projectId && page.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) { openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1); inflightOpens.current.delete(page.identity);reopenRequests.current.delete(page.identity); }
+    for (const [identity, scope] of openScopes.current) if (scope.projectId === projectId && scope.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) { openGenerations.current.set(identity, (openGenerations.current.get(identity) || 0) + 1); inflightOpens.current.delete(identity); openScopes.current.delete(identity);reopenRequests.current.delete(identity); }
     activationGeneration.current += 1;
     void window.electronAPI.closeProjectComponentPages(workspacePath, projectId).catch(() => undefined);
     setPages(current => closeProjectComponentPages(current, workspacePath, projectId));

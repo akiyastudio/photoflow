@@ -22,6 +22,7 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, initialCon
   const dialogRef = useRef<HTMLElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [contentHeight, setContentHeight] = useState(() => Math.max(0, Number(initialContentHeight) || 0));
+  const currentInstanceRef=useRef(instanceId);const openRef=useRef(open);currentInstanceRef.current=instanceId;openRef.current=open;
   const backgroundTaskActive = backgroundTasks.some(task => isActivePresentedBackgroundTaskForPanel(task, ownerPageId, panelKind));
   const requestClose = backgroundTaskActive ? onMinimize : onClose;
 
@@ -61,7 +62,8 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, initialCon
   }, [open, requestClose]);
 
   useEffect(() => {
-    if (!open || !instanceId) return;
+    if (!instanceId) return;
+    if(!open){let cancelled=false;void (async()=>{await window.electronAPI.setComponentPageBounds(instanceId,{x:0,y:0,width:0,height:0}).catch(()=>undefined);if(!cancelled&&currentInstanceRef.current===instanceId&&!openRef.current)await window.electronAPI.activateComponentPage({instanceId,deactivateIfActive:true} as unknown as string).catch(()=>undefined);})();return()=>{cancelled=true;};}
     const surface = surfaceRef.current;
     if (!surface) return;
     let frame = 0;
@@ -73,19 +75,19 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, initialCon
         y: bounds.y,
         width: bounds.width,
         height: bounds.height,
-      });
+      }).catch(() => undefined);
     };
     const schedule = () => { if (!frame) frame = window.requestAnimationFrame(update); };
     const observer = new ResizeObserver(schedule);
     observer.observe(surface);
     window.addEventListener('resize', schedule);
-    void window.electronAPI.activateComponentPage(instanceId);
+    void window.electronAPI.activateComponentPage(instanceId).catch(() => undefined);
     schedule();
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', schedule);
       if (frame) window.cancelAnimationFrame(frame);
-      void window.electronAPI.setComponentPageBounds(instanceId, { x: 0, y: 0, width: 0, height: 0 });
+      void window.electronAPI.setComponentPageBounds(instanceId, { x: 0, y: 0, width: 0, height: 0 }).catch(() => undefined);
     };
   }, [instanceId, open]);
 

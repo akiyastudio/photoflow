@@ -1,28 +1,32 @@
 /** Safe, source-preserving adoption for a previously owned component storage generation. */
+const MAX_STORAGE_FILES=50_000,MAX_STORAGE_BYTES=64*1024*1024*1024,MAX_STORAGE_DEPTH=64,MAX_RECEIPT_BYTES=8*1024*1024;
 const digest = async (fs, crypto, filePath) => {
   const hash = crypto.createHash('sha256');
   for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
   return hash.digest('hex');
 };
-const copyTreeVerified = async ({ fs, path, crypto, source, destination, overwrite = false, metrics = { fileCount: 0, byteCount: 0 }, root = source, exclude = new Set() }) => {
+const copyTreeVerified = async ({ fs, path, crypto, source, destination, overwrite = false, metrics = { fileCount: 0, byteCount: 0 }, root = source, exclude = new Set(), depth=0 }) => {
+  if(depth>MAX_STORAGE_DEPTH)throw new Error('Legacy component storage exceeds the maximum directory depth');
   const relative = path.relative(root, source).replace(/\\/g, '/');
   if (relative && exclude.has(relative)) return metrics;
   const stat = await fs.promises.lstat(source);
   if (stat.isSymbolicLink()) throw new Error('Legacy component storage contains a symbolic link');
   if (stat.isDirectory()) {
     await fs.promises.mkdir(destination, { recursive: true });
-    for (const entry of await fs.promises.readdir(source)) await copyTreeVerified({ fs, path, crypto, source: path.join(source, entry), destination: path.join(destination, entry), overwrite, metrics, root, exclude });
+    const handle=await fs.promises.opendir(source);for await(const entry of handle)await copyTreeVerified({ fs, path, crypto, source: path.join(source, entry.name), destination: path.join(destination, entry.name), overwrite, metrics, root, exclude,depth:depth+1 });
     return metrics;
   }
   if (!stat.isFile()) throw new Error('Legacy component storage contains an unsupported entry');
+  if(metrics.fileCount+1>MAX_STORAGE_FILES||metrics.byteCount+stat.size>MAX_STORAGE_BYTES)throw new Error('Legacy component storage exceeds adoption limits');
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
   await fs.promises.copyFile(source, destination, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
-  if (await digest(fs, crypto, source) !== await digest(fs, crypto, destination)) throw new Error('Legacy component storage copy verification failed');
+  const sourceDigest=await digest(fs,crypto,source),destinationDigest=await digest(fs,crypto,destination);if(sourceDigest!==destinationDigest) throw new Error('Legacy component storage copy verification failed');
   metrics.fileCount += 1;
   metrics.byteCount += stat.size;
+  (metrics.digests||=new Map()).set(path.resolve(destination),{size:stat.size,sha256:destinationDigest});
   return metrics;
 };
-const readReceipt = async (fs, filePath) => { try { const value = JSON.parse(await fs.promises.readFile(filePath, 'utf8')); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid component storage receipt'); return value; } catch (error) { if (error?.code === 'ENOENT') return null; throw error; } };
+const readReceipt = async (fs, filePath) => { try {const stat=await fs.promises.lstat(filePath);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>MAX_RECEIPT_BYTES)throw new Error('Invalid component storage receipt size'); const value = JSON.parse(await fs.promises.readFile(filePath, 'utf8')); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid component storage receipt'); return value; } catch (error) { if (error?.code === 'ENOENT') return null; throw error; } };
 const exactKeys = (value, required) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join('\0') === [...required].sort().join('\0');
 const validReceipt = (value, componentId, state = 'committed') => {
   const common = value?.schemaVersion === 1 && value.kind === 'component-storage-adoption' && value.state === state && value.componentId === componentId;
@@ -30,24 +34,26 @@ const validReceipt = (value, componentId, state = 'committed') => {
   if (state === 'prepared') return exactKeys(value, ['schemaVersion','kind','state','componentId','pending','previous','componentRoot','preparedAt'])
     && [value.pending,value.previous,value.componentRoot].every(item => typeof item === 'string' && item.length > 0) && Number.isFinite(value.preparedAt);
   return exactKeys(value, ['schemaVersion','kind','state','componentId','adoptedDataRoot','adoptedDatabase','legacyDataRoot','legacyDatabasePath','databaseSha256','copiedFileCount','copiedByteCount','contentManifest','contentDigest','adoptedAt'])
-    && Array.isArray(value.contentManifest) && value.contentManifest.every(item => exactKeys(item, ['path','size','sha256']) && typeof item.path === 'string' && Number.isSafeInteger(item.size) && item.size >= 0 && /^[a-f0-9]{64}$/.test(item.sha256))
-    && /^[a-f0-9]{64}$/.test(String(value.contentDigest || '')) && Number.isFinite(value.adoptedAt);
+    && typeof value.adoptedDataRoot==='boolean'&&typeof value.adoptedDatabase==='boolean'&&typeof value.legacyDataRoot==='string'&&typeof value.legacyDatabasePath==='string'&&Number.isSafeInteger(value.copiedFileCount)&&value.copiedFileCount>=0&&Number.isSafeInteger(value.copiedByteCount)&&value.copiedByteCount>=0
+    && (!value.adoptedDatabase&&value.databaseSha256===''||value.adoptedDatabase&&/^[a-f0-9]{64}$/.test(value.databaseSha256))&&Array.isArray(value.contentManifest)&&value.contentManifest.length<=MAX_STORAGE_FILES && value.contentManifest.every(item => exactKeys(item, ['path','size','sha256']) && typeof item.path === 'string'&&item.path.length<=4096&&!item.path.split('/').some(part=>!part||part==='.'||part==='..') && Number.isSafeInteger(item.size) && item.size >= 0 && /^[a-f0-9]{64}$/.test(item.sha256))
+    && value.contentManifest.reduce((sum,item)=>sum+item.size,0)<=MAX_STORAGE_BYTES&&/^[a-f0-9]{64}$/.test(String(value.contentDigest || '')) && Number.isFinite(value.adoptedAt);
 };
 const lstatOptional = async (fs, filePath) => { try { return await fs.promises.lstat(filePath); } catch (error) { if (error?.code === 'ENOENT') return null; throw error; } };
-const buildManifest = async ({ fs, path, crypto, root }) => {
-  const files = []; const pending = [root];
+const buildManifest = async ({ fs, path, crypto, root, knownDigests = null }) => {
+  const files = []; const pending = [{directory:root,depth:0}];let byteCount=0;
   while (pending.length) {
-    const directory = pending.pop(); const entries = await fs.promises.readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
+    const {directory,depth}=pending.pop();if(depth>MAX_STORAGE_DEPTH)throw new Error('Component storage manifest exceeds the maximum directory depth');const entries=await fs.promises.opendir(directory);
+    for await (const entry of entries) {
       const absolute = path.join(directory, entry.name); const relative = path.relative(root, absolute).replace(/\\/g, '/');
       if (relative === 'receipts/migrations/legacy-storage-v1.json') continue;
       const stat = await fs.promises.lstat(absolute);
       if (stat.isSymbolicLink()) throw new Error('Component storage manifest contains a symbolic link');
-      if (stat.isDirectory()) pending.push(absolute); else if (stat.isFile()) files.push({ path: relative, size: stat.size, sha256: await digest(fs, crypto, absolute) }); else throw new Error('Component storage manifest contains an unsupported entry');
+      if (stat.isDirectory()) pending.push({directory:absolute,depth:depth+1}); else if (stat.isFile()) {byteCount+=stat.size;if(files.length>=MAX_STORAGE_FILES||byteCount>MAX_STORAGE_BYTES)throw new Error('Component storage manifest exceeds adoption limits');const known=knownDigests?.get(path.resolve(absolute));files.push({ path: relative, size: stat.size, sha256: known?.size===stat.size?known.sha256:await digest(fs, crypto, absolute) });} else throw new Error('Component storage manifest contains an unsupported entry');
     }
   }
   files.sort((a,b)=>a.path.localeCompare(b.path,'en'));
   const contentDigest = crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex');
+  if(Buffer.byteLength(JSON.stringify(files))>MAX_RECEIPT_BYTES/2)throw new Error('Component storage manifest is too large');
   return { contentManifest: files, contentDigest };
 };
 const verifyReceiptTree = async ({ fs, path, crypto, root, receipt, componentId }) => {
@@ -114,8 +120,7 @@ const recoverLegacyStorageV1 = async ({ fs, path, crypto, componentRoot, descrip
   }
   if (!validReceipt(journal, descriptor.componentId, 'prepared') || path.resolve(journal.pending) !== path.resolve(transaction.pending) || path.resolve(journal.previous) !== path.resolve(transaction.previous) || path.resolve(journal.componentRoot) !== path.resolve(componentRoot)) throw new Error('Legacy component storage adoption journal has an invalid identity');
   if (fs.existsSync(componentRoot) && fs.existsSync(transaction.pending) && !fs.existsSync(transaction.previous)) {
-    const pendingReceipt = await readReceipt(fs, path.join(transaction.pending, 'receipts', 'migrations', 'legacy-storage-v1.json'));
-    if (!validReceipt(pendingReceipt, descriptor.componentId) || !await verifyReceiptTree({ fs, path, crypto, root: transaction.pending, receipt: pendingReceipt, componentId: descriptor.componentId })) throw new Error('Prepared component storage adoption package is invalid');
+    let pendingReceipt=null,pendingValid=false;try{pendingReceipt=await readReceipt(fs,path.join(transaction.pending,'receipts','migrations','legacy-storage-v1.json'));pendingValid=validReceipt(pendingReceipt,descriptor.componentId)&&await verifyReceiptTree({fs,path,crypto,root:transaction.pending,receipt:pendingReceipt,componentId:descriptor.componentId});}catch{/* invalid pending is isolated below */}if(!pendingValid){await fs.promises.rename(transaction.pending,`${transaction.pending}.invalid-${Date.now()}`);await fs.promises.rm(transaction.journal,{force:true});return null;}
     await fs.promises.rename(componentRoot, transaction.previous);
     try {
       await fs.promises.rename(transaction.pending, componentRoot);
@@ -128,9 +133,10 @@ const recoverLegacyStorageV1 = async ({ fs, path, crypto, componentRoot, descrip
   }
   if (!fs.existsSync(componentRoot) && fs.existsSync(transaction.pending)) {
     const pendingStat = await fs.promises.lstat(transaction.pending);
-    const pendingReceipt = pendingStat.isDirectory() && !pendingStat.isSymbolicLink()
-      ? await readReceipt(fs, path.join(transaction.pending, 'receipts', 'migrations', 'legacy-storage-v1.json')) : null;
-    if (!validReceipt(pendingReceipt, descriptor.componentId) || !await verifyReceiptTree({ fs, path, crypto, root: transaction.pending, receipt: pendingReceipt, componentId: descriptor.componentId })) throw new Error('Pending component storage adoption package is invalid');
+    let pendingReceipt=null,pendingValid=false;try{pendingReceipt=pendingStat.isDirectory()&&!pendingStat.isSymbolicLink()?await readReceipt(fs,path.join(transaction.pending,'receipts','migrations','legacy-storage-v1.json')):null;pendingValid=validReceipt(pendingReceipt,descriptor.componentId)&&await verifyReceiptTree({fs,path,crypto,root:transaction.pending,receipt:pendingReceipt,componentId:descriptor.componentId});}catch{/* invalid pending is isolated below */}
+    if (!pendingValid) {
+      const invalid=`${transaction.pending}.invalid-${Date.now()}`;await fs.promises.rename(transaction.pending,invalid);if(fs.existsSync(transaction.previous)){try{await fs.promises.rename(transaction.previous,componentRoot);await fs.promises.rm(transaction.journal,{force:true});}catch(error){throw new AggregateError([error],`Invalid pending storage was retained at ${invalid}`);}}throw new Error(`Pending component storage adoption package is invalid and was retained at ${invalid}`);
+    }
     try {
       await fs.promises.rename(transaction.pending, componentRoot);
       const committed = await readReceipt(fs, path.join(componentRoot, 'receipts', 'migrations', 'legacy-storage-v1.json'));
@@ -166,7 +172,7 @@ const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot,
   let movedPrevious = false;
   await fs.promises.mkdir(parent, { recursive: true });
   try {
-    const copied = { fileCount: 0, byteCount: 0 };
+    const copied = { fileCount: 0, byteCount: 0, digests:new Map() };
     if (legacyData) await copyTreeVerified({ fs, path, crypto, source: legacyDataRoot, destination: pending, metrics: copied, exclude: new Set(['receipts/migrations/legacy-storage-v1.json']) });
     else await fs.promises.mkdir(pending, { recursive: true });
     if (legacyDatabase) {
@@ -178,12 +184,12 @@ const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot,
       }
     }
     if (fs.existsSync(componentRoot)) await copyTreeVerified({ fs, path, crypto, source: componentRoot, destination: pending, overwrite: true, metrics: copied, exclude: new Set(['receipts/migrations/legacy-storage-v1.json']) });
-    const manifest = await buildManifest({ fs, path, crypto, root: pending });
-    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await digest(fs, crypto, path.join(pending, 'storage.sqlite3')) : '', copiedFileCount: copied.fileCount, copiedByteCount: copied.byteCount, ...manifest, adoptedAt: Date.now() };
+    const manifest = await buildManifest({ fs, path, crypto, root: pending,knownDigests:copied.digests });
+    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? copied.digests.get(path.resolve(pending,'storage.sqlite3'))?.sha256||'' : '', copiedFileCount: copied.fileCount, copiedByteCount: copied.byteCount, ...manifest, adoptedAt: Date.now() };
     const receiptPath = path.join(pending, receiptRelative);
     await fs.promises.mkdir(path.dirname(receiptPath), { recursive: true });
     const receiptPending = `${receiptPath}.${crypto.randomUUID()}.tmp`;
-    await fs.promises.writeFile(receiptPending, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    const receiptText=`${JSON.stringify(receipt,null,2)}\n`;if(Buffer.byteLength(receiptText)>MAX_RECEIPT_BYTES)throw new Error('Component storage adoption receipt is too large');await fs.promises.writeFile(receiptPending, receiptText, { encoding: 'utf8', flag: 'wx' });
     await fs.promises.rename(receiptPending, receiptPath);
     await faultInjector('before-journal');
     await writeJournal({ fs, path, crypto, journal: transaction.journal, value: { schemaVersion: 1, kind: 'component-storage-adoption', state: 'prepared', componentId: descriptor.componentId, pending, previous, componentRoot, preparedAt: Date.now() } });

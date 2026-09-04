@@ -464,6 +464,8 @@ class ComponentViewManager {
     return Boolean(instanceId);
   }
 
+  deactivateIfActive(instanceId){if(this.activeInstanceId!==String(instanceId||''))return false;this.activate('');return true;}
+
   applyVisibility(instance) {
     instance.view.setVisible(instance.logicalActive && !this.hostSurfaceState.suspended);
     this.applyBounds(instance);

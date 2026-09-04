@@ -64,6 +64,8 @@ class ComponentServiceManager {
     this.releaseBackupRestoreIdle = null;
     this.quarantinedComponents = new Map();
     this.destroyed = false;
+    this.destroying = false;
+    this.destroyPromise = null;
   }
 
   supports(componentId, method) {
@@ -177,7 +179,7 @@ class ComponentServiceManager {
   }
 
   async invoke(componentId, method, payload, boundContext) {
-    if (this.destroyed) throw new Error('Component service manager is destroyed');
+    if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; }
     if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.invoke(componentId, method, payload, boundContext); }
     if (this.storageSnapshotBarrier) {
@@ -250,7 +252,7 @@ class ComponentServiceManager {
   }
 
   async ensureSession(descriptor) {
-    if (this.destroyed) throw new Error('Component service manager is destroyed');
+    if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     this.assertNotQuarantined(descriptor?.componentId);
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
@@ -289,7 +291,7 @@ class ComponentServiceManager {
         restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
         onSpawn: (child, managed) => this.attach(session, child, managed),
       });
-      if (this.destroyed) { await session.managed.stop('component-service-manager-destroy'); throw new Error('Component service manager is destroyed'); }
+      if (this.destroying || this.destroyed) { await session.managed.stop('component-service-manager-destroy'); throw new Error('Component service manager is destroying or destroyed'); }
       session.managed.on('restart-exhausted', () => {
         if (!session.readySettled) session.readyReject(new Error('Component service restart limit reached'));
       });
@@ -449,7 +451,7 @@ class ComponentServiceManager {
   }
 
   async quiesceForStorageSnapshot({ timeoutMs = 5000 } = {}) {
-    if (this.destroyed) throw new Error('Component service manager is destroyed');
+    if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     const deadline = Date.now() + Math.max(1, Number(timeoutMs) || 5000);
     const beforeDeadline = (promise, message = 'Component service is busy; storage snapshot was deferred') => {
       const remaining = deadline - Date.now();
@@ -505,16 +507,10 @@ class ComponentServiceManager {
 
   async destroy() {
     if (this.destroyed) return;
-    this.destroyed = true;
-    const barrier = this.storageSnapshotBarrier;
-    this.storageSnapshotBarrier = null;
-    barrier?.release();
-    await Promise.allSettled([...this.sessionTransitions.values()]);
-    const sessions = [...this.sessions.values()];
-    this.sessions.clear();
-    const results=await Promise.allSettled(sessions.map(session => session.managed.stop('component-service-manager-destroy')));
-    const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);
-    if(errors.length)throw new AggregateError(errors,'Unable to stop every component service during destroy');
+    if(this.destroyPromise)return this.destroyPromise;
+    this.destroying=true;
+    const operation=(async()=>{const barrier = this.storageSnapshotBarrier;this.storageSnapshotBarrier = null;barrier?.release();await Promise.allSettled([...this.sessionTransitions.values()]);const sessions=[...this.sessions.entries()];const results=await Promise.allSettled(sessions.map(([,session])=>session.managed.stop('component-service-manager-destroy')));results.forEach((result,index)=>{if(result.status==='fulfilled'&&this.sessions.get(sessions[index][0])===sessions[index][1])this.sessions.delete(sessions[index][0]);});const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);if(errors.length)throw new AggregateError(errors,'Unable to stop every component service during destroy');this.destroyed=true;this.destroying=false;})();
+    this.destroyPromise=operation;try{await operation;}finally{if(this.destroyPromise===operation)this.destroyPromise=null;}
   }
 }
 
