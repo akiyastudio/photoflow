@@ -9,14 +9,16 @@ const MAX_ENTRIES = 10_000;
 const MAX_DIRECTORY_BYTES = 32 * 1024 * 1024;
 // This parser intentionally accepts classic ZIP32 only. Its 32-bit central
 // directory offset makes archives above roughly 4 GiB invalid regardless.
-// Current vendored component payloads peak below 75 MiB. These UI/runtime
-// limits leave ample headroom for the ~300 MiB release set without allowing a
+// The September 2026 four-package release set peaks at 294,486,162 archive
+// bytes, 451,802,764 declared-expanded bytes, and 115,736,422 bytes for one
+// entry. These UI/runtime limits retain explicit headroom without allowing a
 // multi-GiB snapshot or expansion before the user confirms installation.
 const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 256 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 1024 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_TREE_ENTRIES = 20_000;
+const MAX_ARCHIVE_PATH_BYTES = 8 * 1024 * 1024;
 const COMPONENT_TREE_IDENTITY_SCHEMA_VERSION = 1;
 const SNAPSHOT_TOKEN = Symbol('componentArchiveSnapshot');
 const activeVolumeReservations = new Map();
@@ -41,6 +43,8 @@ const fileIdentity = stat => ({ dev: stat.dev, ino: stat.ino, size: stat.size, m
 const sameFileIdentity = (left, right) => left && right && Object.keys(left).every(key => left[key] === right[key]);
 const nodeIdentity = stat => ({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs });
 const sameNodeIdentity = (left, right) => left && right && left.dev === right.dev && left.ino === right.ino && left.birthtimeMs === right.birthtimeMs;
+const closeOwnedHandle = async handle => { if (!handle) return; try { await handle.close(); } catch (error) { if (error?.code !== 'EBADF') throw error; } };
+const relativeEscapes = relative => path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`);
 const abortError = message => Object.assign(new Error(message), { name: 'AbortError' });
 const assertOperationActive = ({ signal, deadlineAt } = {}) => {
   if (signal?.aborted) throw abortError('组件包操作已取消');
@@ -129,23 +133,33 @@ const snapshotComponentArchive = async (sourcePath, targetPath, options = {}) =>
   if (!Number.isSafeInteger(sourceLstat.size) || sourceLstat.size < 22 || sourceLstat.size > maxArchiveBytes) throw new Error('组件包本体大小超过安全上限');
   await assertAvailableDiskSpace(path.dirname(targetPath), sourceLstat.size);
   const handle = await fs.promises.open(resolvedSource, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  let targetHandle = null;
   try {
     const before = await handle.stat();
     const identity = fileIdentity(before);
     if (!before.isFile() || !sameFileIdentity(identity, fileIdentity(sourceLstat))) throw new Error('组件包在快照前被替换或修改');
+    targetHandle = await fs.promises.open(targetPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
     const hash = crypto.createHash('sha256');
     const digestStream = new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); hash.update(chunk); callback(null, chunk); } catch (error) { callback(error); } } });
-    await pipeline(handle.createReadStream({ autoClose: false }), digestStream, fs.createWriteStream(targetPath, { flags: 'wx' }), operation.signal ? { signal: operation.signal } : {});
+    await pipeline(handle.createReadStream({ autoClose: false }), digestStream, fs.createWriteStream(null, { fd: targetHandle.fd, autoClose: false }), operation.signal ? { signal: operation.signal } : {});
+    await targetHandle.sync();
     if (!sameFileIdentity(identity, fileIdentity(await handle.stat()))) throw new Error('组件包在快照期间被修改');
     const afterPath = await fs.promises.lstat(resolvedSource);
     if (!afterPath.isFile() || afterPath.isSymbolicLink() || !sameFileIdentity(identity, fileIdentity(afterPath))) throw new Error('组件包在快照期间被替换或修改');
-    const snapshotIdentity = fileIdentity(await fs.promises.lstat(targetPath));
+    const snapshotIdentity = fileIdentity(await targetHandle.stat());
+    const targetPathStat = await fs.promises.lstat(targetPath);
+    if (!targetPathStat.isFile() || targetPathStat.isSymbolicLink() || snapshotIdentity.size !== identity.size || !sameFileIdentity(snapshotIdentity, fileIdentity(targetPathStat))) throw new Error('组件包快照输出在写入期间被替换或截断');
     return Object.freeze({ ...identity, bytes: identity.size, sha256: hash.digest('hex'), inspectionToken: Object.freeze({ [SNAPSHOT_TOKEN]: true, archivePath: path.resolve(targetPath), identity: snapshotIdentity }) });
   } catch (error) {
-    try { await fs.promises.unlink(targetPath); }
+    try {
+      const outputIdentity = targetHandle ? fileIdentity(await targetHandle.stat()) : null;
+      const pathStat = await fs.promises.lstat(targetPath);
+      if (!outputIdentity || pathStat.isSymbolicLink() || !sameFileIdentity(outputIdentity, fileIdentity(pathStat))) throw new Error('快照输出路径已被其他对象占用');
+      await fs.promises.unlink(targetPath);
+    }
     catch (cleanupError) { if (cleanupError?.code !== 'ENOENT') error.message = `${error.message || String(error)}；快照清理失败：${cleanupError.message || String(cleanupError)}`; }
     throw error;
-  } finally { await handle.close(); operation.cleanup(); }
+  } finally { await closeOwnedHandle(targetHandle); await closeOwnedHandle(handle); operation.cleanup(); }
 };
 const normalizeName = value => String(value || '').normalize('NFC').replace(/\\/g, '/');
 const validArchivePath = value => {
@@ -168,7 +182,8 @@ const readSmallEntry = (fd, entry, maxBytes) => {
   return value;
 };
 
-const localDataRange = (fd, archive, entry) => {
+const localDataRange = (fd, archive, entry, operation) => {
+  assertOperationActive(operation);
   const local = readExact(fd, 30, entry.localOffset);
   if (local.readUInt32LE(0) !== 0x04034b50) throw new Error(`ZIP 本地条目损坏：${entry.name}`);
   const flags = local.readUInt16LE(6);
@@ -230,6 +245,15 @@ const inspectComponentArchive = (archivePath, options = {}) => {
     const directories = new Set();
     const declaredPaths = new Set();
     const directorySpelling = new Map();
+    const budgetedPaths = new Set();
+    let totalPathBytes = 0;
+    const accountPath = (kind, archiveName) => {
+      const key = `${kind}:${archiveName.toLowerCase()}`;
+      if (budgetedPaths.has(key)) return;
+      budgetedPaths.add(key);
+      totalPathBytes += Buffer.byteLength(archiveName, 'utf8');
+      if (budgetedPaths.size > MAX_TREE_ENTRIES || totalPathBytes > MAX_ARCHIVE_PATH_BYTES) throw new Error('安装包路径及隐式目录数量超过安全上限');
+    };
     let total = 0;
     let offset = 0;
     for (let index = 0; index < count; index += 1) {
@@ -268,7 +292,7 @@ const inspectComponentArchive = (archivePath, options = {}) => {
       if (!Number.isSafeInteger(uncompressedSize) || uncompressedSize > MAX_ENTRY_BYTES) throw new Error(`安装包条目过大：${name}`);
       total += uncompressedSize;
       if (!Number.isSafeInteger(total) || total > MAX_PACKAGE_BYTES) throw new Error('安装包展开大小超过安全上限');
-      if (isDirectory && (uncompressedSize !== 0 || compressedSize !== 0)) throw new Error(`ZIP 目录条目包含数据：${name}`);
+      if (isDirectory && (uncompressedSize !== 0 || compressedSize !== 0 || expectedCrc !== 0 || method !== 0 || (flags & ~0x0800))) throw new Error(`ZIP 目录条目包含数据或不支持的标志：${name}`);
       const segments = pathName.split('/');
       for (let parentIndex = 1; parentIndex < segments.length; parentIndex += 1) {
         const parentName = segments.slice(0, parentIndex).join('/');
@@ -276,22 +300,25 @@ const inspectComponentArchive = (archivePath, options = {}) => {
         if (files.has(parent)) throw new Error(`安装包包含文件/目录碰撞：${name}`);
         if (directorySpelling.has(parent) && directorySpelling.get(parent) !== parentName) throw new Error(`安装包包含目录大小写冲突：${name}`);
         directories.add(parent); directorySpelling.set(parent, parentName);
+        accountPath('directory', parentName);
       }
       if (isDirectory) {
         if (files.has(folded)) throw new Error(`安装包包含文件/目录碰撞：${name}`);
         if (directorySpelling.has(folded) && directorySpelling.get(folded) !== pathName) throw new Error(`安装包包含目录大小写冲突：${name}`);
         directories.add(folded); directorySpelling.set(folded, pathName);
+        accountPath('directory', pathName);
       } else {
         if (files.has(folded)) throw new Error(`安装包包含重复或大小写冲突路径：${name}`);
         if (directories.has(folded)) throw new Error(`安装包包含文件/目录碰撞：${name}`);
         files.add(folded);
+        accountPath('file', pathName);
       }
       if (unixMode & 0o7000) throw new Error(`安装包条目包含不安全的特殊权限位：${name}`);
       entries.push({ name, nameBytes: Buffer.from(nameBytes), isDirectory, flags, method, expectedCrc, compressedSize, uncompressedSize, localOffset, unixMode: unixMode & 0o777 });
       offset = entryEnd;
     }
     if (offset !== directory.length) throw new Error('ZIP 中央目录条目数量不一致');
-    const ranges = entries.map(entry => ({ entry, ...localDataRange(fd, archive, entry) })).sort((left, right) => left.start - right.start);
+    const ranges = entries.map(entry => ({ entry, ...localDataRange(fd, archive, entry, operation) })).sort((left, right) => left.start - right.start);
     for (let index = 1; index < ranges.length; index += 1) if (ranges[index].start < ranges[index - 1].recordEnd) throw new Error(`ZIP 条目数据区域重叠：${ranges[index].entry.name}`);
     const manifests = ranges.filter(item => /(^|\/)component\.json$/i.test(item.entry.name));
     if (manifests.length !== 1) throw new Error(manifests.length ? '安装包包含多个 component.json' : '安装包中没有 component.json');
@@ -315,7 +342,7 @@ const assertSafeExtractionParents = async (targetRoot, target) => {
   const rootStat = await fs.promises.lstat(targetRoot);
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('ZIP 提取根目录不是安全的普通目录');
   const relativeParent = path.relative(targetRoot, path.dirname(target));
-  if (relativeParent.startsWith('..') || path.isAbsolute(relativeParent)) throw new Error('ZIP 条目目标路径越界');
+  if (relativeEscapes(relativeParent)) throw new Error('ZIP 条目目标路径越界');
   let current = targetRoot;
   const identities = [{ path: targetRoot, identity: nodeIdentity(rootStat), canonical: canonicalRoot }];
   for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
@@ -325,7 +352,7 @@ const assertSafeExtractionParents = async (targetRoot, target) => {
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`ZIP 条目父路径包含链接或非目录项：${current}`);
     const canonical = await fs.promises.realpath(current);
     const realRelative = path.relative(canonicalRoot, canonical);
-    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) throw new Error('ZIP 条目父路径真实位置越界');
+    if (relativeEscapes(realRelative)) throw new Error('ZIP 条目父路径真实位置越界');
     identities.push({ path: current, identity: nodeIdentity(stat), canonical });
   }
   return identities;
@@ -355,13 +382,20 @@ const extractEntry = async (archiveHandle, inspection, entry, target, actualBudg
   } });
   const streams = [source];
   if (entry.method === 8) streams.push(zlib.createInflateRaw());
-  streams.push(inspect, fs.createWriteStream(target, { flags: fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), mode: 0o600 }));
-  await pipeline(streams, operation.signal ? { signal: operation.signal } : {});
-  await verifySafeExtractionParents(parentIdentities);
-  if (bytes !== entry.uncompressedSize) throw new Error(`ZIP 条目展开大小不匹配：${entry.name}`);
-  if (((crc ^ 0xffffffff) >>> 0) !== entry.expectedCrc) throw new Error(`ZIP 条目 CRC-32 校验失败：${entry.name}`);
-  if (process.platform !== 'win32') await fs.promises.chmod(target, entry.unixMode & 0o111 ? 0o755 : 0o644);
-  return digest.digest('hex');
+  const outputHandle = await fs.promises.open(target, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+  try {
+    streams.push(inspect, fs.createWriteStream(null, { fd: outputHandle.fd, autoClose: false }));
+    await pipeline(streams, operation.signal ? { signal: operation.signal } : {});
+    if (bytes !== entry.uncompressedSize) throw new Error(`ZIP 条目展开大小不匹配：${entry.name}`);
+    if (((crc ^ 0xffffffff) >>> 0) !== entry.expectedCrc) throw new Error(`ZIP 条目 CRC-32 校验失败：${entry.name}`);
+    if (process.platform !== 'win32') await outputHandle.chmod(entry.unixMode & 0o111 ? 0o755 : 0o644);
+    await outputHandle.sync();
+    const outputStat = await outputHandle.stat();
+    const pathStat = await fs.promises.lstat(target);
+    await verifySafeExtractionParents(parentIdentities);
+    if (!pathStat.isFile() || pathStat.isSymbolicLink() || !sameFileIdentity(fileIdentity(outputStat), fileIdentity(pathStat))) throw new Error(`ZIP 条目输出路径在提取期间被替换：${entry.name}`);
+    return { path: entry.name, kind: 'file', size: outputStat.size, sha256: digest.digest('hex'), node: nodeIdentity(outputStat), mode: outputStat.mode & 0o777 };
+  } finally { await closeOwnedHandle(outputHandle); }
 };
 
 const extractComponentArchive = async (inspection, targetRoot, options = {}) => {
@@ -378,9 +412,11 @@ const extractComponentArchive = async (inspection, targetRoot, options = {}) => 
     if (inspection.inspectionToken && !sameFileIdentity(inspection.inspectionToken.identity, fileIdentity(await archiveHandle.stat()))) throw new Error('组件快照在提取前被替换');
     const extractionInspection = { ...inspection, targetRoot };
     const actualBudget = { bytes: 0 };
+    const outputReceipts = [];
     for (const entry of inspection.entries) {
       const target = path.join(targetRoot, ...entry.name.replace(/\/$/, '').split('/'));
-      await extractEntry(archiveHandle, extractionInspection, entry, target, actualBudget, operation);
+      const outputReceipt = await extractEntry(archiveHandle, extractionInspection, entry, target, actualBudget, operation);
+      if (outputReceipt) outputReceipts.push(outputReceipt);
     }
     if (inspection.inspectionToken && !sameFileIdentity(inspection.inspectionToken.identity, fileIdentity(await archiveHandle.stat()))) throw new Error('组件快照在提取期间发生变化');
     const manifestPath = path.join(targetRoot, ...inspection.manifestEntry.split('/'));
@@ -390,7 +426,10 @@ const extractComponentArchive = async (inspection, targetRoot, options = {}) => 
     try { manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8')); }
     catch (error) { throw new Error(`component.json 无效：${error.message || String(error)}`); }
     if (JSON.stringify(manifest) !== JSON.stringify(inspection.manifest)) throw new Error('component.json 在检查与展开之间不一致');
-    return { manifest, manifestEntry: inspection.manifestEntry, manifestPath };
+    const treeIdentity = await captureComponentTreeIdentity(targetRoot, operation);
+    const treeFiles = new Map(treeIdentity.filter(entry => entry.kind === 'file').map(entry => [entry.path, entry]));
+    if (treeFiles.size !== outputReceipts.length || outputReceipts.some(receipt => !compareComponentTreeIdentity([treeFiles.get(receipt.path)], [receipt], { includeNode: true }))) throw new Error('组件展开树与输出句柄收据不一致或包含额外文件');
+    return { manifest, manifestEntry: inspection.manifestEntry, manifestPath, treeIdentity };
   } catch (error) {
     const currentRoot = await fs.promises.lstat(targetRoot).catch(() => null);
     if (currentRoot && sameNodeIdentity(rootIdentity, nodeIdentity(currentRoot)) && currentRoot.isDirectory() && !currentRoot.isSymbolicLink()) {
@@ -398,8 +437,14 @@ const extractComponentArchive = async (inspection, targetRoot, options = {}) => 
       await fs.promises.rename(targetRoot, quarantine);
       const isolated = await fs.promises.lstat(quarantine);
       if (sameNodeIdentity(rootIdentity, nodeIdentity(isolated)) && isolated.isDirectory() && !isolated.isSymbolicLink()) {
-        try { await captureComponentTreeIdentity(quarantine); await fs.promises.rm(quarantine, { recursive: true, force: false }); }
-        catch (cleanupError) { error.message = `${error.message || String(error)}；失败暂存目录未通过安全清理检查，已保留：${cleanupError.message || String(cleanupError)}`; }
+        let cleanupTreeIdentity = null;
+        try { cleanupTreeIdentity = await captureComponentTreeIdentity(quarantine); await fs.promises.rm(quarantine, { recursive: true, force: false }); }
+        catch (cleanupError) {
+          error.message = `${error.message || String(error)}；失败暂存目录未通过安全清理检查，已保留：${cleanupError.message || String(cleanupError)}`;
+          error.recoveryPath = quarantine;
+          error.cleanupPendingPaths = [...new Set([...(Array.isArray(error.cleanupPendingPaths) ? error.cleanupPendingPaths : []), quarantine])];
+          if (cleanupTreeIdentity) error.cleanupPendingReceipts = [...(Array.isArray(error.cleanupPendingReceipts) ? error.cleanupPendingReceipts : []), { path: quarantine, kind: 'directory', nodeIdentity: rootIdentity, treeIdentity: cleanupTreeIdentity }];
+        }
       }
     }
     throw error;
@@ -417,6 +462,10 @@ const fileDigest = async (filePath, expectedIdentity, operation = {}) => {
   } finally { await handle.close(); }
 };
 const captureComponentTreeIdentity = async (root, options = {}) => {
+  // Windows alternate data streams are not enumerable through Node's readdir.
+  // This receipt covers named filesystem nodes and their primary data streams;
+  // extraction prevents ADS creation by rejecting ':' and writes only inside a
+  // newly owned, no-follow tree. It must not be described as an ADS inventory.
   const operation = operationOptions(options);
   const maxEntries = options.maxEntries ?? MAX_TREE_ENTRIES;
   const maxBytes = options.maxBytes ?? MAX_PACKAGE_BYTES;
@@ -438,7 +487,7 @@ const captureComponentTreeIdentity = async (root, options = {}) => {
     if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()) throw new Error(`组件目录层级被替换：${relativeDirectory || '.'}`);
     const canonicalDirectory = await fs.promises.realpath(directory);
     const directoryRelative = path.relative(canonicalRoot, canonicalDirectory);
-    if (directoryRelative.startsWith('..') || path.isAbsolute(directoryRelative)) throw new Error('组件目录真实路径越界');
+    if (relativeEscapes(directoryRelative)) throw new Error('组件目录真实路径越界');
     const entries = await fs.promises.readdir(directory, { withFileTypes: true });
     for (const entry of entries) {
       assertOperationActive(operation);
@@ -451,7 +500,7 @@ const captureComponentTreeIdentity = async (root, options = {}) => {
       if (totalEntries > maxEntries) throw new Error('组件目录条目数量超过安全上限');
       const canonicalEntry = await fs.promises.realpath(absolute);
       const realRelative = path.relative(canonicalRoot, canonicalEntry);
-      if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) throw new Error(`组件目录包含 reparse point 或真实路径越界：${relative}`);
+      if (relativeEscapes(realRelative)) throw new Error(`组件目录包含 reparse point 或真实路径越界：${relative}`);
       if (before.isDirectory()) { identity.push({ path: relative, kind: 'directory', node: nodeIdentity(before), mode: before.mode & 0o777 }); pending.push(relative); continue; }
       if (!before.isFile()) throw new Error(`组件目录包含特殊文件：${relative}`);
       totalBytes += before.size;
@@ -488,11 +537,11 @@ const compareComponentTreeIdentity = (actual, expected, { includeNode = false } 
   return JSON.stringify(portable(actual)) === JSON.stringify(portable(expected));
 };
 const componentTreeIdentityReceipt = entries => validateComponentTreeIdentityReceipt({ schemaVersion: COMPONENT_TREE_IDENTITY_SCHEMA_VERSION, entries });
-const verifyComponentTreeIdentity = async (root, expected) => {
+const verifyComponentTreeIdentity = async (root, expected, options = {}) => {
   let actual;
-  try { actual = await captureComponentTreeIdentity(root); }
+  try { actual = await captureComponentTreeIdentity(root, options); }
   catch (error) { throw new Error(`组件文件在确认或复制期间发生变化：${error.message || String(error)}`); }
-  if (!compareComponentTreeIdentity(actual, expected)) throw new Error('组件文件在确认或复制期间发生变化');
+  if (!compareComponentTreeIdentity(actual, expected, { includeNode: options.includeNode === true })) throw new Error('组件文件在确认或复制期间发生变化');
   return true;
 };
 

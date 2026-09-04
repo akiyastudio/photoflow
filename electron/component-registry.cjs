@@ -15,9 +15,11 @@ const COMPONENT_STATE_VERSION = 1;
 const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
 const syntheticInvalidId = value => `invalid-component-${Buffer.from(String(value || 'unknown')).toString('hex').slice(0, 40)}`;
 const foldedComponentId = value => typeof value === 'string' && CASE_INSENSITIVE_COMPONENT_ID.test(value) ? value.toLowerCase() : '';
+const archiveFileIdentity = stat => ({ dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs });
+const sameArchiveFileIdentity = (left, right) => left && right && Object.keys(left).every(key => left[key] === right[key]);
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 };
 const validArchivePath = value => {
   const normalized = normalizeRelativeFile(value);
@@ -113,6 +115,15 @@ const packageContentsError = (packageManifest, platform, arch) => {
     if (!entries.has(archiveEntry)) return `安装包缺少组件文件：${relativeFile}`;
   }
   return '';
+};
+const validateComponentPackageInspection = (inspection, { expectedId = '', platform = process.platform, arch = process.arch } = {}) => {
+  if (!inspection || !Array.isArray(inspection.entries)) throw new Error('组件包检查结果无效');
+  const packageManifest = { manifest: inspection.manifest, manifestEntry: inspection.manifestEntry, entries: inspection.entries.map(entry => typeof entry === 'string' ? entry : entry.name) };
+  const identity = manifestIdentity(packageManifest.manifest, COMPONENT_DEFINITIONS[packageManifest.manifest?.id]);
+  if (expectedId && identity.id !== expectedId) throw new Error(`组件 ID 不匹配：需要 ${expectedId}，实际为 ${identity.id}`);
+  const error = manifestCompatibilityError(packageManifest.manifest, platform, arch) || packageContentsError(packageManifest, platform, arch);
+  if (error) throw new Error(error);
+  return { identity, packageManifest };
 };
 const directorySize = async root => {
   let size = 0; const pending = [root];
@@ -333,7 +344,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     const packageInspections = new Map();
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
-      try { const inspected = readComponentPackageManifest(path.join(installRoot, entry.name)); packageInspections.set(entry.name, { inspected }); const rawId = inspected.manifest?.id; const folded = foldedComponentId(rawId); if (folded) { const spellings = packageIdSpellings.get(folded) || new Set(); spellings.add(rawId); packageIdSpellings.set(folded, spellings); } } catch (error) { packageInspections.set(entry.name, { error }); }
+      try { const archivePath = path.join(installRoot, entry.name); const stat = fs.lstatSync(archivePath); const inspected = readComponentPackageManifest(archivePath); packageInspections.set(entry.name, { inspected, identity: archiveFileIdentity(stat) }); const rawId = inspected.manifest?.id; const folded = foldedComponentId(rawId); if (folded) { const spellings = packageIdSpellings.get(folded) || new Set(); spellings.add(rawId); packageIdSpellings.set(folded, spellings); } } catch (error) { packageInspections.set(entry.name, { error }); }
     }
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
@@ -341,6 +352,8 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       try {
         const cached = packageInspections.get(entry.name);
         if (cached?.error) throw cached.error;
+        const currentArchiveStat = fs.lstatSync(archivePath);
+        if (!currentArchiveStat.isFile() || currentArchiveStat.isSymbolicLink() || !sameArchiveFileIdentity(cached.identity, archiveFileIdentity(currentArchiveStat))) throw new Error('组件包在目录检查期间被替换或修改');
         const packageManifest = cached.inspected;
         ({ manifest } = packageManifest);
         const folded = foldedComponentId(manifest?.id); if (folded && packageIdSpellings.get(folded)?.size > 1) throw new Error(`组件包 ID 存在大小写折叠冲突：${folded}`);
@@ -445,4 +458,4 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
 };
 
-module.exports = { COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, createComponentRegistry };
+module.exports = { COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, validateComponentPackageInspection, createComponentRegistry };

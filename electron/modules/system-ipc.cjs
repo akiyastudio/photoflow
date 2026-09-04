@@ -7,8 +7,10 @@ const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
+const { validateComponentPackageInspection } = require('../component-registry.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
+const relativePathEscapes = (pathApi, relative) => pathApi.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${pathApi.sep}`);
 
 const registerHostCapabilities = (componentCapabilityBroker, registrations) => {
   for (const [method, handler] of registrations) {
@@ -31,12 +33,12 @@ const finalizeComponentRuntimeInstall = async ({ componentId, destination, desti
     try {
       if (!destinationNodeIdentity || !destinationTreeIdentity) throw new Error('缺少本次发布 runtime 的回滚身份收据');
       await assertDirectoryNodeIdentity(fs, destination, destinationNodeIdentity, '待回滚的新组件 runtime');
-      await verifyComponentTreeIdentity(destination, destinationTreeIdentity);
+      await verifyComponentTreeIdentity(destination, destinationTreeIdentity, { includeNode: true });
       await fs.promises.rm(destination, { recursive: true, force: true });
       if (backupPath) {
         if (!backupNodeIdentity || !backupTreeIdentity) throw new Error('缺少旧组件备份的恢复身份收据');
         await assertDirectoryNodeIdentity(fs, backupPath, backupNodeIdentity, '待恢复的组件备份');
-        await verifyComponentTreeIdentity(backupPath, backupTreeIdentity);
+        await verifyComponentTreeIdentity(backupPath, backupTreeIdentity, { includeNode: true });
         await fs.promises.rename(backupPath, destination);
         await assertDirectoryNodeIdentity(fs, destination, backupNodeIdentity, '恢复的组件 runtime');
       }
@@ -308,7 +310,7 @@ const prepareSafeComponentInstallContainer = async ({ fs: fsApi, path: pathApi, 
   if (!containerStat.isDirectory() || containerStat.isSymbolicLink()) throw new Error('组件容器包含链接或非目录项');
   const canonicalContainer = await fsApi.promises.realpath(container);
   const relative = pathApi.relative(canonicalRoot, canonicalContainer);
-  if (relative !== componentId || relative.startsWith('..') || pathApi.isAbsolute(relative)) throw new Error('组件容器真实路径越过安装根目录');
+  if (relative !== componentId || relativePathEscapes(pathApi, relative)) throw new Error('组件容器真实路径越过安装根目录');
   return {
     installRoot: resolvedRoot,
     container,
@@ -319,7 +321,7 @@ const prepareSafeComponentInstallContainer = async ({ fs: fsApi, path: pathApi, 
 const rollbackComponentPublication = async ({ fs: fsApi, destination, publishedByThisOperation, publishedNodeIdentity, publishedTreeIdentity, backupPath = '', backupNodeIdentity = null, backupTreeIdentity = null }) => {
   if (publishedByThisOperation && publishedNodeIdentity) {
     await assertDirectoryNodeIdentity(fsApi, destination, publishedNodeIdentity, '新组件 runtime');
-    await verifyComponentTreeIdentity(destination, publishedTreeIdentity);
+    await verifyComponentTreeIdentity(destination, publishedTreeIdentity, { includeNode: true });
     await fsApi.promises.rm(destination, { recursive: true, force: false });
   }
   if (!backupPath) return { backupRestored: false };
@@ -327,7 +329,7 @@ const rollbackComponentPublication = async ({ fs: fsApi, destination, publishedB
   if (competingDestination) throw new Error('组件目标被其他操作占用；旧 runtime 已保留在备份目录');
   if (!backupNodeIdentity || !backupTreeIdentity) throw new Error('缺少旧组件备份的恢复身份收据');
   await assertDirectoryNodeIdentity(fsApi, backupPath, backupNodeIdentity, '组件备份目录');
-  await verifyComponentTreeIdentity(backupPath, backupTreeIdentity);
+  await verifyComponentTreeIdentity(backupPath, backupTreeIdentity, { includeNode: true });
   await fsApi.promises.rename(backupPath, destination);
   await assertDirectoryNodeIdentity(fsApi, destination, backupNodeIdentity, '恢复的组件 runtime');
   return { backupRestored: true };
@@ -607,21 +609,45 @@ const registerSystemIpc = context => {
 
   const queueSystemFilesystemCleanup = (paths, title, restartTask = null) => {
     const allowedRoots = [app.getPath('temp'), app.getPath('userData'), pluginService.installRoot].filter(Boolean).map(candidate => path.resolve(candidate));
-    const targets = [...new Set((paths || []).filter(Boolean).map(candidate => path.resolve(candidate)))].filter(target => allowedRoots.some(root => {
-      const relative = path.relative(root, target);
-      return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
-    }));
+    const seenTargets = new Set();
+    const targets = (paths || []).filter(Boolean).map(candidate => typeof candidate === 'string' ? { path: path.resolve(candidate) } : { ...candidate, path: path.resolve(candidate.path) }).filter(target => !seenTargets.has(target.path) && allowedRoots.some(root => {
+      const relative = path.relative(root, target.path);
+      return relative && !relativePathEscapes(path, relative);
+    }) && (seenTargets.add(target.path) || true));
     if (!targets.length) return;
     const execute = async task => {
       task?.report(10, title);
-      for (const target of targets) await fs.promises.rm(target, { recursive: true, force: true }).catch(error => {
-        writeLog('warn', 'Deferred system cleanup failed', { path: target, error: error.message || String(error) });
-      });
+      const failures = [];
+      for (const target of targets) try {
+        if (target.nodeIdentity) {
+          const stat = await fs.promises.lstat(target.path);
+          if (stat.isSymbolicLink() || !sameDirectoryNode(target.nodeIdentity, directoryNodeIdentity(stat))) throw new Error('持久清理目标身份已变化');
+          if (target.kind === 'directory') {
+            if (!stat.isDirectory() || !Array.isArray(target.treeIdentity)) throw new Error('持久清理目录收据无效');
+            await verifyComponentTreeIdentity(target.path, target.treeIdentity, { includeNode: true });
+            const isolatedPath = `${target.path}.cleanup-${crypto.randomUUID()}`;
+            await fs.promises.rename(target.path, isolatedPath);
+            try {
+              await assertDirectoryNodeIdentity(fs, isolatedPath, target.nodeIdentity, '持久清理隔离目录');
+              await verifyComponentTreeIdentity(isolatedPath, target.treeIdentity, { includeNode: true });
+              await fs.promises.rm(isolatedPath, { recursive: true, force: false });
+            } catch (cleanupError) {
+              const originalOccupant = await fs.promises.lstat(target.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+              if (!originalOccupant) await fs.promises.rename(isolatedPath, target.path).catch(restoreError => { cleanupError.message = `${cleanupError.message || String(cleanupError)}；隔离清理路径恢复失败：${restoreError.message || String(restoreError)}`; });
+              throw cleanupError;
+            }
+          } else {
+            if (!stat.isFile()) throw new Error('持久清理文件收据无效');
+            await fs.promises.unlink(target.path);
+          }
+        } else await fs.promises.rm(target.path, { recursive: true, force: true });
+      } catch (error) { failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
+      if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
       task?.report(100, '清理完成');
       return { removedCount: targets.length };
     };
     if (!backgroundTasks?.run) {
-      setTimeout(() => void execute(), 0);
+      setTimeout(() => void execute().catch(error => writeLog('warn', 'Deferred system cleanup remains pending', { paths: error.cleanupPendingPaths, error: error.message || String(error) })), 0);
       return;
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
@@ -961,6 +987,7 @@ const registerSystemIpc = context => {
       packageSnapshotNodeIdentity = directoryNodeIdentity(await fs.promises.lstat(packageSnapshotPath));
       const packageSizeBytes = sourceIdentity.size;
       const snapshotPackage = inspectComponentArchive(packageSnapshotPath, { ...operation, inspectionToken: sourceIdentity.inspectionToken });
+      validateComponentPackageInspection(snapshotPackage, { expectedId: componentId, platform: process.platform, arch: process.arch });
       await capacityReservation.resize(packageSizeBytes + snapshotPackage.totalUncompressedBytes + 64 * 1024 * 1024);
       installVolumeReservation = await reserveComponentInstallCapacity(pluginService.installRoot, snapshotPackage.totalUncompressedBytes + 128 * 1024 * 1024);
       const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
@@ -970,11 +997,11 @@ const registerSystemIpc = context => {
       capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease: installTransitionLease });
       const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath, operation);
       packageStageNodeIdentity = await readDirectoryNodeIdentity(fs, packageStagePath, '组件包展开暂存目录');
-      packageStageTreeIdentity = await captureComponentTreeIdentity(packageStagePath, operation);
+      packageStageTreeIdentity = extractedPackage.treeIdentity;
       const manifestDirectory = path.dirname(extractedPackage.manifestEntry);
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
       const stagedRelative = path.relative(packageStagePath, componentRoot);
-      if (stagedRelative.startsWith('..') || path.isAbsolute(stagedRelative)) throw new Error('组件清单路径越界');
+      if (relativePathEscapes(path, stagedRelative)) throw new Error('组件清单路径越界');
       const manifest = extractedPackage.manifest;
       snapshotComponentTrust(componentId, manifest);
       const entrypoints = manifest.entrypoints || {};
@@ -982,25 +1009,25 @@ const registerSystemIpc = context => {
       if (typeof relativeEntry !== 'string' || !relativeEntry.trim()) throw new Error('组件没有适用于当前系统的入口文件');
       const sourceEntry = path.resolve(componentRoot, relativeEntry);
       const sourceRelative = path.relative(componentRoot, sourceEntry);
-      if (!sourceRelative || sourceRelative.startsWith('..') || path.isAbsolute(sourceRelative)) throw new Error('组件入口路径无效');
+      if (!sourceRelative || relativePathEscapes(path, sourceRelative)) throw new Error('组件入口路径无效');
       if (!(await fs.promises.stat(sourceEntry).catch(() => null))?.isFile()) throw new Error(`组件入口不存在：${relativeEntry}`);
       for (const relativeFile of Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : []) {
         if (typeof relativeFile !== 'string' || !relativeFile.trim()) throw new Error('组件必需文件路径无效');
         const sourceFile = path.resolve(componentRoot, relativeFile);
         const requiredRelative = path.relative(componentRoot, sourceFile);
-        if (!requiredRelative || requiredRelative.startsWith('..') || path.isAbsolute(requiredRelative)) throw new Error(`组件必需文件路径无效：${relativeFile}`);
+        if (!requiredRelative || relativePathEscapes(path, requiredRelative)) throw new Error(`组件必需文件路径无效：${relativeFile}`);
         if (!(await fs.promises.stat(sourceFile).catch(() => null))?.isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
       }
       await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true);
       const integrityToken = pluginService.componentIntegrityToken(componentId, componentRoot);
       const extractedIntegrityStatus = integrityToken.startsWith('integrity|') ? 'pinned-unverified' : integrityToken.startsWith('metadata|') ? 'unsigned' : 'invalid';
       if (extractedIntegrityStatus !== snapshotTrust.integrityStatus) throw new Error('组件快照完整性状态在解压后发生变化');
-      componentTreeIdentity = await captureComponentTreeIdentity(componentRoot);
-      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
+      componentTreeIdentity = await captureComponentTreeIdentity(componentRoot, operation);
+      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity, { ...operation, includeNode: true });
       const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
       await installVolumeReservation.resize((componentSizeBytes * 2) + 128 * 1024 * 1024);
 
-      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
+      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity, { ...operation, includeNode: true });
 
       const installLocation = await prepareSafeComponentInstallContainer({ fs, path, installRoot: pluginService.installRoot, componentId });
       const { installRoot, container } = installLocation;
@@ -1009,6 +1036,7 @@ const registerSystemIpc = context => {
       await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
       stagingNodeIdentity = await readDirectoryNodeIdentity(fs, stagingPath, '组件发布暂存目录');
       await verifyComponentTreeIdentity(stagingPath, componentTreeIdentity);
+      componentTreeIdentity = await captureComponentTreeIdentity(stagingPath);
       await assertDirectoryNodeIdentity(fs, installRoot, installLocation.rootIdentity, '组件安装根目录');
       await assertDirectoryNodeIdentity(fs, container, installLocation.containerIdentity, '组件容器');
       const previous = pluginService.list().find(item => item.id === componentId);
@@ -1020,7 +1048,10 @@ const registerSystemIpc = context => {
         commitHostState: async () => { await componentServiceManager?.stop?.(componentId, 'component-upgrade'); await configMutationService.adoptLegacySettings(); },
         onAdmitted: () => { stagingPath = ''; stagingNodeIdentity = null; },
       });
-      const cleanupPaths = [packageStagePath, packageSnapshotPath].filter(Boolean);
+      const cleanupPaths = [
+        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeIdentity: packageStageTreeIdentity } : null,
+        packageSnapshotPath && packageSnapshotNodeIdentity ? { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity } : null,
+      ].filter(Boolean);
       packageStagePath = '';
       packageSnapshotPath = '';
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
@@ -1028,18 +1059,15 @@ const registerSystemIpc = context => {
       writeLog('info', 'Component installed', { componentId, destination });
       return { success: true, packageSizeBytes, operationId: transactionResult.operationId };
     } catch (error) {
-      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal), outcomeUnknown: Boolean(error?.outcomeUnknown) };
+      const pendingCleanup = Array.isArray(error?.cleanupPendingReceipts) && error.cleanupPendingReceipts.length ? error.cleanupPendingReceipts : error?.cleanupPendingPaths;
+      if (Array.isArray(pendingCleanup) && pendingCleanup.length) queueSystemFilesystemCleanup(pendingCleanup, `清理“${componentId || '未知'}”组件失败暂存文件`);
+      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal) || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
     } finally {
-      if (stagingPath && stagingNodeIdentity) {
-        try {
-          await assertDirectoryNodeIdentity(fs, stagingPath, stagingNodeIdentity, '组件发布暂存目录');
-          await verifyComponentTreeIdentity(stagingPath, componentTreeIdentity);
-          await fs.promises.rm(stagingPath, { recursive: true, force: false });
-        } catch (error) {
-          writeLog('warn', 'Component staging cleanup preserved a path for manual inspection', { componentId, stagingPath, error: error.message || String(error) });
-        }
-      }
-      const deferredCleanup = [packageStagePath, packageSnapshotPath].filter(Boolean);
+      const deferredCleanup = [
+        stagingPath && stagingNodeIdentity && componentTreeIdentity ? { path: stagingPath, kind: 'directory', nodeIdentity: stagingNodeIdentity, treeIdentity: componentTreeIdentity } : null,
+        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeIdentity: packageStageTreeIdentity } : null,
+        packageSnapshotPath && packageSnapshotNodeIdentity ? { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity } : null,
+      ].filter(Boolean);
       if (deferredCleanup.length) queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`);
       capabilityBarrier?.release?.();
       releaseInstall?.();

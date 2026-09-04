@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Transform } = require('node:stream');
-const { componentTreeIdentityReceipt, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentTreeIdentityReceipt } = require('../electron/component-package-archive.cjs');
+const { MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_PACKAGE_BYTES, componentTreeIdentityReceipt, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentTreeIdentityReceipt } = require('../electron/component-package-archive.cjs');
 const { createComponentRegistry, readComponentPackageManifest } = require('../electron/component-registry.cjs');
 const { verifyComponentPackage } = require('./verify-component-packages.cjs');
 const { writeZip } = require('./test-helpers/zip-fixture.cjs');
@@ -17,6 +17,10 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
 
 (async () => {
   try {
+    const currentFourPackageBaseline = { maxArchiveBytes: 294_486_162, maxDeclaredExpandedBytes: 451_802_764, maxEntryBytes: 115_736_422 };
+    assert(MAX_ARCHIVE_BYTES >= Math.ceil(currentFourPackageBaseline.maxArchiveBytes * 1.5), 'archive limit must preserve at least 50% headroom over the current four-package release set');
+    assert(MAX_PACKAGE_BYTES >= currentFourPackageBaseline.maxDeclaredExpandedBytes * 2, 'expanded limit must preserve 2x headroom over the current release set');
+    assert(MAX_ENTRY_BYTES >= currentFourPackageBaseline.maxEntryBytes * 2, 'entry limit must preserve 2x headroom over the current largest entry');
     assert.equal(validateComponentTreeIdentityReceipt(componentTreeIdentityReceipt([{ path: 'runtime', kind: 'directory', node: { dev: 1, ino: 2, birthtimeMs: 3 }, mode: 0o755 }])).schemaVersion, 1);
     assert.throws(() => validateComponentTreeIdentityReceipt({ schemaVersion: 0, entries: [] }), /版本/);
     writeZip(archive, base());
@@ -31,6 +35,23 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     assert.equal((await verifyComponentPackage(archive)).componentId, 'archive-parity');
     writeZip(archive, base().map(([name, value]) => [name, value, { dataDescriptor: true, descriptorSignature: name.endsWith('worker.cjs') }]));
     assert.equal(inspectComponentArchive(archive).manifest.id, 'archive-parity', 'signed and unsigned data descriptors are accepted when they match the central directory');
+    writeZip(archive, [...base(), ['pkg/..foo', 'legal sibling name']]);
+    assert.equal(inspectComponentArchive(archive).entries.some(entry => entry.name === 'pkg/..foo'), true, 'a legal ..foo segment is not confused with parent traversal');
+
+    const outputRaceInspection = inspectComponentArchive(archive);
+    const outputRaceRoot = path.join(root, 'output-race');
+    const originalOutputLstat = fs.promises.lstat;
+    let outputReplaced = false;
+    fs.promises.lstat = async target => {
+      if (!outputReplaced && path.resolve(target) === path.join(outputRaceRoot, 'pkg', 'worker.cjs') && fs.existsSync(target)) {
+        outputReplaced = true;
+        fs.renameSync(target, `${target}.displaced`);
+        fs.writeFileSync(target, 'replacement');
+      }
+      return originalOutputLstat(target);
+    };
+    try { await assert.rejects(extractComponentArchive(outputRaceInspection, outputRaceRoot), /输出路径.*替换/); }
+    finally { fs.promises.lstat = originalOutputLstat; }
 
     const cases = [
       ['duplicate', [...base(), ['pkg/worker.cjs', 'again']]],
@@ -41,6 +62,7 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
       ['Windows ADS', [['pkg/component.json', manifest], ['pkg/worker.cjs:stream', 'bad']]],
       ['symlink mode', [['pkg/component.json', manifest], ['pkg/worker.cjs', 'target', { externalAttributes: (0xa000 << 16) >>> 0 }]]],
       ['bad descriptor', [['pkg/component.json', manifest, { dataDescriptor: true }], ['pkg/worker.cjs', 'ok', { dataDescriptor: true, descriptorCrc: 0 }]]],
+      ['directory with CRC', [['pkg/component.json', manifest], ['pkg/', '', { localCrc: 1, expectedCrc: 1 }], ['pkg/worker.cjs', 'ok']]],
     ];
     for (const [label, entries] of cases) {
       writeZip(archive, entries);
@@ -48,6 +70,28 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
       assert.equal(rejection(() => readComponentPackageManifest(archive)), true, `${label}: registry must reject identically`);
       await assert.rejects(verifyComponentPackage(archive), undefined, `${label}: release verifier must reject identically`);
     }
+
+    writeZip(archive, base());
+    const racedSnapshot = path.join(root, 'raced-snapshot.zip');
+    const displacedSnapshot = `${racedSnapshot}.displaced`;
+    const originalLstat = fs.promises.lstat;
+    let replacedDuringBinding = false;
+    fs.promises.lstat = async target => {
+      if (!replacedDuringBinding && path.resolve(target) === path.resolve(racedSnapshot) && fs.existsSync(racedSnapshot)) {
+        replacedDuringBinding = true;
+        fs.renameSync(racedSnapshot, displacedSnapshot);
+        fs.copyFileSync(archive, racedSnapshot);
+      }
+      return originalLstat(target);
+    };
+    try { await assert.rejects(snapshotComponentArchive(archive, racedSnapshot), /替换|截断/); }
+    finally { fs.promises.lstat = originalLstat; }
+    assert.equal(fs.existsSync(racedSnapshot), true, 'snapshot cleanup must not unlink a replacement it does not own');
+    fs.rmSync(racedSnapshot); fs.rmSync(displacedSnapshot);
+
+    const excessiveParents = path.join(root, 'excessive-implicit-parents.zip');
+    writeZip(excessiveParents, [['component.json', manifest], ...Array.from({ length: 6_667 }, (_, index) => [`roots-${index}/a/b/file.bin`, ''])]);
+    assert.throws(() => inspectComponentArchive(excessiveParents), /隐式目录数量|路径.*数量/);
 
     writeZip(archive, base());
     await assert.rejects(snapshotComponentArchive(archive, path.join(root, 'aborted.zip'), { signal: AbortSignal.abort() }), /取消/);
@@ -61,6 +105,20 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     const registry = createComponentRegistry({ projectRoot: path.resolve(__dirname, '..'), userComponentRoot: root, isPackaged: true, platform: process.platform, arch: process.arch });
     assert.equal(registry.resolvePackage('archive-parity').packageInspectionStatus, 'manifest-bounded');
     await assert.rejects(verifyComponentPackage(archive), /CRC-32/);
+    const failedInspection = inspectComponentArchive(archive);
+    const originalRm = fs.promises.rm;
+    fs.promises.rm = async (target, options) => { if (String(target).includes('.failed-')) throw Object.assign(new Error('injected cleanup denial'), { code: 'EACCES' }); return originalRm(target, options); };
+    let retainedRecoveryPath = '';
+    try {
+      await assert.rejects(extractComponentArchive(failedInspection, path.join(root, 'injected-cleanup-failure')), error => {
+        retainedRecoveryPath = error.recoveryPath;
+        return error.code !== 'ENOENT' && Array.isArray(error.cleanupPendingPaths) && error.cleanupPendingPaths.includes(error.recoveryPath) && fs.existsSync(error.recoveryPath);
+      });
+    } finally { fs.promises.rm = originalRm; }
+    await fs.promises.rm(retainedRecoveryPath, { recursive: true, force: false });
+    assert.equal(fs.existsSync(retainedRecoveryPath), false, 'a retained quarantine converges when durable cleanup retries');
+    const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+    assert.match(systemIpcSource, /error\?\.cleanupPendingReceipts[\s\S]*pendingCleanup[\s\S]*queueSystemFilesystemCleanup\(pendingCleanup/);
 
     const volume = await fs.promises.statfs(root, { bigint: true });
     const moreThanHalf = Number((volume.bavail * volume.bsize / 2n) + 1n);
