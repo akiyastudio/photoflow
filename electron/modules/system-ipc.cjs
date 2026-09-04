@@ -710,7 +710,7 @@ const registerSystemIpc = context => {
     void durableCompletion.catch(() => undefined);
     return { admitted: true, completion: durableCompletion };
   };
-  backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => awaitDurableCleanupRestart(queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task)));
+  backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => awaitDurableCleanupRestart(queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task)), { autoRestart: true });
 
   const recycleManaged = async (root, target, label = path.basename(target)) => {
     let stat;

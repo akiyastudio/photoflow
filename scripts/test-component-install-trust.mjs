@@ -3,11 +3,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
+import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const { awaitDurableCleanupRestart, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
+const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 
 const crc32 = buffer => {
   let crc = 0xffffffff;
@@ -43,6 +45,7 @@ const acceptedAdmission = createDurableCleanupAdmission({ start: worker => Promi
 assert.equal(acceptedAdmission.admitted, true); await acceptedAdmission.completion; assert.equal(cleanupWorkerCalls, 1);
 let settleRestart; const restartWork = new Promise(resolve => { settleRestart = resolve; }); let restartSettled = false; const restarted = awaitDurableCleanupRestart(Promise.resolve({ admitted: true, completion: restartWork })).then(() => { restartSettled = true; }); await Promise.resolve(); assert.equal(restartSettled, false, 'restart factory remains pending until replacement cleanup completes'); settleRestart({ task: { state: 'completed' } }); await restarted; assert.equal(restartSettled, true);
 await assert.rejects(awaitDurableCleanupRestart(Promise.resolve({ admitted: true, completion: Promise.reject(new Error('replacement cleanup failed')) })), /replacement cleanup failed/);
+const autoRestartRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-cleanup-auto-restart-')); const autoRestartPersistence = path.join(autoRestartRoot, 'tasks.json'); let releaseRunning; const runningGate = new Promise(resolve => { releaseRunning = resolve; }); const firstTaskService = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: autoRestartPersistence }); const running = firstTaskService.start({ id: 'durable-cleanup-running', type: 'system-filesystem-cleanup', title: 'cleanup', metadata: { targets: [], dataCleanupComplete: true } }, async task => { task.report(99, 'persisted', { dataCleanupComplete: true }); await runningGate; }); await new Promise(resolve => setImmediate(resolve)); assert.equal(firstTaskService.flush(), true); firstTaskService.stop(); releaseRunning(); await running.completion.catch(() => undefined); const restoredTaskService = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: autoRestartPersistence }); let automaticCleanupStarted = false; let finishAutomaticCleanup; const automaticGate = new Promise(resolve => { finishAutomaticCleanup = resolve; }); restoredTaskService.registerTypeRestartFactory('system-filesystem-cleanup', async task => { automaticCleanupStarted = task.metadata.dataCleanupComplete === true; await automaticGate; return { task }; }, { autoRestart: true }); await new Promise(resolve => setTimeout(resolve, 20)); assert.equal(automaticCleanupStarted, true, 'durable cleanup auto-restarts with data-complete metadata'); finishAutomaticCleanup(); await new Promise(resolve => setTimeout(resolve, 20)); restoredTaskService.stop(); fs.rmSync(autoRestartRoot, { recursive: true, force: true });
 const releaseFirstInstall = acquireInstall('third-party.tool');
 assert.throws(() => acquireInstall('third-party.tool'), /正在安装/);
 const releaseOtherInstall = acquireInstall('other.tool');
