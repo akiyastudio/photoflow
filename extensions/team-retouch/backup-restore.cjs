@@ -64,6 +64,7 @@ const buildReplacements = payload => {
       add(path.join(sourceComponentRoot, 'projects', sourceHash), path.join(targetComponentRoot, 'projects', targetHash));
     }
   }
+  for (const item of payload.additionalPathReplacements || []) add(item.from, item.to);
   return pairs.sort((left, right) => right[0].length - left[0].length);
 };
 const replacePath = (value, pairs) => {
@@ -515,13 +516,30 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
   const rollback = snapshotDatabase(destinationPath);
   try {
     const privatePlan = projectPrivateSources({ sources, payload });
+    const sourceProjectId = String(payload.project?.sourceId || payload.project?.id || ''); const targetProjectId = String(payload.project?.id || ''); const targetHash = crypto.createHash('sha256').update(targetProjectId).digest('hex');
+    const referencedPaths = new Set(); const sourceDb = new DatabaseSync(source.path, { readOnly: true });
+    try {
+      for (const row of sourceDb.prepare('SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE project_id=?').all(sourceProjectId)) for (const value of Object.values(row)) if (value) referencedPaths.add(String(value));
+      for (const row of sourceDb.prepare('SELECT edited_patch_path FROM team_person_assignments WHERE project_id=?').all(sourceProjectId)) if (row.edited_patch_path) referencedPaths.add(String(row.edited_patch_path));
+      for (const row of sourceDb.prepare('SELECT artifact_path FROM team_task_artifacts WHERE project_id=? AND is_deleted=0').all(sourceProjectId)) if (row.artifact_path) referencedPaths.add(String(row.artifact_path));
+    } finally { sourceDb.close(); }
+    payload.additionalPathReplacements = [];
+    for (const item of sources || []) {
+      const relative = String(item.relativePath || '').replace(/\\/g, '/');
+      if (!relative.startsWith('team-retouch/imported-outputs/')) continue;
+      const child = relative.slice('team-retouch/'.length); const reference = [...referencedPaths].find(value => value.replace(/\\/g, '/').toLowerCase().endsWith(`/${child.toLowerCase()}`));
+      if (!reference) continue;
+      if (item.sha256 && digestFile(item.path) !== String(item.sha256).toLowerCase()) throw new Error(`团片项目恢复 imported-output 摘要不匹配：${relative}`);
+      const targetRelative = `team-retouch/projects/${targetHash}/restored-imported/${crypto.createHash('sha256').update(relative).digest('hex')}${path.extname(relative)}`;
+      privatePlan.selected.push({ ...item, originalRelativePath: relative, relativePath: targetRelative });
+      payload.additionalPathReplacements.push({ from: reference, to: path.join(destinationDataPath, ...targetRelative.slice('team-retouch/'.length).split('/')) });
+    }
     const result = restoreProjectStorage({ sourcePath: source.path, destinationPath, payload, ensureSchema, fault });
     const consumedPaths = [String(source.relativePath || '')].filter(Boolean);
     for (const suffix of ['-wal', '-shm']) {
       const sidecar = (sources || []).find(item => item.relativePath === `${source.relativePath}${suffix}`);
       if (sidecar) consumedPaths.push(String(sidecar.relativePath));
     }
-    const targetHash = crypto.createHash('sha256').update(String(payload.project?.id || '')).digest('hex');
     const exactScope = { roots: ['projects','workflow-content','workflow-return-reviews','output-ownership'].map(name => path.join(destinationDataPath, name, targetHash)), files: ['workflows','workflow-settings','identity-similarities','workflow-jobs','output-cleanup'].map(name => path.join(destinationDataPath, name, `${targetHash}.json`)) };
     consumedPaths.push(...publishWorkspacePrivateFiles({ sources: privatePlan.selected, destinationDataPath, payload, fault, exactScope }));
     const applied = [...new Set(consumedPaths)]; const warnings = privatePlan.warnings;

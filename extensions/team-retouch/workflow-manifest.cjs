@@ -7,7 +7,7 @@ const findOwnedWorkflowOutput = (group, outputOwnership = {}) => {
     if (!item?.available || !item.relativePath) continue;
     const relativePath = workflowOutputOwnershipKey(item.relativePath);
     const ownership = outputOwnership?.[relativePath];
-    if (ownership?.commitId && ownership?.artifactId) return { item, relativePath, ownership };
+    if (ownership?.commitId && ownership?.artifactId) return { item, relativePath: String(ownership.publishedRelativePath || relativePath), ownership };
   }
   return null;
 };
