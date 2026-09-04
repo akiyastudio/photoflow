@@ -32,9 +32,9 @@
 
 ## 发布批准严格门禁
 
-证据模板应保留“待填写 / 待核验”占位标记作为可复用指南，门禁不会以“清空模板占位符”判定可发布。五项阻断证据和三类批准都已在受控证据库完成后，复制 `RELEASE_APPROVAL_TEMPLATE.json` 为 `RELEASE_APPROVAL.json`，仅填写版本、安装包 SHA-256、批准角色以及证据 ID / SHA-256 / 日期索引。
+证据模板应保留“待填写 / 待核验”占位标记作为可复用指南，门禁不会以“清空模板占位符”判定可发布。五项阻断证据和三类批准都已在受控证据库完成后，复制 `RELEASE_APPROVAL_TEMPLATE.json` 为 `RELEASE_APPROVAL.json`，仅填写版本、被构建源码的 `buildSourceCommit`、最终安装包 SHA-256、稳定 `DELIVERY-MANIFEST.json` SHA-256、批准角色以及证据 ID / SHA-256 / 日期索引。批准索引应位于从 `buildSourceCommit` 派生的后续独立审批提交中，不要求审批提交等于被构建提交。
 
-签名原件、证照、身份材料、管理 Token、密钥和控制台导出必须留在可审计的受控证据库；Git 中的 `RELEASE_APPROVAL.json` 只是非敏感索引。`npm run check:legal-release-ready` 会严格验证该索引，发布脚本还会把其安装包哈希与当前选中的安装包进行匹配。
+签名原件、证照、身份材料、管理 Token、密钥和控制台导出必须留在可审计的受控证据库；Git 中的 `RELEASE_APPROVAL.json` 只是非敏感索引。最终门禁会把批准索引同时绑定到不可变 staging 中的 Setup、完整交付清单及其 Git commit，再按清单重新哈希所有组件；未签名的构建回执不能代替这项人工批准。
 
 ## 发布阻断项
 

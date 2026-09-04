@@ -122,7 +122,7 @@
 
 ## 发布批准记录
 
-只有五项均通过后才创建非敏感批准索引：复制 `RELEASE_APPROVAL_TEMPLATE.json` 为 `RELEASE_APPROVAL.json`，保持 `schemaVersion: 1`，填写与 `package.json` 匹配的版本、`status: "approved"`、ISO UTC 批准日期和最终安装包 SHA-256。业务、隐私和法务只填批准角色；五项 blocker 各自填受控证据 ID、SHA-256、批准日期和批准角色。
+只有五项均通过，并且 `release:prepare` 已生成 commit/version 专属不可变 staging 后，才创建非敏感批准索引：复制 `RELEASE_APPROVAL_TEMPLATE.json` 为 `RELEASE_APPROVAL.json`，保持 `schemaVersion: 2`，填写与交付清单匹配的版本、`buildSourceCommit`、`status: "approved"`、ISO UTC 批准日期、最终安装包 SHA-256 和稳定 `DELIVERY-MANIFEST.json` SHA-256。批准索引可在后续独立审批提交中形成；它不改变已经固定的构建源码提交。业务、隐私和法务只填批准角色；五项 blocker 各自填受控证据 ID、SHA-256、批准日期和批准角色。不得把未签名的组件验证回执当作批准或信任根。
 
 下列信息的敏感原件仍只存放在受控证据库，Git 只保存 `RELEASE_APPROVAL.json` 中的索引：
 

@@ -5,6 +5,8 @@ const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 const releaseConfig = require('./release-config.cjs');
 const { hashStableArtifact, captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
+const { verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release-staging.cjs');
+const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const releaseRoot = path.join(repositoryRoot, 'artifacts', 'installers');
@@ -29,11 +31,13 @@ const booleanValue = (value, fallback) => {
   throw new Error(`无法识别布尔值：${value}`);
 };
 
-const runLegalReleaseReadyGate = installerPath => {
+const runLegalReleaseReadyGate = (installerPath, manifestPath = '') => {
+  const manifestArgs = manifestPath ? ['--delivery-manifest', manifestPath] : [];
   const result = spawnSync(process.execPath, [
     path.join(repositoryRoot, 'scripts', 'test-legal-release-evidence.cjs'),
     '--require-ready',
     '--installer', installerPath,
+    ...manifestArgs,
   ], { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error('法律发布批准严格门禁未通过，未生成发布记录且未执行网络操作');
@@ -84,6 +88,7 @@ const run = async () => {
   const args = parseArguments(process.argv.slice(2));
   const shouldPublish = booleanValue(args.publish, false);
   const published = booleanValue(args.published, false);
+  if (shouldPublish || published) throw new Error('release:json 只能生成未发布草稿；联网发布必须使用锁定 staging 的 release:publish');
   const requiresReleaseApproval = shouldPublish || published;
   const version = String(args.version || packageJson.version || '').trim();
   const versionParts = version.split('.').map(Number);
@@ -91,12 +96,19 @@ const run = async () => {
     throw new Error(`package.json 中的版本号无效：${version}`);
   }
 
+  const directReleaseLock = requiresReleaseApproval ? acquireReleaseLock(repositoryRoot) : null;
   const terminal = readline.createInterface({ input: stdin, output: stdout });
   try {
-    const installerPath = path.resolve(args.installer || findInstaller(version));
+    let stagedEvidence = null;
+    if (requiresReleaseApproval) {
+      if (!args.manifest) throw new Error('published/publish release JSON 必须提供 --manifest <不可变 staging/DELIVERY-MANIFEST.json>');
+      stagedEvidence = await verifyStagedRelease({ repositoryRoot, manifestPath: path.resolve(args.manifest) });
+      if (String(stagedEvidence.manifest.version) !== version) throw new Error('发布版本与 staging manifest 不一致');
+    }
+    const installerPath = stagedEvidence?.setup.path || path.resolve(args.installer || findInstaller(version));
     if (!fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
     const installerIdentity = captureArtifactIdentity(installerPath);
-    if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath);
+    if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath, stagedEvidence.manifestPath);
     assertSourceIdentity(installerPath, installerIdentity);
     const downloadUrl = String(args.url || releaseConfig.downloadUrl || '').trim();
     if (!downloadUrl) throw new Error('scripts/release-config.cjs 中没有配置固定下载链接');
@@ -127,17 +139,24 @@ const run = async () => {
       versionCode,
     };
 
-    fs.mkdirSync(outputRoot, { recursive: true });
     const outputPath = path.join(outputRoot, `app-release-${version}.json`);
     const temporaryPath = `${outputPath}.${process.pid}.tmp`;
-    fs.writeFileSync(temporaryPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-    JSON.parse(fs.readFileSync(temporaryPath, 'utf8'));
-    fs.renameSync(temporaryPath, outputPath);
+    fs.mkdirSync(outputRoot, { recursive: true });
+    fs.rmSync(outputPath, { force: true });
+    fs.rmSync(temporaryPath, { force: true });
 
     if (shouldPublish) {
+      stagedEvidence = await verifyStagedRelease({ repositoryRoot, manifestPath: stagedEvidence.manifestPath });
+      runLegalReleaseReadyGate(installerPath, stagedEvidence.manifestPath);
+      assertStagedReleaseUnchanged(stagedEvidence);
       assertSourceIdentity(installerPath, installerIdentity);
       await publishRelease(record);
     }
+    try {
+      fs.writeFileSync(temporaryPath, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+      JSON.parse(fs.readFileSync(temporaryPath, 'utf8'));
+      fs.renameSync(temporaryPath, outputPath);
+    } finally { fs.rmSync(temporaryPath, { force: true }); }
 
     console.log('\n发布 JSON 已生成：');
     console.log(outputPath);
@@ -148,6 +167,7 @@ const run = async () => {
     console.log(JSON.stringify(record, null, 2));
   } finally {
     terminal.close();
+    if (directReleaseLock) releaseLock(directReleaseLock);
   }
 };
 

@@ -1,7 +1,7 @@
 const { spawnSync } = require('child_process');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { writeQualityReceipt, clearQualityReceipt, readGitHead, assertGitHead, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
+const { writeQualityReceipt, clearQualityReceipt, captureGitSourceFence, assertGitSourceFence, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const qualityStartedAt = new Date().toISOString();
@@ -15,8 +15,9 @@ const componentRelease = releaseReady || releaseQuality;
 let qualityAttempt = null;
 if (releaseQuality) {
   clearQualityReceipt(repositoryRoot);
-  qualityAttempt = { gitCommit: readGitHead(repositoryRoot), attemptId: crypto.randomUUID() };
   assertCleanGitWorktree(repositoryRoot);
+  const sourceFence = captureGitSourceFence(repositoryRoot);
+  qualityAttempt = { gitCommit: sourceFence.gitCommit, attemptId: crypto.randomUUID(), sourceFence };
 }
 
 const steps = [
@@ -74,9 +75,9 @@ for (const [label, args] of steps) {
 }
 
 if (releaseQuality) {
-  assertGitHead(repositoryRoot, qualityAttempt.gitCommit);
+  assertGitSourceFence(repositoryRoot, qualityAttempt.sourceFence);
   assertCleanGitWorktree(repositoryRoot);
-  const receipt = writeQualityReceipt({ repositoryRoot, ...qualityAttempt, startedAt: qualityStartedAt, finishedAt: new Date().toISOString() });
+  const receipt = writeQualityReceipt({ repositoryRoot, gitCommit: qualityAttempt.gitCommit, attemptId: qualityAttempt.attemptId, startedAt: qualityStartedAt, finishedAt: new Date().toISOString() });
   console.log(`Release quality receipt recorded for ${receipt.gitCommit}; this is test evidence, not a signature or legal approval.`);
 }
 

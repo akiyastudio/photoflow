@@ -37,6 +37,28 @@ const assertGitHead = (repositoryRoot, expected) => {
   if (current !== expected) throw new Error(`发布质量门禁期间 HEAD 已变化：${expected} -> ${current}`);
   return current;
 };
+const gitPath = (repositoryRoot, value) => {
+  const result = spawnSync('git', ['rev-parse', '--git-path', value], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  if (result.error || result.status !== 0) throw new Error(`无法解析 Git 元数据路径：${value}`);
+  return path.resolve(repositoryRoot, result.stdout.trim());
+};
+const metadataIdentity = file => { const stat = fs.statSync(file); return { file, dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs }; };
+const captureGitSourceFence = repositoryRoot => {
+  const symbolic = spawnSync('git', ['symbolic-ref', '-q', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  const files = [gitPath(repositoryRoot, 'HEAD'), gitPath(repositoryRoot, 'index')];
+  if (symbolic.status === 0) files.push(gitPath(repositoryRoot, symbolic.stdout.trim()));
+  const tree = spawnSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  if (tree.error || tree.status !== 0) throw new Error('无法捕获发布源码 tree');
+  return { gitCommit: readGitHead(repositoryRoot), gitTree: tree.stdout.trim(), metadata: files.map(metadataIdentity) };
+};
+const assertGitSourceFence = (repositoryRoot, fence) => {
+  assertGitHead(repositoryRoot, fence.gitCommit);
+  for (const expected of fence.metadata) {
+    const actual = metadataIdentity(expected.file);
+    if (Object.keys(expected).some(key => expected[key] !== actual[key])) throw new Error(`发布期间 Git 元数据发生变化：${expected.file}`);
+  }
+  return true;
+};
 const writeQualityReceipt = ({ repositoryRoot, gitCommit, startedAt, finishedAt, attemptId }) => {
   const receipt = { schemaVersion: SCHEMA_VERSION, toolVersion: TOOL_VERSION, command: COMMAND, status: 'observed-passed', trust: 'informational', gitCommit, attemptId, startedAt, finishedAt };
   atomicWriteJson(receiptPathFor(repositoryRoot), receipt);
@@ -66,10 +88,10 @@ const validateQualityReceipt = ({ repositoryRoot, gitCommit, now = Date.now() })
   return receipt;
 };
 const assertCleanGitWorktree = repositoryRoot => {
-  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: repositoryRoot, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, encoding: 'utf8', windowsHide: true });
   if (status.error || status.status !== 0) throw new Error('无法验证发布工作树状态');
   if (String(status.stdout || '').trim()) throw new Error('发布工作树包含未提交或未跟踪改动；质量回执不能绑定到不同的构建输入');
   return { status: 'clean' };
 };
 
-module.exports = { COMMAND, atomicWriteJson, receiptPathFor, clearQualityReceipt, readGitHead, assertGitHead, writeQualityReceipt, validateQualityReceipt, assertCleanGitWorktree };
+module.exports = { COMMAND, atomicWriteJson, receiptPathFor, clearQualityReceipt, readGitHead, assertGitHead, captureGitSourceFence, assertGitSourceFence, writeQualityReceipt, validateQualityReceipt, assertCleanGitWorktree };

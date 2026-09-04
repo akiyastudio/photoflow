@@ -1,9 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "releaseVersion": "0.0.0",
+  "buildSourceCommit": "40_HEX_BUILD_SOURCE_COMMIT",
   "status": "pending",
   "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
   "installerSha256": "64_HEX_INSTALLER_SHA256",
+  "deliveryManifestSha256": "64_HEX_DELIVERY_MANIFEST_SHA256",
   "approvalRoles": {
     "business": "BUSINESS_APPROVER_ROLE",
     "privacy": "PRIVACY_APPROVER_ROLE",

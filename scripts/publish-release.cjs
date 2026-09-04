@@ -4,12 +4,12 @@ const path = require('path');
 const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 const releaseConfig = require('./release-config.cjs');
-const { captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
+const { verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release-staging.cjs');
+const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 const packagePath = path.join(repositoryRoot, 'package.json');
-const installerRoot = path.join(repositoryRoot, 'artifacts', 'installers');
 
 const parseArguments = values => {
   const result = {};
@@ -22,18 +22,12 @@ const parseArguments = values => {
   return result;
 };
 
-const runCommand = (command, args, label) => {
-  console.log(`\n=== ${label} ===`);
-  const result = spawnSync(command, args, { cwd: repositoryRoot, stdio: 'inherit' });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(`${label}失败，退出代码 ${result.status ?? 'unknown'}`);
-};
-
-const runLegalReleaseReadyGate = installerPath => {
+const runLegalReleaseReadyGate = (installerPath, manifestPath) => {
   const result = spawnSync(process.execPath, [
     path.join(repositoryRoot, 'scripts', 'test-legal-release-evidence.cjs'),
     '--require-ready',
     '--installer', installerPath,
+    '--delivery-manifest', manifestPath,
   ], { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error('法律发布批准严格门禁未通过，未读取 Token 且未执行网络或发布操作');
@@ -59,17 +53,6 @@ const assertPublisherReady = async token => {
     headers: { Authorization: `Bearer ${token}` },
   });
   if (status.ready !== true) throw new Error('CloudBase release 发布接口尚未就绪');
-};
-
-const findInstaller = version => {
-  if (!fs.existsSync(installerRoot)) throw new Error(`安装包目录不存在：${installerRoot}；请先执行 npm run electron:build`);
-  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const exactName = new RegExp(`Setup\\s+${escapedVersion}\\.exe$`, 'i');
-  const candidates = fs.readdirSync(installerRoot)
-    .filter(name => exactName.test(name))
-    .map(name => path.join(installerRoot, name));
-  if (!candidates.length) throw new Error(`没有找到版本 ${version} 的安装包；请先执行 npm run electron:build`);
-  return candidates[0];
 };
 
 const hiddenQuestion = prompt => {
@@ -164,6 +147,8 @@ const askYesNo = async (terminal, prompt, fallback = false) => {
 };
 
 const run = async () => {
+  const releaseLockHandle = acquireReleaseLock(repositoryRoot);
+  try {
   const args = parseArguments(process.argv.slice(2));
   const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
   const version = String(packageJson.version || '').trim();
@@ -176,19 +161,13 @@ const run = async () => {
   if (args.version && String(args.version).trim() !== version) {
     throw new Error(`--version 与 package.json 不一致；当前版本是 ${version}`);
   }
-  const installerPath = path.resolve(args.installer || findInstaller(version));
-  if (!fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
-  const installerIdentity = captureArtifactIdentity(installerPath);
-  runLegalReleaseReadyGate(installerPath);
-  runCommand(process.execPath, [
-    path.join(repositoryRoot, 'scripts', 'generate-delivery-manifest.cjs'),
-    '--installer', installerPath,
-  ], '验证 Setup 与组件 ZIP 并生成交付清单（组件 ZIP 不由本发布脚本上传）');
-  assertSourceIdentity(installerPath, installerIdentity);
-  const approval = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'docs', 'legal', 'RELEASE_APPROVAL.json'), 'utf8'));
-  const delivery = JSON.parse(fs.readFileSync(path.join(installerRoot, 'DELIVERY-MANIFEST.json'), 'utf8'));
-  const setup = delivery.artifacts.find(artifact => artifact.type === 'setup' && artifact.fileName === path.basename(installerPath));
-  if (!setup || String(setup.sha256).toLowerCase() !== String(approval.installerSha256).toLowerCase()) throw new Error('最终批准哈希与交付清单 Setup 哈希不一致');
+  if (!args.manifest) throw new Error('发布必须显式提供 --manifest <不可变 staging/DELIVERY-MANIFEST.json>');
+  const manifestPath = path.resolve(args.manifest);
+  let stagedEvidence = await verifyStagedRelease({ repositoryRoot, manifestPath });
+  const installerPath = stagedEvidence.setup.path;
+  if (String(stagedEvidence.manifest.version) !== version) throw new Error('staging 版本与 package.json 不一致');
+  runLegalReleaseReadyGate(installerPath, manifestPath);
+  assertStagedReleaseUnchanged(stagedEvidence);
 
   let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim() || readWindowsUserToken();
   let persistToken = false;
@@ -218,10 +197,9 @@ const run = async () => {
       }
       mandatory = ['true', 'y', 'yes', '1', '是'].includes(value);
     }
-    const mandatoryArgument = String(mandatory);
-
     console.log('\n正在验证 CloudBase release 发布接口和管理员 Token……');
-    assertSourceIdentity(installerPath, installerIdentity);
+    stagedEvidence = await verifyStagedRelease({ repositoryRoot, manifestPath });
+    runLegalReleaseReadyGate(installerPath, manifestPath);
     await assertPublisherReady(token);
     if (persistToken && persistWindowsUserToken(token)) {
       console.log('管理员 Token 已保存到 Windows 用户环境变量，以后发布会自动读取。');
@@ -232,21 +210,29 @@ const run = async () => {
       await terminal.question('确认下载地址已经提供新版本后，按回车写入 release 数据库……');
     }
 
-    assertSourceIdentity(installerPath, installerIdentity);
-    runCommand(process.execPath, [
-      path.join(repositoryRoot, 'scripts', 'generate-release-json.cjs'),
-      '--version', version,
-      '--notes', notes,
-      '--mandatory', mandatoryArgument,
-      '--installer', installerPath,
-      '--published', 'true',
-      '--publish', 'true',
-    ], '生成并发布 release 记录');
+    stagedEvidence = await verifyStagedRelease({ repositoryRoot, manifestPath });
+    runLegalReleaseReadyGate(installerPath, manifestPath);
+    assertStagedReleaseUnchanged(stagedEvidence);
+    const versionParts = version.split('.').map(Number);
+    const record = { channel: 'stable', downloadUrl: releaseConfig.downloadUrl, mandatory, notes, platform: 'win32', published: true, publishedAt: new Date().toISOString(), sha256: stagedEvidence.setup.sha256, version, versionCode: versionParts[0] * 10_000 + versionParts[1] * 100 + versionParts[2] };
+    const attemptRoot = path.join(repositoryRoot, 'artifacts', 'release-publish-attempts'); fs.mkdirSync(attemptRoot, { recursive: true });
+    const attemptPath = path.join(attemptRoot, `${stagedEvidence.manifestSha256}.json`);
+    if (fs.existsSync(attemptPath)) throw new Error(`此交付清单已有发布尝试；为避免重复线上记录，请先人工核验：${attemptPath}`);
+    fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'pending', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    try { await requestJson(`${String(releaseConfig.apiBaseUrl).replace(/\/+$/, '')}/v1/admin/releases`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(record) }); }
+    catch (error) { throw new Error(`线上发布结果未确认；pending 尝试已保留且自动重试被禁止：${error.message || error}`); }
+    const outputRoot = path.join(repositoryRoot, 'artifacts', 'cloudbase'); fs.mkdirSync(outputRoot, { recursive: true });
+    const outputPath = path.join(outputRoot, `app-release-${version}.json`); const temporaryPath = `${outputPath}.${process.pid}.tmp`;
+    try { fs.writeFileSync(temporaryPath, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' }); fs.renameSync(temporaryPath, outputPath); }
+    finally { fs.rmSync(temporaryPath, { force: true }); }
+    fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'committed', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`);
+    assertStagedReleaseUnchanged(stagedEvidence);
 
     console.log(`\n版本 ${version} 已发布完成。`);
   } finally {
     terminal.close();
   }
+  } finally { releaseLock(releaseLockHandle); }
 };
 
 run().catch(error => {

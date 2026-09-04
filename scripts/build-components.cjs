@@ -7,6 +7,9 @@ const extensionRoot = path.join(root, 'extensions');
 const outputRoot = path.join(root, 'artifacts', 'installers');
 const onlyIndex = process.argv.indexOf('--only');
 const only = onlyIndex >= 0 ? String(process.argv[onlyIndex + 1] || '') : '';
+const commitResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true });
+if (commitResult.error || commitResult.status !== 0) throw new Error('Unable to capture component build HEAD');
+const buildCommit = commitResult.stdout.trim();
 const packages = fs.readdirSync(extensionRoot, { withFileTypes: true }).filter(entry => entry.isDirectory()).flatMap(entry => {
   const directory = path.join(extensionRoot, entry.name); const packagePath = path.join(directory, 'package.json');
   if (!fs.existsSync(packagePath)) return [];
@@ -37,7 +40,7 @@ for (const component of packages) {
     fs.rmSync(expectedArchive, { force: true });
     throw new Error(`Component package was not produced: ${component.id} ${component.version}`);
   }
-  const verification = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify-component-packages.cjs'), '--write-receipts', expectedArchive], { cwd: root, stdio: 'inherit' });
+  const verification = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify-component-packages.cjs'), '--write-receipts', '--build-commit', buildCommit, expectedArchive], { cwd: root, stdio: 'inherit' });
   if (verification.error) throw verification.error;
   if ((verification.status ?? 1) !== 0) throw new Error(`Component package verification failed; diagnostic archive retained: ${expectedArchive}`);
 }

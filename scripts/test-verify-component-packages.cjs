@@ -41,7 +41,7 @@ const verifierTemporaryDirectories = () => new Set(fs.readdirSync(os.tmpdir()).f
     assert.equal(result.componentId, manifest.id);
     const expectedReceiptIdentity = { id: manifest.id, version: manifest.version, platform: process.platform, arch: process.arch };
     await assert.rejects(verifyComponentPackageReceipt(archive, expectedReceiptIdentity), /回执缺失/);
-    writeVerificationReceipt(archive, result);
+    writeVerificationReceipt(archive, { ...result, buildCommit: 'a'.repeat(40) });
     const receiptVerified = await verifyComponentPackageReceipt(archive, expectedReceiptIdentity);
     const { sourceIdentity: _sourceIdentity, ...publicResult } = result;
     assert.deepEqual({ fileName: receiptVerified.fileName, size: receiptVerified.size, sha256: receiptVerified.sha256, componentId: receiptVerified.componentId, version: receiptVerified.version, platform: receiptVerified.platform, arch: receiptVerified.arch }, publicResult);
@@ -96,7 +96,7 @@ const verifierTemporaryDirectories = () => new Set(fs.readdirSync(os.tmpdir()).f
     const fakeArchive = path.join(root, `PhotoFlow-forged-receipt-1.0.0-${process.platform}-${process.arch}.zip`);
     const fakeBytes = Buffer.alloc(46, 0x41);
     fs.writeFileSync(fakeArchive, fakeBytes);
-    writeVerificationReceipt(fakeArchive, { fileName: path.basename(fakeArchive), size: fakeBytes.length, sha256: crypto.createHash('sha256').update(fakeBytes).digest('hex'), componentId: 'forged-receipt', version: '1.0.0', platform: process.platform, arch: process.arch });
+    writeVerificationReceipt(fakeArchive, { fileName: path.basename(fakeArchive), size: fakeBytes.length, sha256: crypto.createHash('sha256').update(fakeBytes).digest('hex'), componentId: 'forged-receipt', version: '1.0.0', platform: process.platform, arch: process.arch, buildCommit: 'a'.repeat(40) });
     await assert.rejects(verifyComponentPackageReceipt(fakeArchive, { id: 'forged-receipt', version: '1.0.0', platform: process.platform, arch: process.arch }), /ZIP|组件包/);
 
     const fencedInstaller = path.join(root, 'Setup.exe');

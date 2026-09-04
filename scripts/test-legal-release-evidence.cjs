@@ -19,6 +19,8 @@ const approvalPath = path.join(legalRoot, 'RELEASE_APPROVAL.json');
 const requireReady = process.argv.includes('--require-ready');
 const installerArgumentIndex = process.argv.indexOf('--installer');
 const installerArgument = installerArgumentIndex >= 0 ? process.argv[installerArgumentIndex + 1] : '';
+const deliveryManifestArgumentIndex = process.argv.indexOf('--delivery-manifest');
+const deliveryManifestArgument = deliveryManifestArgumentIndex >= 0 ? process.argv[deliveryManifestArgumentIndex + 1] : '';
 const blockerIds = [
   'operatorAddress',
   'rightsRequestChannel',
@@ -82,8 +84,8 @@ const assertNoSensitiveApprovalContent = approval => {
   assert(!/-----BEGIN [A-Z ]*(?:PRIVATE KEY|CERTIFICATE)-----/.test(JSON.stringify(approval)), 'approval index must not embed keys or certificates');
 };
 const validateApprovalShape = (approval, { strict }) => {
-  exactKeys(approval, ['schemaVersion', 'releaseVersion', 'status', 'approvedAt', 'installerSha256', 'approvalRoles', 'blockers'], 'release approval');
-  assert.strictEqual(approval.schemaVersion, 1, 'release approval schemaVersion must be 1');
+  exactKeys(approval, ['schemaVersion', 'releaseVersion', 'buildSourceCommit', 'status', 'approvedAt', 'installerSha256', 'deliveryManifestSha256', 'approvalRoles', 'blockers'], 'release approval');
+  assert.strictEqual(approval.schemaVersion, 2, 'release approval schemaVersion must be 2');
   exactKeys(approval.approvalRoles, ['business', 'privacy', 'legal'], 'release approval roles');
   exactKeys(approval.blockers, blockerIds, 'release approval blockers');
   for (const blockerId of blockerIds) {
@@ -95,6 +97,8 @@ const validateApprovalShape = (approval, { strict }) => {
   assert.strictEqual(approval.status, 'approved', 'release approval status must be approved');
   assert(isIsoDate(approval.approvedAt), 'release approval approvedAt must be an exact ISO UTC timestamp');
   assert(/^[a-f0-9]{64}$/i.test(approval.installerSha256), 'release approval installerSha256 must be 64 hexadecimal characters');
+  assert(/^[a-f0-9]{64}$/i.test(approval.deliveryManifestSha256), 'release approval deliveryManifestSha256 must be 64 hexadecimal characters');
+  assert(/^[a-f0-9]{40}$/i.test(approval.buildSourceCommit), 'release approval buildSourceCommit must be a full Git SHA');
   for (const [area, role] of Object.entries(approval.approvalRoles)) {
     assertNonSensitiveIndexValue(role, `release approval ${area} role`, 80);
   }
@@ -250,6 +254,18 @@ const run = async () => {
     const installerSha256 = await sha256File(installerPath);
     assert.strictEqual(installerSha256.toLowerCase(), approval.installerSha256.toLowerCase(), 'release approval installerSha256 must match the selected installer');
   }
+  if (requireReady && deliveryManifestArgument) {
+    const manifestPath = path.resolve(deliveryManifestArgument);
+    assert(fs.existsSync(manifestPath) && fs.statSync(manifestPath).isFile(), `delivery manifest does not exist: ${manifestPath}`);
+    const manifestBytes = fs.readFileSync(manifestPath);
+    const manifestSha256 = sha256(manifestBytes);
+    const deliveryManifest = JSON.parse(manifestBytes);
+    assert.strictEqual(manifestSha256.toLowerCase(), approval.deliveryManifestSha256.toLowerCase(), 'release approval deliveryManifestSha256 must match the selected manifest');
+    assert.strictEqual(deliveryManifest.buildSourceCommit, approval.buildSourceCommit, 'release approval buildSourceCommit must match the selected manifest');
+    assert.strictEqual(deliveryManifest.version, approval.releaseVersion, 'release approval version must match the selected manifest');
+    const ancestry = spawnSync('git', ['merge-base', '--is-ancestor', approval.buildSourceCommit, 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true });
+    assert.strictEqual(ancestry.status, 0, 'approval commit must descend from the immutable buildSourceCommit');
+  }
 
   console.log('Legal release evidence structural, local-link, and FFmpeg integrity checks completed.');
   console.log(JSON.stringify({
@@ -292,7 +308,7 @@ const run = async () => {
       '--skip-upload-pause', 'true',
     ], { cwd: root, env: childEnv, encoding: 'utf8', windowsHide: true });
     assert.notStrictEqual(publish.status, 0, 'publish-release must fail closed when the approval index is absent');
-    assert.match(`${publish.stdout}\n${publish.stderr}`, /legal release approval is missing/i);
+    assert.match(`${publish.stdout}\n${publish.stderr}`, /发布必须显式提供 --manifest|legal release approval is missing/i);
 
     const releaseVersion = `99.${crypto.randomInt(10, 90)}.${crypto.randomInt(10, 90)}`;
     const candidatePath = path.join(root, 'artifacts', 'cloudbase', `app-release-${releaseVersion}.json`);
@@ -305,7 +321,7 @@ const run = async () => {
       '--publish', 'true',
     ], { cwd: root, env: childEnv, encoding: 'utf8', windowsHide: true });
     assert.notStrictEqual(generate.status, 0, 'generate-release-json --publish true must fail closed when the approval index is absent');
-    assert.match(`${generate.stdout}\n${generate.stderr}`, /legal release approval is missing/i);
+    assert.match(`${generate.stdout}\n${generate.stderr}`, /只能生成未发布草稿/i);
     assert(!fs.existsSync(candidatePath), 'strict legal gate must fail before writing a release JSON');
 
     const publishedOnly = spawnSync(process.execPath, [
@@ -317,7 +333,7 @@ const run = async () => {
       '--publish', 'false',
     ], { cwd: root, env: childEnv, encoding: 'utf8', windowsHide: true });
     assert.notStrictEqual(publishedOnly.status, 0, 'generate-release-json --published true must fail closed even without network publishing');
-    assert.match(`${publishedOnly.stdout}\n${publishedOnly.stderr}`, /legal release approval is missing/i);
+    assert.match(`${publishedOnly.stdout}\n${publishedOnly.stderr}`, /只能生成未发布草稿/i);
     assert(!fs.existsSync(candidatePath), 'strict legal gate must fail before writing an importable published release JSON');
     assert(!fs.existsSync(networkSentinel), 'strict legal gate must fail before any release network request');
     } finally {
@@ -327,8 +343,9 @@ const run = async () => {
 
   const publishSource = fs.readFileSync(path.join(root, 'scripts', 'publish-release.cjs'), 'utf8');
   const publishRun = publishSource.slice(publishSource.indexOf('const run = async'));
-  assert(publishRun.indexOf('runLegalReleaseReadyGate(installerPath)') < publishRun.indexOf('process.env.PHOTOFLOW_ADMIN_TOKEN'), 'publish-release must run the strict gate before reading an admin token');
-  assert(publishRun.indexOf('runLegalReleaseReadyGate(installerPath)') < publishRun.indexOf('assertPublisherReady(token)'), 'publish-release must run the strict gate before network readiness checks');
+  assert(publishRun.indexOf('runLegalReleaseReadyGate(installerPath, manifestPath)') < publishRun.indexOf('process.env.PHOTOFLOW_ADMIN_TOKEN'), 'publish-release must run the strict staged gate before reading an admin token');
+  assert(publishRun.indexOf('runLegalReleaseReadyGate(installerPath, manifestPath)') < publishRun.indexOf('assertPublisherReady(token)'), 'publish-release must run the strict staged gate before network readiness checks');
+  assert(publishRun.includes("'--delivery-manifest', manifestPath"), 'publish-release must bind legal approval to the stable delivery manifest');
   assert(publishRun.includes("'--installer', installerPath"), 'publish-release must pass the approved installer path to generate-release-json');
   const generateSource = fs.readFileSync(path.join(root, 'scripts', 'generate-release-json.cjs'), 'utf8');
   const generateRun = generateSource.slice(generateSource.indexOf('const run = async'));
