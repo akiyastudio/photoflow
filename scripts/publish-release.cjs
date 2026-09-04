@@ -6,6 +6,7 @@ const { stdin, stdout } = require('process');
 const releaseConfig = require('./release-config.cjs');
 const { verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release-staging.cjs');
 const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
+const { captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
@@ -43,6 +44,11 @@ const requestJson = async (url, options) => {
     const detail = body.error || body.raw || `${response.status} ${response.statusText}`;
     throw new Error(`release 数据库接口不可用：${detail}`);
   }
+  return body;
+};
+const publishReleaseOnce = async ({ url, token, record, idempotencyKey, request = requestJson }) => {
+  const body = await request(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(record) });
+  if (body?.saved !== true) throw new Error('release 数据库未返回 saved=true；发布结果不确定');
   return body;
 };
 
@@ -219,13 +225,28 @@ const run = async () => {
     const attemptPath = path.join(attemptRoot, `${stagedEvidence.manifestSha256}.json`);
     if (fs.existsSync(attemptPath)) throw new Error(`此交付清单已有发布尝试；为避免重复线上记录，请先人工核验：${attemptPath}`);
     fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'pending', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
-    try { await requestJson(`${String(releaseConfig.apiBaseUrl).replace(/\/+$/, '')}/v1/admin/releases`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json; charset=utf-8' }, body: JSON.stringify(record) }); }
-    catch (error) { throw new Error(`线上发布结果未确认；pending 尝试已保留且自动重试被禁止：${error.message || error}`); }
     const outputRoot = path.join(repositoryRoot, 'artifacts', 'cloudbase'); fs.mkdirSync(outputRoot, { recursive: true });
-    const outputPath = path.join(outputRoot, `app-release-${version}.json`); const temporaryPath = `${outputPath}.${process.pid}.tmp`;
-    try { fs.writeFileSync(temporaryPath, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' }); fs.renameSync(temporaryPath, outputPath); }
-    finally { fs.rmSync(temporaryPath, { force: true }); }
-    fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'committed', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`);
+    const outputPath = path.join(outputRoot, `app-release-${version}.json`);
+    const priorIdentity = fs.existsSync(outputPath) ? captureArtifactIdentity(outputPath) : null;
+    const temporaryPath = `${outputPath}.${stagedEvidence.manifestSha256}.pending`;
+    const backupPath = `${outputPath}.${stagedEvidence.manifestSha256}.backup`;
+    fs.rmSync(temporaryPath, { force: true });
+    let preparedFd;
+    try { preparedFd = fs.openSync(temporaryPath, 'wx'); fs.writeFileSync(preparedFd, `${JSON.stringify(record, null, 2)}\n`); fs.fsyncSync(preparedFd); }
+    finally { if (preparedFd !== undefined) fs.closeSync(preparedFd); }
+    try { await publishReleaseOnce({ url: `${String(releaseConfig.apiBaseUrl).replace(/\/+$/, '')}/v1/admin/releases`, token, record, idempotencyKey: stagedEvidence.manifestSha256 }); }
+    catch (error) { throw new Error(`线上发布结果未确认；pending 尝试已保留且自动重试被禁止：${error.message || error}`); }
+    try {
+      if (priorIdentity) assertSourceIdentity(outputPath, priorIdentity);
+      else if (fs.existsSync(outputPath)) throw new Error('本地 release 记录在发布期间被其他进程创建');
+      if (priorIdentity) fs.renameSync(outputPath, backupPath);
+      fs.renameSync(temporaryPath, outputPath);
+      fs.rmSync(backupPath, { force: true });
+      fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'committed', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`);
+    } catch (error) {
+      fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'remote-saved-local-pending', manifestSha256: stagedEvidence.manifestSha256, version, preparedPath: temporaryPath, backupPath: fs.existsSync(backupPath) ? backupPath : null }, null, 2)}\n`);
+      throw new Error(`线上发布已确认，但本地记录落盘失败；禁止重发，请按 pending 记录修复：${error.message || error}`);
+    }
     assertStagedReleaseUnchanged(stagedEvidence);
 
     console.log(`\n版本 ${version} 已发布完成。`);
@@ -235,7 +256,9 @@ const run = async () => {
   } finally { releaseLock(releaseLockHandle); }
 };
 
-run().catch(error => {
+if (require.main === module) run().catch(error => {
   console.error(`\n发布流程失败：${error.message || error}`);
   process.exitCode = 1;
 });
+
+module.exports = { publishReleaseOnce };

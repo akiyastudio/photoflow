@@ -2706,16 +2706,17 @@ const returnConfirm = (parentId, payload, context) => withReviewSessionOperation
 const acceptDurableOperation = async (parentId, payload, context, kind, extra = {}) => {
   const startedAt = Date.now();
   const operationId = String(payload.operationId || crypto.randomUUID());
+  const acceptedAt = Date.now();
+  if (kind === 'return-batch' && Array.isArray(payload.returnedFiles)) durableOperationSecrets.set(projectOperationKey(context, operationId), { returnedFiles: [...payload.returnedFiles], expiresAt: acceptedAt + 30_000 });
   const accepted = await withDomain(parentId, db => {
     const existing = db.prepare('SELECT * FROM team_durable_operations WHERE id=? AND project_id=?').get(operationId, String(context.projectId));
-    if (existing) return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true, resumable: kind !== 'return-batch', ...(kind === 'return-batch' ? { restartPolicy: 'requires-reselection', limitation: '返图选择凭据不会跨进程保存；重启后必须重新选择返图' } : {}) };
-    const now = Date.now();
-    const { returnedFiles: secretReturnedFiles, acceptOnly: _acceptOnly, ...persistablePayload } = payload;
-    if (kind === 'return-batch' && Array.isArray(secretReturnedFiles)) durableOperationSecrets.set(projectOperationKey(context, operationId), { returnedFiles: [...secretReturnedFiles], expiresAt: now + 30_000 });
+    if (existing) return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true, resumable: true, ...(kind === 'return-batch' ? { restartPolicy: 'reselect-to-resume', limitation: '返图选择凭据不跨进程保存；使用同一 operationId 重新选择后从持久 checkpoint 续跑' } : {}) };
+    const now = acceptedAt;
+    const persistablePayload = { ...payload }; delete persistablePayload.returnedFiles; delete persistablePayload.acceptOnly;
     const baseRevision = Number(domainRevision(db, String(context.projectId))) || 0;
     db.prepare(`INSERT INTO team_durable_operations(id,project_id,kind,state,phase,request_json,base_revision,created_at,updated_at) VALUES(?,?,?,'accepted','accepted',?,?,?,?)`)
       .run(operationId, String(context.projectId), kind, JSON.stringify({ ...persistablePayload, operationId, ...extra }), baseRevision, now, now);
-    return { success: true, accepted: true, operationId, state: 'accepted', phase: 'accepted', resumable: kind !== 'return-batch', ...(kind === 'return-batch' ? { restartPolicy: 'requires-reselection', limitation: '返图选择凭据不会跨进程保存；重启后必须重新选择返图' } : {}) };
+    return { success: true, accepted: true, operationId, state: 'accepted', phase: 'accepted', resumable: true, ...(kind === 'return-batch' ? { restartPolicy: 'reselect-to-resume', limitation: '返图选择凭据不跨进程保存；使用同一 operationId 重新选择后从持久 checkpoint 续跑' } : {}) };
   });
   migrationMetric(`team-operation-${kind}`, 'ack', startedAt, { ackMs: Date.now() - startedAt, itemCount: Array.isArray(payload.groups) ? payload.groups.reduce((count, group) => count + (group.items?.length || 0), 0) : Array.isArray(payload.items) ? payload.items.length : payload.photoId ? 1 : 0, cacheHit: accepted.cacheHit === true, outcome: accepted.state });
   return accepted;
@@ -2724,7 +2725,7 @@ const acceptDurableOperation = async (parentId, payload, context, kind, extra = 
 const durableOperationSnapshot = row => row ? ({
   operationId: row.id, kind: row.kind, state: row.state, phase: row.phase, progress: Number(row.progress) || 0,
   checkpoint: parseJson(row.checkpoint_json, {}), result: parseJson(row.result_json, {}), error: row.error || '',
-  cancelRequested: Boolean(row.cancel_requested), resumable: row.kind !== 'return-batch', ...(row.kind === 'return-batch' ? { restartPolicy: 'requires-reselection', limitation: '返图选择凭据不会跨进程保存；重启后必须重新选择返图' } : {}), createdAt: row.created_at, updatedAt: row.updated_at,
+  cancelRequested: Boolean(row.cancel_requested), resumable: true, ...(row.kind === 'return-batch' ? { restartPolicy: 'reselect-to-resume', limitation: '返图选择凭据不跨进程保存；使用同一 operationId 重新选择后从持久 checkpoint 续跑' } : {}), createdAt: row.created_at, updatedAt: row.updated_at,
 }) : null;
 
 const runDurableOperationUnlocked = async (parentId, payload, context) => {

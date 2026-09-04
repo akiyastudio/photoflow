@@ -124,6 +124,8 @@
 
 只有五项均通过，并且 `release:prepare` 已生成 commit/version 专属不可变 staging 后，才创建非敏感批准索引：复制 `RELEASE_APPROVAL_TEMPLATE.json` 为 `RELEASE_APPROVAL.json`，保持 `schemaVersion: 2`，填写与交付清单匹配的版本、`buildSourceCommit`、`status: "approved"`、ISO UTC 批准日期、最终安装包 SHA-256 和稳定 `DELIVERY-MANIFEST.json` SHA-256。批准索引可在后续独立审批提交中形成；它不改变已经固定的构建源码提交。业务、隐私和法务只填批准角色；五项 blocker 各自填受控证据 ID、SHA-256、批准日期和批准角色。不得把未签名的组件验证回执当作批准或信任根。
 
+当前线上 release 服务仍使用自动文档 ID，不能证明跨机器幂等。每份批准 manifest 只能由一台授权发布机执行；客户端会发送 manifest SHA-256 作为幂等提示，并以本地 pending 记录禁止自动重试，但这不是服务端保证。超时、连接中断、`saved:true` 缺失或“服务端可能已保存但客户端未收到响应”时，必须先由人工在 CloudBase 与本地 pending 记录中核验，禁止换机器或直接重发。
+
 下列信息的敏感原件仍只存放在受控证据库，Git 只保存 `RELEASE_APPROVAL.json` 中的索引：
 
 - 发布候选版本与安装包 SHA-256：`[待填写]`

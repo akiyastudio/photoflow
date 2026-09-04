@@ -23,7 +23,7 @@ assert(publishSource.includes('acquireReleaseLock(repositoryRoot)') && publishSo
 const releaseJsonSource = fs.readFileSync(path.join(root, 'scripts', 'generate-release-json.cjs'), 'utf8');
 assert(releaseJsonSource.includes('captureArtifactIdentity(installerPath)') && releaseJsonSource.indexOf('assertSourceIdentity(installerPath, installerIdentity)') < releaseJsonSource.indexOf('await publishRelease(record)'), 'release record publishing must retain the approved installer identity fence through network publication');
 assert(releaseJsonSource.includes('release:json 只能生成未发布草稿'), 'direct release:json must reject published or network modes');
-assert(publishSource.indexOf("await requestJson(`${String(releaseConfig.apiBaseUrl)") < publishSource.indexOf('fs.writeFileSync(temporaryPath'), 'published:true local evidence must only be written after remote success');
+assert(publishSource.indexOf('await publishReleaseOnce(') < publishSource.indexOf('fs.renameSync(temporaryPath, outputPath)'), 'prepared published evidence must only be promoted after confirmed remote success');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-release-receipt-'));
 try {
   const blockedLogRoot = path.join(fixtureRoot, 'not-a-directory'); fs.writeFileSync(blockedLogRoot, 'file');
