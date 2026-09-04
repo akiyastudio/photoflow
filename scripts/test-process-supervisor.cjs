@@ -41,6 +41,10 @@ const main = async () => {
   await assert.rejects(terminateAndWait(neverClosedChild, Date.now() + 40, { platform: 'win32' }), error => error.code === 'PROCESS_TERMINATION_FAILED' && error.cause?.code === 'PROCESS_TERMINATION_INVALID_PID');
   assert(Date.now() - neverClosedStartedAt >= 30, 'raw helper termination failure must remain fenced until its total deadline');
 
+  const successfulTreeChild = rawWindowsChild(12345); let successfulTreeSettled = false;
+  const successfulTreeTermination = terminateAndWait(successfulTreeChild, Date.now() + 200, { platform: 'win32', execFileImpl: (_file, _args, _options, callback) => callback(null) }).finally(() => { successfulTreeSettled = true; });
+  successfulTreeChild.exitCode = 0; successfulTreeChild.emit('exit', 0, null); await delay(30); assert.equal(successfulTreeSettled, false, 'successful taskkill must still wait for raw helper close'); successfulTreeChild.emit('close', 0, null); await successfulTreeTermination;
+
   const children = [];
   const logs = [];
   const supervisor = createProcessSupervisor({

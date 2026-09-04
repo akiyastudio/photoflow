@@ -87,8 +87,10 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
     error.pid = child.pid || null; error.cause = treeTerminationError;
     throw error;
   }
-  let exited = childHasExited(child);
-  if (!exited) exited = await waitForChildExit(child, platform === 'win32' ? terminationDeadline : Date.now() + Math.min(500, Math.floor(Math.max(0, terminationDeadline - Date.now()) / 2)));
+  let exited = platform === 'win32'
+    ? await waitForChildExit(child, terminationDeadline, { requireClose: true })
+    : childHasExited(child);
+  if (!exited && platform !== 'win32') exited = await waitForChildExit(child, Date.now() + Math.min(500, Math.floor(Math.max(0, terminationDeadline - Date.now()) / 2)));
   if (!exited && platform !== 'win32') {
     forced = true;
     let forcedByChild = false;
