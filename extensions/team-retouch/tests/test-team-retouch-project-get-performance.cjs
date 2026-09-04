@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { ensureSchema, projectMigrationCommittedKey } = require('../service.cjs');
+const { ensureSchema } = require('../service.cjs');
 const { createHostSimulator } = require('./host-simulator.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-project-get-performance-'));
@@ -11,16 +11,15 @@ const databasePath = path.join(dataPath, 'storage.sqlite3');
 fs.mkdirSync(dataPath, { recursive: true });
 const db = ensureSchema(databasePath);
 db.exec('BEGIN');
-const photo = db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,display_name,relative_path,relative_path_state,file_missing,calibrated_at,created_at,updated_at) VALUES(?,?,?,?,?,'ready',0,?,?,?)`);
-const task = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,'[]',?,?)`);
+const photo = db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,display_name,relative_path,relative_path_state,file_missing,created_at,updated_at) VALUES(?,?,?,?,?,'ready',0,?,?)`);
+const task = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,generation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,?,?,?,?)`);
 const exclusion = db.prepare(`INSERT INTO team_person_exclusions(id,project_id,photo_id,base_version_id,bbox_json,created_at) VALUES(?,?,?,?, '{}',?)`);
 for (let index = 0; index < 2000; index += 1) {
   const photoId = `photo-${index}`; const versionId = `version-${index}`;
-  photo.run(photoId, 'project-performance', versionId, `Photo ${index}`, `images/${index}.jpg`, 1, index + 1, index + 1);
-  task.run('project-performance', `task-${index}`, photoId, versionId, 1, '人物 1', `working/${index}.png`, index + 1, index + 1);
+  photo.run(photoId, 'project-performance', versionId, `Photo ${index}`, `images/${index}.jpg`, index + 1, index + 1);
+  task.run('project-performance', `task-${index}`, photoId, versionId, 1, '人物 1', `working/${index}.png`, '[{"personIndex":1}]', '{"version":2}', index + 1, index + 1);
   if (index % 3 === 0) exclusion.run(`excluded-${index}`, 'project-performance', photoId, versionId, index + 1);
 }
-db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(projectMigrationCommittedKey('project-performance'), 'committed');
 db.exec('COMMIT'); db.close();
 
 let metadataIpcCount = 0;
@@ -28,7 +27,7 @@ const simulator = createHostSimulator({
   service: path.join(__dirname, '..', 'service.cjs'),
   context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'project-performance', projectName: 'Performance', projectStatus: 'active' },
   capabilities: {
-    'component.storage': () => ({ apiVersion: 7, dataPath, databasePath, projectId: 'project-performance', ownership: 'component-private' }),
+    'component.storage': () => ({ dataPath, databasePath, projectId: 'project-performance', ownership: 'component-private' }),
     'project.media.variants': () => { metadataIpcCount += 1; throw new Error('project.get must not issue per-photo metadata IPC'); },
   },
 });

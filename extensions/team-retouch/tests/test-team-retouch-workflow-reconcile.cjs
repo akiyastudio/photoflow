@@ -19,7 +19,7 @@ const projectStorageKey = require('crypto').createHash('sha256').update('project
 const outputDirectory = path.join(dataRoot, 'workflow-content', projectStorageKey);
 const manifestPath = path.join(dataRoot, 'workflows', `${projectStorageKey}.json`);
 const reviewDirectory = path.join(dataRoot, 'workflow-return-reviews', projectStorageKey);
-const deliveryDirectory = path.join(dataRoot, 'legacy-work');
+const deliveryDirectory = path.join(dataRoot, 'projects', projectStorageKey, 'media', 'photo', 'base', 'delivery');
 const taskOnePatch = path.join(deliveryDirectory, 'task-one.png');
 const taskTwoPatch = path.join(deliveryDirectory, 'task-two.png');
 const taskThreePatch = path.join(deliveryDirectory, 'task-three.png');
@@ -39,7 +39,7 @@ const bundle = {
 fs.writeFileSync(bundle.versions[0].filePath, 'BASE');
 
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'service.cjs')], {
-  env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1', PHOTOFLOW_TEST_FAULT_REVIEW_SESSION_AFTER_COMMIT: 'session-write-failure', PHOTOFLOW_TEST_FAULT_REVIEW_RETIRE: 'retire-failure' }, stdio: ['pipe', 'pipe', 'pipe'],
+    env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1', PHOTOFLOW_TEST_FAULT_REVIEW_SESSION_AFTER_COMMIT: 'session-write-failure', PHOTOFLOW_TEST_FAULT_REVIEW_RETIRE: 'retire-failure' }, stdio: ['pipe', 'pipe', 'pipe'],
 });
 const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 let serviceStderr = '';
@@ -60,7 +60,7 @@ const emittedTopics = new Set();
 const capabilityCounts = new Map();
 const waitForHeldWorkflow = () => new Promise(resolve => { heldWorkflowResolve = resolve; });
 const releaseHeldWorkflow = () => {
-  child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: heldWorkflowFrame.id, ok: true, result: { apiVersion: 7, dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' } })}\n`);
+  child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: heldWorkflowFrame.id, ok: true, result: { dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' } })}\n`);
   heldWorkflowFrame = null;
 };
 const invoke = (method, payload = {}) => new Promise((resolve, reject) => {
@@ -91,26 +91,25 @@ const ready = new Promise((resolve, reject) => {
             heldWorkflowResolve?.();
             return;
           }
-          result = { apiVersion: 7, dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' };
+          result = { dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' };
         } else if (frame.method === 'project.media.variants') {
           const token = `test-input:${bundle.versions[0].filePath}`; inputTokens.set(token, bundle.versions[0].filePath);
-          result = { apiVersion: 7, mediaRef: { photoId: 'photo', versionId: 'base', relativePath: 'photo.jpg' }, metadata: { photoId: 'photo', versionId: 'base', currentVersionId: 'base', displayName: '接力照片', originalName: 'photo.jpg', relativePath: 'photo.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token, expiresAt: Date.now() + 1000 } };
-        } else if (frame.method === 'project.input.tokens') { const source = inputTokens.get(frame.payload.token) || frame.payload.token.slice('test-input:'.length); const inputId = require('crypto').randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 7, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
-        else if (frame.method === 'tasks') result = { apiVersion: 7, task: frame.payload.action === 'complete' ? { state: 'completed' } : null, cancelled: false };
-        else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 7, emitted: true }; }
-        else if (frame.method === 'dialogs' && frame.payload.kind === 'openOutputDirectory') { lastOutputDirectoryDialog = frame.payload; result = { apiVersion: 7, opened: true, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
-        else if (frame.method === 'dialogs') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { apiVersion: 7, cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
+          result = { mediaRef: { photoId: 'photo', versionId: 'base', relativePath: 'photo.jpg' }, metadata: { photoId: 'photo', versionId: 'base', currentVersionId: 'base', displayName: '接力照片', originalName: 'photo.jpg', relativePath: 'photo.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token, expiresAt: Date.now() + 1000 } };
+        } else if (frame.method === 'project.input.tokens') { const source = inputTokens.get(frame.payload.token) || frame.payload.token.slice('test-input:'.length); const inputId = require('crypto').randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        else if (frame.method === 'tasks') result = { task: frame.payload.action === 'complete' ? { state: 'completed' } : null, cancelled: false };
+        else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); result = { emitted: true }; }
+        else if (frame.method === 'dialogs' && frame.payload.kind === 'openOutputDirectory') { lastOutputDirectoryDialog = frame.payload; result = { opened: true, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
+        else if (frame.method === 'dialogs') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
         else if (frame.method === 'project.output') {
           if (breakManifestOnArtifactCall && !outputFaultInjected && frame.payload.action === 'stage') {
             const manifestDirectory = path.dirname(manifestPath); manifestDirectoryBackup = `${manifestDirectory}.backup`;
             fs.renameSync(manifestDirectory, manifestDirectoryBackup); fs.writeFileSync(manifestDirectory, 'block manifest writes'); outputFaultInjected = true;
           }
-          if (frame.payload.action === 'adopt') { const commitId = require('crypto').randomUUID(); result = { apiVersion: 7, commitId, outputs: frame.payload.outputs.map(item => { const source = path.resolve(projectRoot, item.relativePath); if (!fs.statSync(source).isFile()) throw new Error('legacy output missing'); return { artifactId: require('crypto').randomUUID(), relativePath: item.relativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(source)).digest('hex') }; }) }; }
-          else if (frame.payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 7, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
-          else if (frame.payload.action === 'write') { const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 7, stageId: frame.payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
-          else if (frame.payload.action === 'validate') result = { apiVersion: 7, stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
-          else if (frame.payload.action === 'commit') { const stage = outputStages.get(frame.payload.stageId); const commitId = require('crypto').randomUUID(); result = { apiVersion: 7, commitId, idempotencyKey: frame.payload.idempotencyKey, outputs: stage.files.map(file => ({ artifactId: require('crypto').randomUUID(), relativePath: file.outputRelativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(path.join(stage.privatePath, file.sourceName))).digest('hex') })) }; }
-          else if (frame.payload.action === 'rollback') result = { apiVersion: 7, stageId: frame.payload.stageId, rolledBack: true };
+          if (frame.payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { stageId, privatePath, expiresAt: Date.now() + 60000 }; }
+          else if (frame.payload.action === 'write') { const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { stageId: frame.payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
+          else if (frame.payload.action === 'validate') result = { stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
+          else if (frame.payload.action === 'commit') { const stage = outputStages.get(frame.payload.stageId); const commitId = require('crypto').randomUUID(); result = { commitId, idempotencyKey: frame.payload.idempotencyKey, outputs: stage.files.map(file => ({ artifactId: require('crypto').randomUUID(), relativePath: file.outputRelativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(path.join(stage.privatePath, file.sourceName))).digest('hex') })) }; }
+          else if (frame.payload.action === 'rollback') result = { stageId: frame.payload.stageId, rolledBack: true };
           else throw new Error(`unexpected output action ${frame.payload.action}`);
         }
         else throw new Error(`unexpected capability ${frame.method} ${JSON.stringify(frame.payload)}`);
@@ -151,7 +150,7 @@ const seedReview = (id, content) => {
   const reviewPath = path.join(reviewDirectory, `${id}.png`);
   fs.writeFileSync(reviewPath, content);
   fs.writeFileSync(path.join(reviewDirectory, 'session.json'), JSON.stringify({
-    version: 2, id, status: 'active', result: { matches: [{ returnId: id, path: reviewPath, accepted: false }] },
+    version: 2, id, projectId: 'project', status: 'active', result: { matches: [{ returnId: id, path: reviewPath, accepted: false, photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 }] },
   }));
 };
 const seedReviewMatches = (id, matches) => {
@@ -160,7 +159,7 @@ const seedReviewMatches = (id, matches) => {
   const stored = matches.map((match, index) => {
     const reviewPath = path.join(reviewDirectory, `${id}-${index + 1}.png`);
     fs.writeFileSync(reviewPath, match.content);
-    return { returnId: match.returnId, path: reviewPath, sourceName: `${match.returnId}.png`, accepted: false };
+    return { returnId: match.returnId, path: reviewPath, sourceName: `${match.returnId}.png`, accepted: false, photoId: match.photoId || 'photo', baseVersionId: match.baseVersionId || 'base', taskId: match.taskId || 'task-1', personIndex: Number(match.personIndex || 1) };
   });
   fs.writeFileSync(path.join(reviewDirectory, 'session.json'), JSON.stringify({ version: 2, id, projectId: 'project', status: 'active', result: { acceptedCount: 0, reviewCount: stored.length, matches: stored } }));
 };
@@ -180,12 +179,13 @@ const restoreManifestDirectory = () => {
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo', 'project', 'base', 1, 1);
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo-b', 'project', 'base-b', 1, 1);
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('foreign-photo', 'other-project', 'foreign-base', 1, 1);
-    const insertTask = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
-    insertTask.run('project', 'task-1', 'photo', 'base', 1, '任务一', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 1 }, { personIndex: 2 }]), 1, 1);
-    insertTask.run('project', 'task-2', 'photo', 'base', 3, '任务二', '{}', '{}', taskTwoPatch, JSON.stringify([{ personIndex: 3 }, { personIndex: 4 }]), 1, 1);
-    insertTask.run('project', 'task-3', 'photo-b', 'base-b', 5, '任务三', '{}', '{}', taskThreePatch, JSON.stringify([{ personIndex: 5 }, { personIndex: 6 }]), 1, 1);
-    insertTask.run('other-project', 'foreign-task', 'foreign-photo', 'foreign-base', 5, '外部项目任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), 1, 1);
-    insertTask.run('other-project', 'task-1', 'foreign-photo', 'foreign-base', 5, '外部项目同名任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), 1, 1);
+    const insertTask = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,generation_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const generation = JSON.stringify({ version: 2, sourceWidth: 100, sourceHeight: 100, workWidth: 100, workHeight: 100, fullFrame: true, sourceCoverage: 1, requiresManualCrop: false, exceedsWorkTileEdge: false });
+    insertTask.run('project', 'task-1', 'photo', 'base', 1, '任务一', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 1 }, { personIndex: 2 }]), generation, 1, 1);
+    insertTask.run('project', 'task-2', 'photo', 'base', 3, '任务二', '{}', '{}', taskTwoPatch, JSON.stringify([{ personIndex: 3 }, { personIndex: 4 }]), generation, 1, 1);
+    insertTask.run('project', 'task-3', 'photo-b', 'base-b', 5, '任务三', '{}', '{}', taskThreePatch, JSON.stringify([{ personIndex: 5 }, { personIndex: 6 }]), generation, 1, 1);
+    insertTask.run('other-project', 'foreign-task', 'foreign-photo', 'foreign-base', 5, '外部项目任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), generation, 1, 1);
+    insertTask.run('other-project', 'task-1', 'foreign-photo', 'foreign-base', 5, '外部项目同名任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), generation, 1, 1);
     db.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at) VALUES(?,?,?,?,0,0,'','[]',?)`).run('other-project', 'task-1', 'foreign-photo', 'foreign project isolation fixture', 1);
     const insertStage = db.prepare(`INSERT INTO team_task_stages(project_id,id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`);
     for (const [taskId, people] of [['task-1', [1, 2]], ['task-2', [3, 4]], ['task-3', [5, 6]]]) for (const [index, personIndex] of people.entries()) insertStage.run('project', `${taskId}-stage-${personIndex}`, taskId, personIndex, index + 1, 'pending', 1, 1);
@@ -197,15 +197,15 @@ const restoreManifestDirectory = () => {
       insertAssignment.run('project', personIndex <= 4 ? 'photo' : 'photo-b', personIndex <= 4 ? 'base' : 'base-b', personIndex, `identity-${personIndex}`, 1, 'manual', 0, 1, taskId, `${taskId}-stage-${personIndex}`);
     }
     db.exec('COMMIT');
-    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'foreign-task', [{ item: { photoId: 'legacy-photo', baseVersionId: 'foreign-base' } }]), /不属于当前项目/, 'a stable task id cannot rebind a workflow chain across projects');
-    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'legacy-photo', baseVersionId: 'wrong-base' } }]), /错误的照片版本/, 'a legacy photo id never relaxes the exact base-version binding');
-    assert.deepEqual(resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'legacy-photo', baseVersionId: 'base' } }]).legacyPhotoIds, ['legacy-photo']);
+    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'foreign-task', [{ item: { photoId: 'foreign-photo', baseVersionId: 'foreign-base' } }]), /不属于当前项目/, 'a stable task id cannot bind across projects');
+    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'photo', baseVersionId: 'wrong-base' } }]), /错误的照片版本/);
+    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'wrong-photo', baseVersionId: 'base' } }]), /错误的照片/);
     db.close();
 
     const isolatedStatus = await invoke('team.workflow.status.v1');
     assert.equal(isolatedStatus.reconciliation.pendingCount, 0, 'workflow status ignores an identically named task pending in another project');
     const isolatedWorkspace = await invoke('team.project.get.v1');
-    assert.equal(isolatedWorkspace.migration.maintenancePendingCount, 0, 'project migration status ignores an identically named task pending in another project');
+    assert.equal(isolatedWorkspace.success, true);
     assert.equal((await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 })).state, 'ready');
     const isolatedDb = new DatabaseSync(databasePath);
     assert.equal(isolatedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE project_id=? AND task_id=?').get('other-project', 'task-1').count, 1, 'draining the current project preserves another project\'s same-id pending task');
@@ -237,23 +237,6 @@ const restoreManifestDirectory = () => {
     assertInactive('task-1', 2);
     assertInactive('task-2', 4);
 
-    const workflowUpgradeKey = `workflow_reconcile_v3:${require('crypto').createHash('sha256').update('project').digest('hex').slice(0, 24)}`;
-    const legacyWorkflowDb = new DatabaseSync(databasePath);
-    legacyWorkflowDb.prepare('DELETE FROM meta WHERE key=?').run(workflowUpgradeKey);
-    legacyWorkflowDb.close();
-    let workflowUpgrade = await invoke('team.project.get.v1');
-    assert.equal(workflowUpgrade.migration.state, 'pending');
-    assert.equal(workflowUpgrade.migration.maintenancePendingCount, 2, 'a legacy workflow queues every distinct task chain for latest-format reconciliation');
-    let workflowUpgradeState = workflowUpgrade.migration;
-    for (let step = 0; step < 5 && workflowUpgradeState.state !== 'committed'; step += 1) workflowUpgradeState = await invoke('team.project.migrate-step.v1');
-    assert.equal(workflowUpgradeState.state, 'committed');
-    const upgradedWorkflowDb = new DatabaseSync(databasePath);
-    assert.equal(upgradedWorkflowDb.prepare('SELECT value FROM meta WHERE key=?').get(workflowUpgradeKey).value, 'committed');
-    assert.equal(upgradedWorkflowDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE project_id='project'").get().count, 0);
-    upgradedWorkflowDb.close();
-    assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
-    assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
-
     const targetedDb = new DatabaseSync(databasePath);
     const queueTargeted = targetedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at) VALUES(?,?,?,?,0,0,'','[]',?)`);
     queueTargeted.run('project', 'task-1', 'photo', 'targeted task one', 1);
@@ -266,20 +249,6 @@ const restoreManifestDirectory = () => {
     assert.equal(targetedAfterDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE project_id='project' AND task_id='task-2'").get().count, 1, 'targeted drain preserves unrelated pending work');
     targetedAfterDb.prepare("DELETE FROM team_workflow_reconcile_pending WHERE project_id='project' AND task_id='task-2'").run();
     targetedAfterDb.close();
-
-    const legacyOpenManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const legacyOpenGroup = legacyOpenManifest.groups.find(group => Number(group.week) === 1 && group.identityId === 'identity-1');
-    const legacyOpenItem = legacyOpenGroup.items.find(item => item.available && item.relativePath);
-    const legacyOpenRelativePath = `团片协作/${legacyOpenItem.relativePath.replace(/\\/g, '/')}`;
-    delete legacyOpenManifest.outputOwnership[legacyOpenRelativePath];
-    fs.writeFileSync(manifestPath, JSON.stringify(legacyOpenManifest, null, 2));
-    const legacyPublicPath = path.join(projectRoot, legacyOpenRelativePath);
-    fs.mkdirSync(path.dirname(legacyPublicPath), { recursive: true });
-    fs.copyFileSync(path.join(outputDirectory, legacyOpenItem.relativePath), legacyPublicPath);
-    const legacyOpened = await invoke('team.workflow.open-export.v1', { week: 1, identityId: 'identity-1' });
-    assert.equal(legacyOpened.success, true);
-    assert(lastOutputDirectoryDialog?.commitId && lastOutputDirectoryDialog?.artifactId, 'an adopted legacy output opens through its new Host receipt');
-    assert(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).outputOwnership[legacyOpenRelativePath], 'opening a legacy folder durably backfills its missing ownership');
 
     fs.renameSync(taskTwoActive, `${taskTwoActive}.missing-fixture`);
     const missingActiveOpen = await invoke('team.workflow.open-export.v1', { week: 1, identityId: 'identity-3' });
@@ -323,69 +292,6 @@ const restoreManifestDirectory = () => {
     missingAfterDb.close();
     fs.renameSync(missingManifestBackup, manifestPath);
     assert.equal((await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 })).state, 'ready');
-
-    const legacyManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    for (const item of legacyManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-id';
-    fs.writeFileSync(manifestPath, JSON.stringify(legacyManifest, null, 2));
-    const legacyPendingDb = new DatabaseSync(databasePath);
-    legacyPendingDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'legacy-photo-id', '工作流程 task 链跨越了错误的照片版本', 1);
-    legacyPendingDb.close();
-    const legacyStatus = await invoke('team.project.get.v1');
-    assert.equal(legacyStatus.workflowNeedsRegeneration, false, 'a migrated photo id with the same stable version/person identity must not masquerade as a schedule change');
-    assert.deepEqual({ state: legacyStatus.migration.state, phase: legacyStatus.migration.phase, pending: legacyStatus.migration.maintenancePendingCount }, { state: 'pending', phase: 'workflow-reconcile', pending: 1 });
-    await invoke('team.project.migrate-step.v1');
-    assert(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1').every(item => item.photoId === 'photo'), 'all items in the stable task/base chain are atomically rewritten to the current project photo id');
-    const healedDb = new DatabaseSync(databasePath);
-    assert.equal(healedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 0, 'a healed legacy photo id clears its reconcile retry');
-    healedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'photo', 'idempotency check', 2);
-    healedDb.close();
-    const auditPath = path.join(dataRoot, 'command-log', 'operations.ndjson');
-    const repairAuditCount = () => fs.readFileSync(auditPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).filter(item => item.state === 'legacy-photo-id-repaired' && item.taskId === 'task-1').length;
-    assert.equal(repairAuditCount(), 1, 'the legacy id repair writes one auditable command record');
-    await invoke('team.project.migrate-step.v1');
-    assert.equal(repairAuditCount(), 1, 'repeating an already-healed reconciliation has no duplicate repair audit');
-
-    const conflictManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    for (const item of conflictManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2')) { item.photoId = 'legacy-conflict-photo'; item.baseVersionId = 'wrong-base'; }
-    fs.writeFileSync(manifestPath, JSON.stringify(conflictManifest, null, 2));
-    const rejectedDb = new DatabaseSync(databasePath);
-    rejectedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-2', 'legacy-conflict-photo', 'version conflict fixture', 3);
-    rejectedDb.close();
-    await invoke('team.project.migrate-step.v1');
-    const rejectedItems = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2');
-    assert(rejectedItems.every(item => item.photoId === 'legacy-conflict-photo' && item.baseVersionId === 'wrong-base'), 'a base-version conflict rejects the whole chain without partially rewriting photo ids');
-    const rejectedStateDb = new DatabaseSync(databasePath);
-    assert.match(rejectedStateDb.prepare('SELECT error FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-2').error, /错误的照片版本/);
-    rejectedStateDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run('task-2');
-    rejectedStateDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('other-project', 'foreign-task', 'foreign-photo', 'cross-project fixture', 4);
-    rejectedStateDb.close();
-    await invoke('team.project.migrate-step.v1');
-    const crossProjectDb = new DatabaseSync(databasePath);
-    assert.equal(crossProjectDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('foreign-task').count, 1, 'a foreign-project task id is never drained or rebound by the current project migration');
-    crossProjectDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run('foreign-task');
-    crossProjectDb.close();
-    const restoredConflictManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    for (const item of restoredConflictManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2')) { item.photoId = 'photo'; item.baseVersionId = 'base'; }
-    fs.writeFileSync(manifestPath, JSON.stringify(restoredConflictManifest, null, 2));
-
-    const laterFailureManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    for (const item of laterFailureManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-before-later-failure';
-    fs.writeFileSync(manifestPath, JSON.stringify(laterFailureManifest, null, 2));
-    const laterFailureDb = new DatabaseSync(databasePath);
-    laterFailureDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'legacy-photo-before-later-failure', 'retry after legacy id', 3);
-    laterFailureDb.close();
-    artifactScopeCount = 0;
-    breakManifestOnArtifactCall = 2;
-    outputFaultInjected = false;
-    await invoke('team.project.migrate-step.v1');
-    restoreManifestDirectory();
-    breakManifestOnArtifactCall = 0;
-    const repairedBeforeFailure = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1');
-    assert(repairedBeforeFailure.every(item => item.photoId === 'photo'), 'the safe photo-id repair is durable even when later artifact reconciliation fails');
-    const stillPendingDb = new DatabaseSync(databasePath);
-    assert.equal(stillPendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 1, 'a later non-binding failure remains queued without rolling back the safe manifest repair');
-    stillPendingDb.close();
-    await invoke('team.project.migrate-step.v1');
 
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
     await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
@@ -462,7 +368,7 @@ const restoreManifestDirectory = () => {
 
     seedReviewMatches('double-confirm-lock', [
       { returnId: 'double-a', content: 'DOUBLE-A' },
-      { returnId: 'double-b', content: 'DOUBLE-B' },
+      { returnId: 'double-b', content: 'DOUBLE-B', photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5 },
     ]);
     const artifactCountBeforeDouble = (() => { const value = new DatabaseSync(databasePath); try { return value.prepare('SELECT COUNT(*) count FROM team_task_artifacts').get().count; } finally { value.close(); } })();
     const doubleResults = await Promise.all([
@@ -523,7 +429,7 @@ const restoreManifestDirectory = () => {
     holdSecondWorkflowScope = true;
     workflowScopeCount = 0;
     const held = waitForHeldWorkflow();
-    const backgroundReconcile = invoke('team.project.migrate-step.v1');
+    const backgroundReconcile = invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     await held;
     let undoResolved = false;
     const concurrentUndo = invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }).then(value => { undoResolved = true; return value; });
@@ -531,7 +437,7 @@ const restoreManifestDirectory = () => {
       concurrentUndo.then(() => true),
       new Promise(resolve => setTimeout(() => resolve(false), 2000)),
     ]);
-    assert.equal(undoResolved && undoCommittedBeforeRelease, true, 'a completion may commit while drain is still reading its queue; the later photo lock must reconcile the newest durable state');
+    assert.equal(undoResolved || undoCommittedBeforeRelease, false, 'same-project mutations wait behind the active reconcile lease instead of advancing revision during publication');
     releaseHeldWorkflow();
     await backgroundReconcile;
     await concurrentUndo;
@@ -552,7 +458,7 @@ const restoreManifestDirectory = () => {
     assert.equal(fs.readFileSync(archived.artifact_path, 'utf8'), 'RECOVERABLE-RETURN');
     assert.equal(pendingDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id='task-1'").get().count, 1);
     pendingDb.close();
-    const reload = await invoke('team.project.get.v1'); assert.equal(reload.migration.state, 'pending'); await invoke('team.project.migrate-step.v1');
+    const reload = await invoke('team.project.get.v1'); assert.equal(reload.success, true); await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     const recoveredDb = new DatabaseSync(databasePath);
     assert.equal(recoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0, 'project reload clears a successfully reconciled pending task');
     recoveredDb.close();
@@ -579,7 +485,7 @@ const restoreManifestDirectory = () => {
     noRetouchPendingDb.close();
     restoreManifestDirectory();
     breakManifestOnArtifactCall = 0;
-    const noRetouchReload = await invoke('team.project.get.v1'); assert.equal(noRetouchReload.migration.state, 'pending'); await invoke('team.project.migrate-step.v1');
+    const noRetouchReload = await invoke('team.project.get.v1'); assert.equal(noRetouchReload.success, true); await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
     const noRetouchRecoveredDb = new DatabaseSync(databasePath);
     assert.equal(noRetouchRecoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0);

@@ -12,6 +12,7 @@ const PROJECT_TABLES = Object.freeze([
   'team_task_artifacts', 'team_workflow_reconcile_pending',
   'team_workflow_review_confirmations', 'team_durable_operations',
   'team_workflow_settings', 'team_workflow_state', 'team_review_state',
+  'team_output_outbox', 'team_cleanup_outbox',
 ]);
 const INSERT_ORDER = Object.freeze([
   'team_retouch_photos', 'team_person_identities', 'team_patch_tasks',
@@ -19,6 +20,7 @@ const INSERT_ORDER = Object.freeze([
   'team_task_artifacts', 'team_workflow_reconcile_pending',
   'team_workflow_review_confirmations', 'team_durable_operations',
   'team_workflow_settings', 'team_workflow_state', 'team_review_state',
+  'team_output_outbox', 'team_cleanup_outbox',
 ]);
 const DELETE_ORDER = Object.freeze([...INSERT_ORDER].reverse());
 const PATH_COLUMNS = Object.freeze({
@@ -32,14 +34,10 @@ const JSON_COLUMNS = Object.freeze({
   team_task_artifacts: ['metadata_json'],
   team_workflow_reconcile_pending: ['history_json'],
   team_durable_operations: ['request_json', 'checkpoint_json', 'result_json'],
+  team_output_outbox: ['source_json', 'target_json', 'receipt_json', 'result_json'],
   team_workflow_settings: ['settings_json'],
 });
-const projectMigrationMetaKeys = projectId => {
-  const suffix = crypto.createHash('sha256').update(String(projectId)).digest('hex').slice(0, 24);
-  return [`legacy_project_artifacts_v2_state:${suffix}`, `legacy_project_artifacts_v2:${suffix}`];
-};
-const selectRestoreSource = sources => (sources || []).find(item => item.format === 'component-storage-v1')
-  || (sources || []).find(item => item.format === 'legacy-domain-v1');
+const selectRestoreSource = sources => (sources || []).find(item => item.format === 'component-storage-v1');
 
 const quote = value => `"${String(value).replace(/"/g, '""')}"`;
 const tableExists = (db, schema, table) => Boolean(db.prepare(`SELECT 1 FROM ${quote(schema)}.sqlite_master WHERE type='table' AND name=?`).get(table));
@@ -54,6 +52,17 @@ const buildReplacements = payload => {
   if (payload.project?.sourceRelativePath && payload.project?.targetRelativePath) {
     add(payload.project.sourceRelativePath, payload.project.targetRelativePath);
     add(path.join(String(payload.sourceWorkspace?.root || ''), payload.project.sourceRelativePath), path.join(String(payload.targetWorkspace?.root || ''), payload.project.targetRelativePath));
+  }
+  const sourceProjectId = String(payload.project?.sourceId || payload.project?.id || '');
+  const targetProjectId = String(payload.project?.id || '');
+  if (sourceProjectId && targetProjectId) {
+    const sourceHash = crypto.createHash('sha256').update(sourceProjectId).digest('hex');
+    const targetHash = crypto.createHash('sha256').update(targetProjectId).digest('hex');
+    const sourceDataRoot = String(payload.sourceWorkspace?.dataRoot || '');
+    const targetComponentRoot = String(payload.targetStorage?.dataPath || path.join(String(payload.targetWorkspace?.dataRoot || ''), 'components', 'team-retouch'));
+    for (const sourceComponentRoot of [path.join(sourceDataRoot, 'components', 'team-retouch'), path.join(sourceDataRoot, 'team-retouch')]) {
+      add(path.join(sourceComponentRoot, 'projects', sourceHash), path.join(targetComponentRoot, 'projects', targetHash));
+    }
   }
   return pairs.sort((left, right) => right[0].length - left[0].length);
 };
@@ -84,17 +93,10 @@ const rewriteJson = (value, pairs) => {
 };
 const rewriteProjectIdentityJson = (value, payload) => {
   const sourceId = String(payload.project?.sourceId || payload.project?.id || ''); const targetId = String(payload.project?.id || '');
-  const sourceName = String(payload.project?.sourceName || payload.project?.name || '');
-  const targetName = String(payload.project?.targetName || payload.project?.name || sourceName);
-  const sourceStatus = String(payload.project?.sourceStatus || payload.project?.status || '');
-  const targetStatus = String(payload.project?.targetStatus || payload.project?.status || sourceStatus);
-  if ((!sourceId || !targetId || sourceId === targetId) && (!sourceName || sourceName === targetName)
-    && (!sourceStatus || sourceStatus === targetStatus)) return value;
+  if (!sourceId || !targetId || sourceId === targetId) return value;
   let parsed; try { parsed = JSON.parse(value); } catch { return value; }
   const visit = (item, key = '') => {
-    if (key === 'projectId' && sourceId && targetId && (item === sourceId || item === undefined || item === null || item === '')) return targetId;
-    if (key === 'projectName' && sourceName && (item === sourceName || item === undefined || item === null || item === '')) return targetName;
-    if ((key === 'projectStatus' || key === 'status') && sourceStatus && (item === sourceStatus || item === undefined || item === null || item === '')) return targetStatus;
+    if (key === 'projectId' && item === sourceId) return targetId;
     if (typeof item === 'string') return item === sourceId ? targetId : item;
     if (Array.isArray(item)) return item.map(child => visit(child));
     if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([childKey, child]) => [childKey === sourceId ? targetId : childKey, visit(child, childKey)]));
@@ -103,36 +105,25 @@ const rewriteProjectIdentityJson = (value, payload) => {
   return JSON.stringify(visit(parsed));
 };
 
-const readBoundJson = (source, binding, kind) => {
-  try {
-    const value = JSON.parse(fs.readFileSync(source.path, 'utf8'));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    const id = String(value.projectId || '');
-    if (id && id !== binding.projectId) return null;
-    if (String(value.projectName || '') !== binding.projectName || String(value.status || '') !== binding.projectStatus) return null;
-    if (kind === 'workflow' && (Number(value.version) < 2 || !Array.isArray(value.groups)
-      || !value.groups.every(group => group && typeof group === 'object' && !Array.isArray(group)
-        && Array.isArray(group.items) && group.items.every(item => item && typeof item === 'object' && !Array.isArray(item))))) return null;
-    return value;
-  } catch { return null; }
-};
-const projectJsonMatchesBinding = (source, binding) => {
-  if (!String(source.relativePath || '').toLowerCase().endsWith('.json')) return true;
-  try {
-    const value = JSON.parse(fs.readFileSync(source.path, 'utf8'));
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-    if (value.projectId != null && String(value.projectId) !== binding.projectId) return false;
-    if (value.projectName != null && String(value.projectName) !== binding.projectName) return false;
-    if (value.projectStatus != null && String(value.projectStatus) !== binding.projectStatus) return false;
-    return true;
-  } catch { return false; }
-};
-
 const digestFile = filePath => {
   const hash = crypto.createHash('sha256'); const descriptor = fs.openSync(filePath, 'r'); const buffer = Buffer.allocUnsafe(1024 * 1024);
   try { for (;;) { const count = fs.readSync(descriptor, buffer, 0, buffer.length, null); if (!count) break; hash.update(buffer.subarray(0, count)); } }
   finally { fs.closeSync(descriptor); }
   return hash.digest('hex');
+};
+const copyFromStableHandle = (sourcePath, destinationPath, expectedSize, expectedDigest) => {
+  const source = fs.openSync(sourcePath, 'r'); let destination;
+  const hash = crypto.createHash('sha256'); const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    const stat = fs.fstatSync(source);
+    if (!stat.isFile() || stat.size !== Number(expectedSize)) throw new Error('团片恢复来源 handle 大小不匹配');
+    destination = fs.openSync(destinationPath, 'wx');
+    for (;;) {
+      const count = fs.readSync(source, buffer, 0, buffer.length, null); if (!count) break; hash.update(buffer.subarray(0, count));
+      let written = 0; while (written < count) written += fs.writeSync(destination, buffer, written, count - written);
+    }
+  } finally { if (destination !== undefined) fs.closeSync(destination); fs.closeSync(source); }
+  if (hash.digest('hex') !== String(expectedDigest || '').toLowerCase()) { fs.rmSync(destinationPath, { force: true }); throw new Error('团片恢复来源在复制期间发生替换'); }
 };
 const SOURCE_MANIFEST_SCHEMA = 'component-backup-restore-sources-v1';
 const RECEIPT_SCHEMA = 'component-backup-restore-receipt-v1';
@@ -141,12 +132,18 @@ const insidePath = (root, candidate) => {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 const loadRestoreSources = payload => {
-  if (!payload?.sourceManifestPath) return { sources: payload?.sources || [], manifest: null };
+  if (!payload?.sourceManifestPath) throw Object.assign(new Error('团片恢复必须由 Host source manifest 授权'), { code: 'COMPONENT_RESTORE_MANIFEST_REQUIRED' });
   const manifestPath = path.resolve(String(payload.sourceManifestPath));
   const manifestStat = fs.lstatSync(manifestPath, { throwIfNoEntry: false });
   if (!manifestStat?.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 64 * 1024 * 1024 || Number(payload.sourceCount) < 0 || Number(payload.sourceCount) > 200000) throw new Error('团片恢复来源清单大小或数量超出安全边界');
-  if (digestFile(manifestPath) !== String(payload.sourceManifestSha256 || '').toLowerCase()) throw new Error('团片恢复来源清单摘要不匹配');
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const manifestHandle = fs.openSync(manifestPath, 'r'); let manifestBytes;
+  try {
+    const stableStat = fs.fstatSync(manifestHandle);
+    if (!stableStat.isFile() || stableStat.size !== manifestStat.size || stableStat.size > 64 * 1024 * 1024) throw new Error('团片恢复来源清单在打开期间发生替换');
+    manifestBytes = fs.readFileSync(manifestHandle);
+  } finally { fs.closeSync(manifestHandle); }
+  if (crypto.createHash('sha256').update(manifestBytes).digest('hex') !== String(payload.sourceManifestSha256 || '').toLowerCase()) throw new Error('团片恢复来源清单摘要不匹配');
+  const manifest = JSON.parse(manifestBytes.toString('utf8'));
   if (manifest?.schema !== SOURCE_MANIFEST_SCHEMA || manifest.schemaVersion !== 1
     || manifest.operationId !== payload.operationId || manifest.componentId !== 'team-retouch'
     || !Array.isArray(manifest.entries) || manifest.entries.length !== Number(payload.sourceCount)) throw new Error('团片恢复来源清单无效');
@@ -155,24 +152,29 @@ const loadRestoreSources = payload => {
     || !['keyField', 'dispositionField', 'destinationField', 'reasonField', 'messageField'].every(field => typeof contract[field] === 'string' && contract[field])
     || !contract.actions || !['applied', 'skipped', 'hostPreserved'].every(action => typeof contract.actions[action] === 'string' && contract.actions[action])
     || !Array.isArray(contract.skipReasons)) throw new Error('团片恢复回执契约无效');
-  const stageRoot = path.dirname(manifestPath); const keys = new Set();
-  const sources = manifest.entries.map(entry => {
+  if (String(manifest.sourceVersion || '') !== String(payload.sourceVersion || '') || String(manifest.targetVersion || '') !== String(payload.targetVersion || '')) throw new Error('团片恢复版本绑定与 source manifest 不一致');
+  const hostStageRoot = path.dirname(manifestPath); const controlRoot = path.resolve(String(payload.targetStorage?.controlPath || os.tmpdir()));
+  fs.mkdirSync(controlRoot, { recursive: true }); const internalStage = fs.mkdtempSync(path.join(controlRoot, '.team-retouch-source-'));
+  const keys = new Set();
+  let sources;
+  try { sources = manifest.entries.map((entry, index) => {
     const absolutePath = path.resolve(String(entry.absolutePath || ''));
-    if (!insidePath(stageRoot, absolutePath) || keys.has(entry.sourceKey)) throw new Error('团片恢复来源清单包含越界或重复来源');
+    if (!insidePath(hostStageRoot, absolutePath) || keys.has(entry.sourceKey)) throw new Error('团片恢复来源清单包含越界或重复来源');
     keys.add(entry.sourceKey);
     const stat = fs.lstatSync(absolutePath, { throwIfNoEntry: false });
-    if (!stat?.isFile() || stat.isSymbolicLink() || stat.size !== Number(entry.size) || digestFile(absolutePath) !== String(entry.sha256 || '').toLowerCase()) throw new Error('团片恢复来源对象校验失败');
+    if (!stat?.isFile() || stat.isSymbolicLink() || stat.size !== Number(entry.size)) throw new Error('团片恢复来源对象校验失败');
+    const stagedPath = path.join(internalStage, String(index));
+    copyFromStableHandle(absolutePath, stagedPath, entry.size, entry.sha256);
     const relativePath = String(entry.destinationRelativePath || entry.relativePath || entry.sourceKey || '').replace(/\\/g, '/');
-    let format = String(entry.format || '');
-    // Old manifests had no component metadata. Compatibility is deliberately
-    // limited to Team Retouch's two exact, historically-owned database paths.
-    if (format === 'unversioned') {
-      if (entry.scope === 'component-storage' && relativePath === 'team-retouch/storage.sqlite3') format = 'component-storage-v1';
-      else if (entry.scope === 'domain-database' && relativePath === 'team-retouch.sqlite3') format = 'legacy-domain-v1';
-    }
-    return { ...entry, relativePath, format, path: absolutePath };
-  });
-  return { sources, manifest };
+    return { ...entry, relativePath, format: String(entry.format || ''), path: stagedPath };
+  }); }
+  catch (error) { fs.rmSync(internalStage, { recursive: true, force: true }); throw error; }
+  const databaseSource = selectRestoreSource(sources);
+  if (databaseSource) for (const suffix of ['-wal','-shm']) {
+    const sidecar = sources.find(item => item.relativePath === `${databaseSource.relativePath}${suffix}`);
+    if (sidecar) fs.copyFileSync(sidecar.path, `${databaseSource.path}${suffix}`, fs.constants.COPYFILE_EXCL);
+  }
+  return { sources, manifest, cleanup: () => fs.rmSync(internalStage, { recursive: true, force: true }) };
 };
 const writeRestoreReceipt = (payload, manifest, sources, result) => {
   if (!manifest) return result;
@@ -255,7 +257,19 @@ const snapshotDatabase = databasePath => {
     cleanup: () => fs.rmSync(temporaryRoot, { recursive: true, force: true }),
   };
 };
-const publishWorkspacePrivateFiles = ({ sources, destinationDataPath, payload, fault }) => {
+const listOrdinaryFiles = root => {
+  const result = [];
+  const visit = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const candidate = path.join(current, entry.name); const stat = fs.lstatSync(candidate);
+      if (stat.isSymbolicLink()) throw new Error(`团片 exact restore 拒绝链接或重解析点：${candidate}`);
+      if (stat.isDirectory()) visit(candidate); else if (stat.isFile()) result.push(candidate);
+    }
+  };
+  if (fs.statSync(root, { throwIfNoEntry: false })?.isDirectory()) visit(root);
+  return result;
+};
+const publishWorkspacePrivateFiles = ({ sources, destinationDataPath, payload, fault, exactScope = null }) => {
   if (!destinationDataPath) throw new Error('团片工作区恢复缺少组件私有文件目录');
   const databaseNames = new Set(['storage.sqlite3', 'storage.sqlite3-wal', 'storage.sqlite3-shm']);
   const replacements = buildReplacements(payload);
@@ -286,6 +300,22 @@ const publishWorkspacePrivateFiles = ({ sources, destinationDataPath, payload, f
       } else fs.copyFileSync(entry.source.path, staged);
       entry.staged = staged;
     }
+    const desired = new Set(entries.map(entry => path.resolve(entry.destination).toLowerCase()));
+    const existing = [];
+    if (exactScope?.workspace) existing.push(...listOrdinaryFiles(root));
+    else {
+      for (const exactRoot of exactScope?.roots || []) existing.push(...listOrdinaryFiles(exactRoot));
+      for (const exactFile of exactScope?.files || []) if (fs.statSync(exactFile, { throwIfNoEntry: false })?.isFile()) existing.push(exactFile);
+    }
+    let deletionIndex = 0;
+    for (const existingPath of [...new Set(existing.map(item => path.resolve(item)))]) {
+      if (isInsidePath(stagingRoot, existingPath) || desired.has(existingPath.toLowerCase())) continue;
+      const child = path.relative(root, existingPath).replace(/\\/g, '/');
+      if (!child || child.startsWith('../') || ['storage.sqlite3','storage.sqlite3-wal','storage.sqlite3-shm'].includes(child) || isHostControlPath(child)) continue;
+      assertNoStorageLinks(root, existingPath);
+      const backup = path.join(stagingRoot, 'backup-delete', String(deletionIndex++)); fs.mkdirSync(path.dirname(backup), { recursive: true }); fs.renameSync(existingPath, backup);
+      touched.push({ destination: existingPath, backup, published: false, deletedOnly: true });
+    }
     for (const [index, entry] of entries.entries()) {
       assertNoStorageLinks(root, entry.destination);
       fs.mkdirSync(path.dirname(entry.destination), { recursive: true });
@@ -305,6 +335,10 @@ const publishWorkspacePrivateFiles = ({ sources, destinationDataPath, payload, f
     }
     throw error;
   } finally { fs.rmSync(stagingRoot, { recursive: true, force: true }); }
+};
+const isInsidePath = (root, candidate) => {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 
 const importRows = (db, table, sourceProjectId, targetProjectId, replacements) => {
@@ -361,7 +395,7 @@ const restoreProjectStorage = ({ sourcePath, destinationPath, payload, ensureSch
       // Request guards describe in-flight compare-and-swap requests, not
       // durable project state. A restored project must never inherit them.
       db.prepare('DELETE FROM team_revision_guards WHERE project_id=?').run(targetProjectId);
-      for (const key of projectMigrationMetaKeys(targetProjectId)) db.prepare('DELETE FROM meta WHERE key=?').run(key);
+      db.prepare('DELETE FROM team_project_revision_leases WHERE project_id=?').run(targetProjectId);
       for (const table of DELETE_ORDER) db.prepare(`DELETE FROM ${quote(table)} WHERE project_id=?`).run(targetProjectId);
       if (fault === 'after-delete' || process.env.PHOTOFLOW_TEST_FAULT_COMPONENT_RESTORE === 'after-delete') throw new Error('injected team-retouch restore failure');
       for (const table of INSERT_ORDER) imported[table] = importRows(db, table, sourceProjectId, targetProjectId, replacements);
@@ -399,7 +433,7 @@ const restoreWorkspaceStorage = ({ sourcePath, destinationPath, payload, ensureS
     db.exec('BEGIN IMMEDIATE');
     try {
       db.exec('DELETE FROM team_revision_guards');
-      db.exec("DELETE FROM meta WHERE key LIKE 'legacy_project_artifacts_v2_state:%' OR key LIKE 'legacy_project_artifacts_v2:%'");
+      db.exec('DELETE FROM team_project_revision_leases');
       for (const table of DELETE_ORDER) db.exec(`DELETE FROM ${quote(table)}`);
       db.exec('DELETE FROM team_project_revisions');
       if (fault === 'after-delete' || process.env.PHOTOFLOW_TEST_FAULT_COMPONENT_RESTORE === 'after-delete') throw new Error('injected team-retouch restore failure');
@@ -426,134 +460,67 @@ const restoreWorkspaceBundle = ({ source, sources, destinationPath, destinationD
       const sidecar = (sources || []).find(item => item.relativePath === `${source.relativePath}${suffix}`);
       if (sidecar) consumedPaths.push(String(sidecar.relativePath));
     }
-    consumedPaths.push(...publishWorkspacePrivateFiles({ sources, destinationDataPath, payload, fault }));
+    consumedPaths.push(...publishWorkspacePrivateFiles({ sources, destinationDataPath, payload, fault, exactScope: { workspace: true } }));
     const applied = [...new Set(consumedPaths)];
     const pathDispositions = (sources || []).filter(item => !applied.includes(String(item.relativePath || ''))).map(item => ({
       path: String(item.relativePath || ''), action: 'host-preserved',
-      reason: item.format === 'legacy-domain-v1' && source.format === 'component-storage-v1' ? 'redundant-transition-source' : isHostControlPath(safeStorageRelativePath(item.relativePath)) ? 'host-control' : 'outside-component-storage',
+      reason: isHostControlPath(safeStorageRelativePath(item.relativePath)) ? 'host-control' : 'outside-component-storage',
     }));
     return { ...result, consumedPaths: applied, pathDispositions };
   } catch (error) { rollback.restore(); throw error; }
   finally { rollback.cleanup(); }
 };
 
-const projectPrivateSources = ({ source, sources, payload }) => {
+const projectPrivateSources = ({ sources, payload }) => {
   const sourceProjectId = String(payload.project?.sourceId || payload.project?.id || '');
   const targetProjectId = String(payload.project?.id || '');
-  const sourceName = String(payload.project?.sourceName || payload.project?.name || '');
-  const targetName = String(payload.project?.targetName || payload.project?.name || sourceName);
-  const sourceStatus = String(payload.project?.sourceStatus || payload.project?.status || '');
-  const selected = []; const warnings = []; let ownershipLedger = null;
-  const portable = preparePortable(source.path, databasePath => new DatabaseSync(databasePath));
-  let db;
-  try {
-    db = new DatabaseSync(portable.portablePath);
-    const photos = tableExists(db, 'main', 'team_retouch_photos')
-      ? db.prepare('SELECT photo_id,base_version_id FROM team_retouch_photos WHERE project_id=?').all(sourceProjectId)
-      : [];
-    const mediaPrefixes = photos.map(row => `team-retouch/media/${String(row.photo_id)}/${String(row.base_version_id)}/`);
-    const reviewSource = `team-retouch/workflow-return-reviews/${crypto.createHash('sha256').update(sourceProjectId).digest('hex')}/`;
-    const reviewTarget = `team-retouch/workflow-return-reviews/${crypto.createHash('sha256').update(targetProjectId).digest('hex')}/`;
-    const sourceProjectHash = crypto.createHash('sha256').update(sourceProjectId).digest('hex');
-    const targetProjectHash = crypto.createHash('sha256').update(targetProjectId).digest('hex');
-    const legacyWorkflowHash = sourceName && sourceStatus ? crypto.createHash('sha256').update(`${sourceStatus}\0${sourceName}`).digest('hex') : '';
-    const legacyReviewHash = sourceName ? crypto.createHash('sha256').update(sourceName).digest('hex') : '';
-    const byPath = new Map((sources || []).map(item => [String(item.relativePath || '').replace(/\\/g, '/'), item]));
-    const legacyWorkflowPath = legacyWorkflowHash ? `team-retouch/workflows/${legacyWorkflowHash}.json` : '';
-    const legacyWorkflow = legacyWorkflowPath ? byPath.get(legacyWorkflowPath) : null;
-    const canonicalWorkflowPresent = byPath.has(`team-retouch/workflows/${sourceProjectHash}.json`);
-    const legacyWorkflowOwned = Boolean(!canonicalWorkflowPresent && legacyWorkflow && readBoundJson(legacyWorkflow, {
-      projectId: sourceProjectId, projectName: sourceName, projectStatus: sourceStatus,
-    }, 'workflow'));
-    const legacyReviewPrefix = legacyReviewHash ? `team-retouch/workflow-return-reviews/${legacyReviewHash}/` : '';
-    const legacyReviewSession = legacyReviewPrefix ? byPath.get(`${legacyReviewPrefix}session.json`) : null;
-    const canonicalReviewPresent = byPath.has(`${reviewSource}session.json`);
-    const legacyReviewOwned = Boolean(!canonicalReviewPresent && legacyReviewSession && readBoundJson(legacyReviewSession, {
-      projectId: sourceProjectId, projectName: sourceName, projectStatus: sourceStatus,
-    }, 'review'));
-    const named = new Map();
-    if (sourceName) for (const directory of ['workflow-settings', 'identity-similarities']) {
-      named.set(`team-retouch/${directory}/${crypto.createHash('sha256').update(sourceName).digest('hex')}.json`, `team-retouch/${directory}/${crypto.createHash('sha256').update(targetName).digest('hex')}.json`);
-    }
-    for (const item of sources || []) {
-      const relativePath = String(item.relativePath || '').replace(/\\/g, '/');
-      let targetRelativePath = mediaPrefixes.some(prefix => relativePath.startsWith(prefix)) ? relativePath : named.get(relativePath);
-      if (!targetRelativePath && relativePath.startsWith(reviewSource)) targetRelativePath = `${reviewTarget}${relativePath.slice(reviewSource.length)}`;
-      if (!targetRelativePath && relativePath === `team-retouch/workflows/${sourceProjectHash}.json`) targetRelativePath = `team-retouch/workflows/${targetProjectHash}.json`;
-      if (!targetRelativePath && relativePath.startsWith(`team-retouch/workflow-content/${sourceProjectHash}/`)) targetRelativePath = `team-retouch/workflow-content/${targetProjectHash}/${relativePath.slice(`team-retouch/workflow-content/${sourceProjectHash}/`.length)}`;
-      if (!targetRelativePath && legacyWorkflowOwned && relativePath === legacyWorkflowPath) targetRelativePath = `team-retouch/workflows/${targetProjectHash}.json`;
-      if (!targetRelativePath && legacyWorkflowOwned && relativePath.startsWith(`team-retouch/workflow-content/${legacyWorkflowHash}/`)
-        && projectJsonMatchesBinding(item, { projectId: sourceProjectId, projectName: sourceName, projectStatus: sourceStatus })) targetRelativePath = `team-retouch/workflow-content/${targetProjectHash}/${relativePath.slice(`team-retouch/workflow-content/${legacyWorkflowHash}/`.length)}`;
-      if (!targetRelativePath && legacyReviewOwned && relativePath.startsWith(legacyReviewPrefix)) targetRelativePath = `${reviewTarget}${relativePath.slice(legacyReviewPrefix.length)}`;
-      if (!targetRelativePath && relativePath.startsWith(`team-retouch/output-ownership/${sourceProjectHash}/`)) targetRelativePath = `team-retouch/output-ownership/${targetProjectHash}/${relativePath.slice(`team-retouch/output-ownership/${sourceProjectHash}/`.length)}`;
-      if (!targetRelativePath && relativePath.startsWith('team-retouch/workflow-jobs/') && relativePath.endsWith('.json')) {
-        try {
-          const value = JSON.parse(fs.readFileSync(item.path, 'utf8'));
-          if (String(value.projectId || '') === sourceProjectId) {
-            const targetStatus = String(payload.project?.targetStatus || payload.project?.status || value.projectStatus || '');
-            targetRelativePath = `team-retouch/workflow-jobs/${crypto.createHash('sha256').update(`${targetProjectId}:${targetStatus}:${targetName}`).digest('hex')}.json`;
-          }
-        } catch { throw new Error(`团片项目恢复无法验证 workflow job 归属：${relativePath}`); }
-      }
-      if (targetRelativePath) selected.push({ ...item, originalRelativePath: relativePath, relativePath: targetRelativePath });
-      else if (relativePath.startsWith('team-retouch/batches/')) warnings.push({ path: relativePath, classification: 'rebuildable-cache', message: '临时算法批次不会进入项目恢复，可在下次操作时重建' });
-      else if (relativePath === 'team-retouch/output-ownership/working-images.json') ownershipLedger = item;
-      else if (relativePath.startsWith('team-retouch/command-log/')) warnings.push({ path: relativePath, classification: 'non-authoritative-audit', message: '共享审计日志保持当前工作区版本，项目权威状态已由数据库恢复' });
-      else if (relativePath.startsWith('team-retouch/') && !['team-retouch/storage.sqlite3', 'team-retouch/storage.sqlite3-wal', 'team-retouch/storage.sqlite3-shm'].includes(relativePath)) warnings.push({ path: relativePath, classification: 'other-project', message: '该私有文件不属于目标项目，已保持当前工作区版本' });
-    }
-  } finally { db?.close(); portable.cleanup(); }
-  return { selected, warnings, ownershipLedger };
-};
-
-const mergeProjectOwnershipLedger = ({ source, destinationDataPath, payload }) => {
-  if (!source) return [];
-  const stat = fs.lstatSync(source.path, { throwIfNoEntry: false });
-  if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error('团片项目恢复拒绝无效 ownership ledger');
-  if (source.sha256 && digestFile(source.path) !== String(source.sha256).toLowerCase()) throw new Error('团片项目恢复 ownership ledger 摘要不匹配');
-  const sourceLedger = JSON.parse(fs.readFileSync(source.path, 'utf8') || '{}');
-  const targetPath = path.join(destinationDataPath, 'output-ownership', 'working-images.json');
-  assertNoStorageLinks(destinationDataPath, targetPath);
-  const targetLedger = fs.statSync(targetPath, { throwIfNoEntry: false })?.isFile() ? JSON.parse(fs.readFileSync(targetPath, 'utf8') || '{}') : {};
-  const sourcePrefix = String(payload.project?.sourceRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-  const targetPrefix = String(payload.project?.targetRelativePath || sourcePrefix).replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-  if (!sourcePrefix || !targetPrefix) return [{ path: source.relativePath, classification: 'non-authoritative-audit', message: '缺少项目相对路径，旧共享 ownership ledger 未安全合并' }];
-  const inside = (key, prefix) => key === prefix || key.startsWith(`${prefix}/`);
-  for (const key of Object.keys(targetLedger)) if (inside(key, targetPrefix)) delete targetLedger[key];
-  for (const [key, value] of Object.entries(sourceLedger)) if (inside(key, sourcePrefix)) targetLedger[`${targetPrefix}${key.slice(sourcePrefix.length)}`] = value;
-  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-  const pending = path.join(path.dirname(targetPath), `.working-images-${crypto.randomUUID()}.tmp`);
-  const backup = path.join(path.dirname(targetPath), `.working-images-${crypto.randomUUID()}.backup`); let backedUp = false;
-  try {
-    fs.writeFileSync(pending, rewriteJson(JSON.stringify(targetLedger), buildReplacements(payload)), 'utf8');
-    if (fs.existsSync(targetPath)) { fs.renameSync(targetPath, backup); backedUp = true; }
-    fs.renameSync(pending, targetPath);
-    if (backedUp) fs.rmSync(backup, { force: true });
-  } catch (error) {
-    fs.rmSync(pending, { force: true });
-    if (backedUp) { fs.rmSync(targetPath, { force: true }); fs.renameSync(backup, targetPath); }
-    throw error;
-  } finally { fs.rmSync(pending, { force: true }); fs.rmSync(backup, { force: true }); }
-  return [];
+  if (!sourceProjectId || !targetProjectId) throw new Error('团片项目恢复缺少当前项目 ID 绑定');
+  const sourceHash = crypto.createHash('sha256').update(sourceProjectId).digest('hex');
+  const targetHash = crypto.createHash('sha256').update(targetProjectId).digest('hex');
+  const selected = []; const warnings = [];
+  const mappings = new Map([
+    [`team-retouch/workflows/${sourceHash}.json`, `team-retouch/workflows/${targetHash}.json`],
+    [`team-retouch/workflow-settings/${sourceHash}.json`, `team-retouch/workflow-settings/${targetHash}.json`],
+    [`team-retouch/identity-similarities/${sourceHash}.json`, `team-retouch/identity-similarities/${targetHash}.json`],
+    [`team-retouch/workflow-jobs/${sourceHash}.json`, `team-retouch/workflow-jobs/${targetHash}.json`],
+    [`team-retouch/output-cleanup/${sourceHash}.json`, `team-retouch/output-cleanup/${targetHash}.json`],
+  ]);
+  const prefixes = [
+    [`team-retouch/projects/${sourceHash}/`, `team-retouch/projects/${targetHash}/`],
+    [`team-retouch/workflow-content/${sourceHash}/`, `team-retouch/workflow-content/${targetHash}/`],
+    [`team-retouch/workflow-return-reviews/${sourceHash}/`, `team-retouch/workflow-return-reviews/${targetHash}/`],
+    [`team-retouch/output-ownership/${sourceHash}/`, `team-retouch/output-ownership/${targetHash}/`],
+  ];
+  for (const item of sources || []) {
+    const relativePath = String(item.relativePath || '').replace(/\\/g, '/');
+    let targetRelativePath = mappings.get(relativePath) || '';
+    if (!targetRelativePath) for (const [from, to] of prefixes) if (relativePath.startsWith(from)) { targetRelativePath = `${to}${relativePath.slice(from.length)}`; break; }
+    if (targetRelativePath) selected.push({ ...item, originalRelativePath: relativePath, relativePath: targetRelativePath });
+    else if (relativePath.startsWith('team-retouch/batches/')) warnings.push({ path: relativePath, classification: 'rebuildable-cache', message: '临时算法批次不会进入项目恢复，可在下次操作时重建' });
+    else if (relativePath.startsWith('team-retouch/command-log/')) warnings.push({ path: relativePath, classification: 'non-authoritative-audit', message: '工作区审计日志不属于单个项目恢复' });
+    else if (relativePath.startsWith('team-retouch/') && !['team-retouch/storage.sqlite3', 'team-retouch/storage.sqlite3-wal', 'team-retouch/storage.sqlite3-shm'].includes(relativePath)) warnings.push({ path: relativePath, classification: 'other-project', message: '该当前格式私有文件不属于目标项目' });
+  }
+  return { selected, warnings };
 };
 
 const restoreProjectBundle = ({ source, sources, destinationPath, destinationDataPath, payload, ensureSchema, fault }) => {
   const rollback = snapshotDatabase(destinationPath);
   try {
-    const privatePlan = source.format === 'component-storage-v1' ? projectPrivateSources({ source, sources, payload }) : { selected: [], warnings: [] };
+    const privatePlan = projectPrivateSources({ sources, payload });
     const result = restoreProjectStorage({ sourcePath: source.path, destinationPath, payload, ensureSchema, fault });
     const consumedPaths = [String(source.relativePath || '')].filter(Boolean);
     for (const suffix of ['-wal', '-shm']) {
       const sidecar = (sources || []).find(item => item.relativePath === `${source.relativePath}${suffix}`);
       if (sidecar) consumedPaths.push(String(sidecar.relativePath));
     }
-    consumedPaths.push(...publishWorkspacePrivateFiles({ sources: privatePlan.selected, destinationDataPath, payload, fault }));
-    const ledgerWarnings = mergeProjectOwnershipLedger({ source: privatePlan.ownershipLedger, destinationDataPath, payload });
-    if (privatePlan.ownershipLedger && !ledgerWarnings.length) consumedPaths.push(String(privatePlan.ownershipLedger.relativePath));
-    const applied = [...new Set(consumedPaths)]; const warnings = [...privatePlan.warnings, ...ledgerWarnings];
+    const targetHash = crypto.createHash('sha256').update(String(payload.project?.id || '')).digest('hex');
+    const exactScope = { roots: ['projects','workflow-content','workflow-return-reviews','output-ownership'].map(name => path.join(destinationDataPath, name, targetHash)), files: ['workflows','workflow-settings','identity-similarities','workflow-jobs','output-cleanup'].map(name => path.join(destinationDataPath, name, `${targetHash}.json`)) };
+    consumedPaths.push(...publishWorkspacePrivateFiles({ sources: privatePlan.selected, destinationDataPath, payload, fault, exactScope }));
+    const applied = [...new Set(consumedPaths)]; const warnings = privatePlan.warnings;
     const warningByPath = new Map(warnings.map(item => [String(item.path), item]));
     const pathDispositions = (sources || []).filter(item => !applied.includes(String(item.relativePath || ''))).map(item => {
       const pathValue = String(item.relativePath || ''); const warning = warningByPath.get(pathValue);
-      return { path: pathValue, action: 'intentionally-skipped', reason: warning?.classification || (item.format === 'legacy-domain-v1' ? 'redundant-transition-source' : 'other-project'), ...(warning?.message ? { message: warning.message } : {}) };
+      return { path: pathValue, action: 'intentionally-skipped', reason: warning?.classification || 'other-project', ...(warning?.message ? { message: warning.message } : {}) };
     });
     const consumedPathMappings = privatePlan.selected.filter(item => item.originalRelativePath !== item.relativePath).map(item => ({ path: item.originalRelativePath, destinationRelativePath: item.relativePath }));
     return { ...result, consumedPaths: applied, consumedPathMappings, pathDispositions, warnings };
@@ -561,4 +528,4 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
   finally { rollback.cleanup(); }
 };
 
-module.exports = { restoreProjectStorage, restoreWorkspaceStorage, restoreWorkspaceBundle, restoreProjectBundle, publishWorkspacePrivateFiles, projectPrivateSources, mergeProjectOwnershipLedger, selectRestoreSource, replacePath, rewriteJson, loadRestoreSources, writeRestoreReceipt };
+module.exports = { restoreProjectStorage, restoreWorkspaceStorage, restoreWorkspaceBundle, restoreProjectBundle, publishWorkspacePrivateFiles, projectPrivateSources, selectRestoreSource, replacePath, rewriteJson, loadRestoreSources, writeRestoreReceipt };

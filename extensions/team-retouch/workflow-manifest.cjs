@@ -13,13 +13,11 @@ const findOwnedWorkflowOutput = (group, outputOwnership = {}) => {
 };
 
 const verifiedWorkflowManifest = (value, binding = {}) => {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.version) < 2 || !Array.isArray(value.groups)) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.version) !== 2 || !Array.isArray(value.groups)) return null;
   if (!value.groups.every(group => group && typeof group === 'object' && !Array.isArray(group) && Array.isArray(group.items)
     && group.items.every(item => item && typeof item === 'object' && !Array.isArray(item)))) return null;
   const boundProjectId = String(binding.projectId || '');
-  if (boundProjectId && value.projectId && String(value.projectId) !== boundProjectId) return null;
-  if (binding.legacy === true && (String(value.projectName || '') !== String(binding.projectName || '')
-    || String(value.status || '') !== String(binding.projectStatus || ''))) return null;
+  if (!boundProjectId || String(value.projectId || '') !== boundProjectId) return null;
   return value;
 };
 
@@ -33,41 +31,10 @@ const createWorkflowManifestResolver = ({ crypto, fs, path, writeJsonAtomic }) =
     manifestPath: path.join(storage.dataPath, 'workflows', `${key}.json`),
     reviewDirectory: path.join(storage.dataPath, 'workflow-return-reviews', key),
   };
-  if (fs.existsSync(scope.manifestPath)) {
-    let raw = null;
-    try { raw = JSON.parse(await fs.promises.readFile(scope.manifestPath, 'utf8')); } catch { /* An existing canonical file always wins, even when damaged. */ }
-    const manifest = verifiedWorkflowManifest(raw, { projectId });
-    if (manifest && !manifest.projectId) {
-      const rebound = { ...manifest, projectId, restoredFrom: manifest.restoredFrom || { kind: 'canonical-project-binding', projectName: manifest.projectName || context?.projectName || '', status: manifest.status || context?.projectStatus || '' } };
-      await writeJsonAtomic(scope.manifestPath, rebound);
-      return { ...scope, manifest: rebound, source: 'canonical-project-binding' };
-    }
-    return { ...scope, manifest, source: raw ? 'canonical' : 'invalid-canonical' };
-  }
-
-  const projectName = String(context?.projectName || '');
-  const projectStatus = String(context?.projectStatus || '');
-  const legacyKey = workflowManifestKey(crypto, `${projectStatus}\0${projectName}`);
-  const legacyPath = path.join(storage.dataPath, 'workflows', `${legacyKey}.json`);
-  let legacy = null;
-  try { legacy = JSON.parse(await fs.promises.readFile(legacyPath, 'utf8')); } catch { /* Missing or damaged legacy data is not adopted. */ }
-  legacy = verifiedWorkflowManifest(legacy, { projectId, projectName, projectStatus, legacy: true });
-  if (!legacy) return { ...scope, manifest: null, source: 'missing' };
-
-  const restored = {
-    ...legacy,
-    projectId,
-    restoredFrom: legacy.restoredFrom || { kind: 'legacy-status-name', projectName, status: projectStatus, manifestKey: legacyKey },
-  };
-  try { await writeJsonAtomic(scope.manifestPath, restored); }
-  catch (error) {
-    let concurrent = null;
-    try { concurrent = JSON.parse(await fs.promises.readFile(scope.manifestPath, 'utf8')); } catch { /* Preserve the original atomic-copy failure. */ }
-    concurrent = verifiedWorkflowManifest(concurrent, { projectId });
-    if (!concurrent) throw error;
-    return { ...scope, manifest: concurrent, source: 'canonical', legacyPath };
-  }
-  return { ...scope, manifest: restored, source: 'legacy-status-name', legacyPath };
+  if (!fs.existsSync(scope.manifestPath)) return { ...scope, manifest: null, source: 'missing' };
+  let raw = null;
+  try { raw = JSON.parse(await fs.promises.readFile(scope.manifestPath, 'utf8')); } catch { /* Invalid current data is reported without rewriting it. */ }
+  return { ...scope, manifest: verifiedWorkflowManifest(raw, { projectId }), source: raw ? 'current' : 'invalid-current' };
 };
 
 module.exports = { createWorkflowManifestResolver, findOwnedWorkflowOutput, verifiedWorkflowManifest, workflowManifestKey, workflowOutputOwnershipKey };

@@ -75,13 +75,12 @@ The deployment package contains `manifest.json` and a prepared
 `PhotoFlowNative.vhdx`. Before importing it, PhotoFlow verifies the component
 version, architecture, archive path safety, free space, and VHDX SHA-256.
 `scripts/create-advanced-offline-package.ps1` exports a verified
-environment into this package. The earlier `%LOCALAPPDATA%/PhotoFlow/wsl`
-location remains detectable so existing installations can be migrated safely.
+environment into this package. The networked environment builder lives under
+`scripts/` and is never copied into the installable component.
 
-The bridge automatically activates the advanced backend when the following environments/checkpoints are
-available in either the `PhotoFlowNative` or legacy `PhotoflowLab`
-distribution. PhotoFlow tries both names automatically; a custom installation
-can select another distribution with `PHOTOFLOW_WSL_DISTRO`:
+The bridge activates the advanced backend only from the `PhotoFlowNative`
+distribution (or the explicit development override `PHOTOFLOW_WSL_DISTRO`)
+when these environments/checkpoints are available:
 
 - `$HOME/miniforge3/envs/pairdetr`
 - `$HOME/miniforge3/envs/sam2`

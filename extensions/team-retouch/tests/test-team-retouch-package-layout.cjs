@@ -24,7 +24,7 @@ try {
     assert(fs.statSync(path.join(isolatedRoot, relativePath)).isFile(), `packaged requiredFile is missing: ${relativePath}`);
   }
 
-  const child = spawnSync(process.execPath, ['-e', "require('./service.cjs'); require('./compatibility/storage-restore.cjs')"], {
+  const child = spawnSync(process.execPath, ['-e', "require('./service.cjs'); require('./backup-restore.cjs')"], {
     cwd: isolatedRoot,
     encoding: 'utf8',
     env: { ...process.env, NODE_PATH: '' },

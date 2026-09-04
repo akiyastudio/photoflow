@@ -26,7 +26,7 @@ if not _LIGHTWEIGHT_STARTUP:
     import cv2
     import numpy as np
     from PIL import Image, ImageOps
-    from identity_engine import IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
+    from identity_engine import CompactPairMetrics, IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
     Image.MAX_IMAGE_PIXELS = None
 
 RTMDET_INPUT_SIZE = 640
@@ -537,11 +537,6 @@ def planned_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE, allow
     return [padded[0], padded[1], max(1, padded[2] - padded[0]), max(1, padded[3] - padded[1])]
 
 
-def centered_work_crop(box, image_width, image_height, edge=WORK_TILE_EDGE):
-    """Backward-compatible entry point for callers and existing tests."""
-    return planned_work_crop(box, image_width, image_height, edge, allow_oversize=True)
-
-
 def estimated_face_box(body_box):
     body_width = max(1.0, float(body_box[2]) - float(body_box[0]))
     body_height = max(1.0, float(body_box[3]) - float(body_box[1]))
@@ -910,13 +905,6 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
     if not people:
         return people, []
     proxy_width, proxy_height, proxy_scale = proxy_size(width, height)
-    person_mask_directory = output_root / "person-masks"
-    person_mask_directory.mkdir(parents=True, exist_ok=True)
-    for index, person in enumerate(people, start=1):
-        person_mask_path = person_mask_directory / f"person-{index:02d}-{uuid.uuid4()}.png"
-        save_mask(person_mask_path, person["mask"])
-        person["maskPath"] = str(person_mask_path)
-
     tiles = plan_work_tiles(people, width, height, oversize_crop_mode=oversize_crop_mode)
     emit_progress(78, f"{progress_message}：共 {len(tiles)} 张")
     tasks = []
@@ -943,7 +931,6 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
                 "faceBox": box_payload(member["faceBox"]) if member.get("faceBox") else None,
                 "bbox": box_payload(member["box"]),
                 "planningBox": box_payload(member.get("planningBox", member["box"])),
-                "maskPath": member["maskPath"],
                 "reviewReason": str(member.get("reviewReason") or ""),
             })
         member_numbers = [str(member["personIndex"]) for member in member_payload]
@@ -985,114 +972,6 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
             "status": "exported",
         })
     return people, tasks
-
-
-def rebuild_without_person(input_path, manifest_path, output_dir, delivery_dir=None,
-                           delivery_prefix=None, oversize_crop_mode="expand"):
-    """Remove exactly one stored person and rebuild crops without model inference."""
-    emit_progress(5, "正在读取现有人物结果")
-    rgb = load_rgb(input_path)
-    height, width = rgb.shape[:2]
-    with open(manifest_path, "r", encoding="utf-8") as source:
-        request = json.load(source)
-    remove_person_index = int(request.get("removePersonIndex") or 0)
-    if remove_person_index < 1:
-        raise ValueError("没有指定需要移除的人物")
-    output_root = Path(output_dir)
-    output_root.mkdir(parents=True, exist_ok=True)
-    delivery_root = Path(delivery_dir or output_root)
-    delivery_root.mkdir(parents=True, exist_ok=True)
-    delivery_name = Path(delivery_prefix or Path(input_path).stem).name
-    proxy_width, proxy_height, proxy_scale = proxy_size(width, height)
-    seen = set()
-    people = []
-    removed = 0
-    group_masks = {}
-    emit_progress(20, "正在移除所选误识别人物")
-    for task in request.get("tasks") or []:
-        members = task.get("members") or [{
-            "personIndex": task.get("personIndex"),
-            "confidence": task.get("confidence", 1),
-            "bbox": task.get("bbox"),
-        }]
-        for member in members:
-            person_index = int(member.get("personIndex") or 0)
-            if person_index in seen or person_index < 1:
-                continue
-            seen.add(person_index)
-            if person_index == remove_person_index:
-                removed += 1
-                continue
-            box = payload_box(member.get("bbox"))
-            if not box:
-                continue
-            mask_path = str(member.get("maskPath") or "")
-            if mask_path and os.path.exists(mask_path):
-                person_mask = load_mask(mask_path) > 0
-            else:
-                group_mask_path = str(task.get("maskPath") or "")
-                if group_mask_path not in group_masks:
-                    group_masks[group_mask_path] = load_mask(group_mask_path) > 0 if group_mask_path and os.path.exists(group_mask_path) else None
-                group_mask = group_masks[group_mask_path]
-                person_mask = np.zeros((proxy_height, proxy_width), dtype=bool)
-                x1 = max(0, min(proxy_width, int(math.floor(box[0] / proxy_scale))))
-                y1 = max(0, min(proxy_height, int(math.floor(box[1] / proxy_scale))))
-                x2 = max(x1 + 1, min(proxy_width, int(math.ceil(box[2] / proxy_scale))))
-                y2 = max(y1 + 1, min(proxy_height, int(math.ceil(box[3] / proxy_scale))))
-                person_mask[y1:y2, x1:x2] = True
-                if group_mask is not None:
-                    if group_mask.shape != person_mask.shape:
-                        group_mask = cv2.resize(group_mask.astype(np.uint8), (proxy_width, proxy_height), interpolation=cv2.INTER_NEAREST) > 0
-                    clipped_mask = np.logical_and(group_mask, person_mask)
-                    if clipped_mask.any():
-                        person_mask = clipped_mask
-            if person_mask.shape != (proxy_height, proxy_width):
-                person_mask = cv2.resize(person_mask.astype(np.uint8), (proxy_width, proxy_height), interpolation=cv2.INTER_NEAREST) > 0
-            visible_box = mask_bounds(person_mask, proxy_scale, width, height)
-            planning_box = payload_box(member.get("planningBox")) or bounded_planning_box(box, visible_box, width, height)
-            people.append({
-                "box": clamp_box(box, width, height),
-                "faceBox": payload_box(member.get("faceBox")),
-                "score": float(member.get("confidence", task.get("confidence", 1))),
-                "source": "stored",
-                "mask": person_mask,
-                "planningBox": clamp_box(planning_box, width, height),
-                "previousPersonIndex": person_index,
-            })
-    if removed != 1:
-        raise ValueError(f"需要移除的人物数量异常：{removed}")
-    review_reasons = overlap_review_reasons(people)
-    for index, person in enumerate(people):
-        person["reviewReason"] = review_reasons[index]
-    detector = str(request.get("detector") or "stored-detection")
-    people, tasks = generate_work_tasks(
-        rgb, people, output_root, delivery_root, delivery_name, detector,
-        oversize_crop_mode=oversize_crop_mode,
-        progress_message="正在按剩余人物重新规划工作图",
-    )
-    output_manifest = output_root / "manifest.json"
-    output_manifest.write_text(json.dumps({
-        "source": str(input_path), "width": width, "height": height,
-        "personCount": len(people), "workTileEdge": WORK_TILE_EDGE,
-        "oversizeCropMode": oversize_crop_mode, "tasks": tasks,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    emit_progress(100, f"完成：已移除 1 个人物，保留 {len(people)} 个人物")
-    return {
-        "success": True,
-        "detector": detector,
-        "backend": "stored",
-        "provider": "none",
-        "requestedMode": "stored",
-        "advancedBackend": detector == "rtmdet-pairdetr-sam2",
-        "width": width,
-        "height": height,
-        "workTileEdge": WORK_TILE_EDGE,
-        "personCount": len(people),
-        "removedPersonCount": 1,
-        "needsReviewCount": sum(bool(task["needsReview"]) for task in tasks),
-        "tasks": tasks,
-        "manifestPath": str(output_manifest),
-    }
 
 
 def detect(input_path, output_dir, preference="auto", delivery_dir=None, delivery_prefix=None,
@@ -1148,6 +1027,15 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
         except Exception as error:
             if advanced_mode == "advanced":
                 raise RuntimeError(f"高级模式不可用：{advanced_fallback_reason(error)}") from error
+            # PairDETR may have succeeded before SAM failed.  Its boxes are an
+            # advanced-only intermediate and must never be mixed with RTMDet
+            # masks when the advanced transaction did not complete.
+            fused = [{
+                "box": item["box"], "score": item["score"], "source": "rtmdet",
+                "faceBox": None, "rtmdetIndex": index, "matchIou": 0.0,
+            } for index, item in enumerate(rtmdet)]
+            sam_masks = []
+            advanced_backend = False
             fallback_reasons.append(advanced_fallback_reason(error))
             emit_progress(58, "正在使用基础识别结果把图片切小")
     else:
@@ -1264,21 +1152,24 @@ def restore_patches(input_path, manifest_path):
 
 
 def _normalized_correlation(left, right):
-    left = np.asarray(left, dtype=np.float32)
-    right = np.asarray(right, dtype=np.float32)
-    left -= float(left.mean())
-    right -= float(right.mean())
-    denominator = float(np.linalg.norm(left) * np.linalg.norm(right))
+    left_values = np.asarray(left, dtype=np.float32)
+    right_values = np.asarray(right, dtype=np.float32)
+    left_mean = float(left_values.mean())
+    right_mean = float(right_values.mean())
+    left_centered = left_values - left_mean
+    right_centered = right_values - right_mean
+    denominator = float(np.linalg.norm(left_centered) * np.linalg.norm(right_centered))
     if denominator < 1e-6:
-        return 1.0 if float(np.mean(np.abs(left - right))) < 1e-6 else 0.0
-    return float(np.clip(np.sum(left * right) / denominator, -1.0, 1.0))
+        return 1.0 if float(np.mean(np.abs(left_values - right_values))) < 1e-6 else 0.0
+    return float(np.clip(np.sum(left_centered * right_centered) / denominator, -1.0, 1.0))
 
 
 def _perceptual_hash(gray):
     small = cv2.resize(gray, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
-    low_frequency = cv2.dct(small)[:8, :8]
-    median = float(np.median(low_frequency[1:]))
-    return low_frequency > median
+    low_frequency = cv2.dct(small)[:8, :8].reshape(-1)
+    coefficients = low_frequency[1:]
+    median = float(np.median(coefficients))
+    return coefficients > median
 
 
 def describe_match_image(image_path):
@@ -1621,22 +1512,33 @@ def identify_people(manifest_path, runtime=None, provider="auto"):
     subjects = payload.get("subjects") or []
     if not subjects:
         return {"success": True, "clusters": [], "subjectCount": 0, "method": "face-osnet-gallery-v3"}
+    if len(subjects) > 2000:
+        raise ValueError("单次人物识别最多支持 2000 个主体；请拆分批次以限制两两比较内存")
     runtime = runtime or IdentityRuntime(asset_path("models", "face_detection_yunet_2023mar.onnx").parent, provider)
-    images, image_shapes, descriptors = {}, {}, []
+    image_shapes, descriptors = {}, []
     for item in subjects:
         image_path = os.path.abspath(item["path"])
-        if image_path not in images:
-            images[image_path] = load_rgb(image_path)
-        image_shapes[str(item.get("photoId") or "")] = images[image_path].shape[:2]
+        with Image.open(image_path) as source:
+            image_shapes[str(item.get("photoId") or "")] = (source.height, source.width)
     add_occlusion_estimates(subjects, image_shapes)
-    for index, item in enumerate(subjects, start=1):
-        image_path = os.path.abspath(item["path"])
-        descriptors.append(runtime.describe(images[image_path], item))
-        emit_progress(5 + 38 * index / len(subjects), f"检测并对齐人脸 {index}/{len(subjects)}")
-    runtime.embed_bodies(descriptors)
+    subjects_by_image = {}
+    for item in subjects:
+        subjects_by_image.setdefault(os.path.abspath(item["path"]), []).append(item)
+    described_count = 0
+    for image_path, image_subjects in subjects_by_image.items():
+        rgb = load_rgb(image_path)
+        image_descriptors = []
+        for item in image_subjects:
+            image_descriptors.append(runtime.describe(rgb, item))
+            described_count += 1
+            emit_progress(5 + 38 * described_count / len(subjects), f"检测并对齐人脸 {described_count}/{len(subjects)}")
+        runtime.embed_bodies(image_descriptors)
+        descriptors.extend(image_descriptors)
+        del rgb
     emit_progress(72, "已提取 OSNet 人体特征，正在执行受约束聚类")
-    clusters = constrained_clusters(descriptors)
-    similarities = ranked_similarity_pairs(descriptors)
+    pair_cache = CompactPairMetrics(len(descriptors))
+    clusters = constrained_clusters(descriptors, pair_cache)
+    similarities = ranked_similarity_pairs(descriptors, metrics_cache=pair_cache)
     emit_progress(100, "跨图片人物候选分组完成")
     return {
         "success": True, "subjectCount": len(subjects),
@@ -1728,7 +1630,7 @@ def probe_advanced_installation():
 
 def create_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "probe-advanced-installation", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "rebuild", "merge"))
+    parser.add_argument("action", choices=("probe", "probe-advanced-installation", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "merge"))
     parser.add_argument("--input")
     parser.add_argument("--output-dir")
     parser.add_argument("--delivery-dir")
@@ -1779,15 +1681,6 @@ def run(args_list=None):
         if not args.input or not args.manifest:
             parser.error("restore requires --input and --manifest")
         emit(restore_patches(os.path.abspath(args.input), os.path.abspath(args.manifest)))
-        return
-    if args.action == "rebuild":
-        if not args.input or not args.manifest or not args.output_dir:
-            parser.error("rebuild requires --input, --manifest and --output-dir")
-        emit(rebuild_without_person(
-            os.path.abspath(args.input), os.path.abspath(args.manifest), os.path.abspath(args.output_dir),
-            os.path.abspath(args.delivery_dir) if args.delivery_dir else None,
-            args.delivery_prefix, args.oversize_crop_mode,
-        ))
         return
     if not args.input or not args.output_dir:
         parser.error("detect requires --input and --output-dir")

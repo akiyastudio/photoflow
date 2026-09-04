@@ -54,8 +54,8 @@ assert.equal(clampZoom(9), 5); assert.equal(clampZoom(.2), 1); assert.equal(norm
 assert.equal(shouldBlink('blink', true), true); assert.equal(shouldBlink('blink', false), false, 'deactivation must stop blink animation');
 
 const candidates = progressCandidates({ progressFolders: [
-  { id: 'source', mediaKind: 'image', nodeRole: 'progress', folderPath: 'C:/project/raw' },
-  { id: 'target', mediaKind: 'image', nodeRole: 'progress', folderPath: 'C:/project/output' },
+  { id: 'source', mediaKind: 'image', nodeRole: 'progress', contentRef: { relativeDirectory: 'C:/project/raw' } },
+  { id: 'target', mediaKind: 'image', nodeRole: 'progress', contentRef: { relativeDirectory: 'C:/project/output' } },
   { id: 'missing', mediaKind: 'image', nodeRole: 'progress', folderMissing: true },
   { id: 'aux', mediaKind: 'image', nodeRole: 'progress', relationKind: 'auxiliary' },
 ] }, ['C:/project/raw/a.jpg']);
@@ -64,24 +64,24 @@ assert.deepEqual(candidates.map(item => item.id), ['target'], 'merge target choi
 assert.deepEqual(returnReviewItems({ matches: [{ returnId: 'r1' }] }), [{ returnId: 'r1' }]);
 assert.deepEqual(returnReviewItems(undefined), []);
 
-const legacyWorkspace = normalizeWorkspace({ photos: [{ photoId: 'old', baseVersionId: 'v0', tasks: [{ id: 'old-task', personIndex: 1 }] }] });
-assert.deepEqual(legacyWorkspace.identities, []);
-assert.deepEqual(legacyWorkspace.assignments, []);
-assert.equal(legacyWorkspace.photos[0].tasks[0].members[0].personIndex, 1, 'old single-person tasks must normalize without new fields');
-assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'suggested' }, { id: 'alice', name: 'Alice' }), true, 'automatic identity candidates are accepted by default and remain user-editable');
+const currentWorkspace = normalizeWorkspace({ photos: [{ photoId: 'current', baseVersionId: 'v0', tasks: [{ id: 'task', members: [{ personIndex: 1 }] }] }] });
+assert.deepEqual(currentWorkspace.identities, []);
+assert.deepEqual(currentWorkspace.assignments, []);
+assert.equal(currentWorkspace.photos[0].tasks[0].members[0].personIndex, 1);
+assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'suggested', identityConfirmed: true }, { id: 'alice', name: 'Alice' }), true, 'current explicit confirmation enables the identity');
 assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'suggested', identityConfirmed: false }, { id: 'alice', name: 'Alice' }), false, 'an explicit rejection still overrides the automatic default');
-assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'manual-group' }, { id: 'alice', name: 'Alice' }), true, 'legacy manual identity confirmation remains supported');
+assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'manual-group' }, { id: 'alice', name: 'Alice' }), false, 'source labels do not substitute for current confirmation state');
 
 const guardedWorkspace = {
-  photos: [{ photoId: 'p1', baseVersionId: 'v1', tasks: [{ id: 't1', personIndex: 1, bbox: { x: 0, y: 0, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 } }] }],
+  photos: [{ photoId: 'p1', baseVersionId: 'v1', tasks: [{ id: 't1', personIndex: 1, members: [{ personIndex: 1, bbox: { x: 0, y: 0, width: 10, height: 10 } }], bbox: { x: 0, y: 0, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 } }] }],
   identities: [{ id: 'alice', name: 'Alice' }], assignments: [],
 };
 assert.equal(canEnterWorkflowStage(guardedWorkspace, 'assignment').allowed, false, 'stage 2 must be guarded until every person has an accepted identity');
 assert.equal(latestWorkflowStage(guardedWorkspace), 'detect');
-const confirmedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', source: 'manual' }] };
+const confirmedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', identityConfirmed: true, source: 'manual' }] };
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'assignment').allowed, true);
 assert.equal(latestWorkflowStage(confirmedWorkspace), 'assignment');
-const automaticallyAcceptedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', source: 'suggested', completed: true, completionKind: 'no-retouch' }] };
+const automaticallyAcceptedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', identityConfirmed: true, source: 'suggested', completed: true, completionKind: 'no-retouch' }] };
 assert.equal(canEnterWorkflowStage(automaticallyAcceptedWorkspace, 'assignment').allowed, true, 'automatic candidates satisfy identity assignment without a confirmation click');
 assert.equal(mergeAudit(automaticallyAcceptedWorkspace).ready, true, 'automatic candidates must not create a final merge blocker');
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'relay').allowed, false, 'stage 3 must wait for generated assignment workflow');
@@ -156,8 +156,8 @@ assert.equal(completedBlockedRelay[1].reason, undefined, 'a completed no-retouch
 
 const unknownEdit = returnModificationAssessment({});
 assert.equal(unknownEdit.known, false); assert.equal(unknownEdit.suspicious, false); assert.equal(unknownEdit.label, '修改有效性待人工查看');
-assert.equal(returnModificationAssessment({ modificationScore: .01 }).suspicious, true, 'near-identical returns must warn as potentially unmodified');
-assert.equal(returnModificationAssessment({ modificationScore: .4 }).suspicious, false);
+assert.equal(returnModificationAssessment({ editEvidence: { changedFraction: .01 } }).suspicious, true, 'near-identical returns must warn as potentially unmodified');
+assert.equal(returnModificationAssessment({ editEvidence: { changedFraction: .4 } }).suspicious, false);
 for (const editEvidence of [
   { reallyModified: false }, { exactSame: true }, { nearUnchanged: true }, { mistakenFullOriginal: true }, { abnormalDimensions: true },
 ]) assert.equal(returnModificationAssessment({ editEvidence }).suspicious, true, `backend editEvidence must require review: ${JSON.stringify(editEvidence)}`);
@@ -173,13 +173,13 @@ assert.equal(returnMatchAssessment({ taskId: 't1', matchConfidence: 'review', sc
 const unknownMetrics = workingImageMetrics({}, {});
 assert.equal(unknownMetrics.width, 0); assert.equal(unknownMetrics.fullFrame, undefined); assert.equal(unknownMetrics.requiresManualCrop, undefined); assert.equal(unknownMetrics.backend, '未知');
 const metrics = workingImageMetrics({
-  detector: 'rtmdet-pairdetr-sam2', fallbackReason: '显存不足，已回退基础检测',
-  generation: { sourceWidth: 8000, sourceHeight: 6000, workWidth: 4000, workHeight: 3000, fullFrame: false, sourceCoverage: .25, requiresManualCrop: true, exceedsWorkTileEdge: false, reason: '多人靠近画面边缘' },
+  detector: 'rtmdet-pairdetr-sam2',
+  generation: { sourceWidth: 8000, sourceHeight: 6000, workWidth: 4000, workHeight: 3000, fullFrame: false, sourceCoverage: .25, requiresManualCrop: true, exceedsWorkTileEdge: false, reason: '多人靠近画面边缘', fallbackReason: '显存不足，已回退基础检测' },
 });
 assert.equal(metrics.width, 4000); assert.equal(metrics.height, 3000); assert.equal(metrics.sourceWidth, 8000); assert.equal(metrics.sourceHeight, 6000);
 assert.equal(metrics.areaRatio, .25); assert.equal(metrics.fullFrame, false); assert.equal(metrics.requiresManualCrop, true); assert.equal(metrics.exceedsWorkTileEdge, false); assert.equal(metrics.backend, '增强'); assert.equal(metrics.detector, 'rtmdet-pairdetr-sam2'); assert.equal(metrics.fallbackReason, '显存不足，已回退基础检测'); assert.equal(metrics.reason, '多人靠近画面边缘');
-const legacyTopLevelMetrics = workingImageMetrics({ workWidth: 5000, workHeight: 2500, sourceWidth: 5000, sourceHeight: 5000, fullFrame: true, sourceCoverage: .5, requiresManualCrop: false, exceedsWorkTileEdge: true, detector: 'rtmdet-ins-m', reason: 'legacy top-level' });
-assert.equal(legacyTopLevelMetrics.areaRatio, .5); assert.equal(legacyTopLevelMetrics.fullFrame, true); assert.equal(legacyTopLevelMetrics.over4000, true); assert.equal(legacyTopLevelMetrics.backend, '基础'); assert.equal(legacyTopLevelMetrics.reason, 'legacy top-level');
+const rejectedTopLevelMetrics = workingImageMetrics({ workWidth: 5000, fullFrame: true, sourceCoverage: .5, detector: 'rtmdet-ins-m' });
+assert.equal(rejectedTopLevelMetrics.width, 0); assert.equal(rejectedTopLevelMetrics.fullFrame, undefined); assert.equal(rejectedTopLevelMetrics.backend, '基础');
 
 const audit = mergeAudit({ ...generatedWorkspace, assignments: [{ ...confirmedWorkspace.assignments[0], completed: false }] });
 assert.equal(audit.ready, false);

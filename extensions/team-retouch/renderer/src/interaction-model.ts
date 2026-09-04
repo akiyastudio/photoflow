@@ -66,7 +66,7 @@ export const normalizeWorkspace = (value: Json | undefined): Json => {
     ...photo,
     tasks: Array.isArray(photo?.tasks) ? photo.tasks.map((task: Json) => ({
       ...task,
-      members: Array.isArray(task?.members) ? task.members : task?.personIndex === undefined ? [] : [{ personIndex: task.personIndex, bbox: task.bbox }],
+      members: Array.isArray(task?.members) ? task.members : [],
     })) : [],
   })) : [];
   return {
@@ -81,17 +81,13 @@ export const normalizeWorkspace = (value: Json | undefined): Json => {
 const generatedIdentity = (identity: Json | undefined) => /^待确认人物\s+\d+$/.test(String(identity?.name || ''));
 export const isIdentityConfirmed = (assignment: Json | undefined, identity: Json | undefined) => {
   if (!assignment?.identityId || !identity || generatedIdentity(identity)) return false;
-  if (typeof assignment.identityConfirmed === 'boolean') return assignment.identityConfirmed;
-  if (assignment.identityConfirmedAt || assignment.confirmedAt) return true;
-  return ['manual', 'manual-group', 'suggested'].includes(String(assignment.source || ''));
+  return assignment.identityConfirmed === true;
 };
 
 export const assignmentKey = (photoId: unknown, baseVersionId: unknown, personIndex: unknown) =>
   `${String(photoId || '')}:${String(baseVersionId || '')}:${Number(personIndex || 0)}`;
 
-export const taskMembers = (task: Json) => Array.isArray(task.members) && task.members.length
-  ? task.members
-  : [{ personIndex: task.personIndex, bbox: task.bbox }];
+export const taskMembers = (task: Json) => Array.isArray(task.members) ? task.members : [];
 
 export const isPhotoMergeComplete = (value: Json | undefined, photo: Json) => {
   const workspace = normalizeWorkspace(value);
@@ -121,7 +117,7 @@ export const workflowStageSummaries = (value: Json | undefined, active: Workflow
   const completed = eligible.filter((subject: Json) => Boolean(subject.assignment?.completed)).length;
   const returned = eligible.filter((subject: Json) => subject.assignment?.completionKind === 'returned' && !subject.assignment?.returnMissing).length;
   const missingReturns = eligible.filter((subject: Json) => Boolean(subject.assignment?.returnMissing)).length;
-  const pendingReviews = Number(workspace.pendingReturnReviewCount ?? workspace.reviewCount ?? 0) || 0;
+  const pendingReviews = Number(workspace.pendingReturnReviewCount || 0);
   const mergeBlockers = mergeAudit(workspace).blockers.length;
   const merged = workspace.photos.filter((photo: Json) => isPhotoMergeComplete(workspace, photo)).length;
   const detectComplete = verifiedWorkflow || Boolean(workspace.photos.length && tasks.length && subjects.length && confirmed === subjects.length && cropReview === 0);
@@ -166,25 +162,25 @@ export const latestWorkflowStage = (value: Json | undefined): WorkflowStage => {
 
 export const workflowLayoutMode = (width: number) => Number.isFinite(width) && width < 760 ? 'compact-menu' : width < 1120 ? 'scrollable-steps' : 'full-steps';
 
-export const workingImageMetrics = (task: Json, photo: Json = {}) => {
+export const workingImageMetrics = (task: Json, _photo: Json = {}) => {
   const generation = task?.generation && typeof task.generation === 'object' ? task.generation : {};
   const crop = task?.crop || {};
-  const width = Math.max(0, Number(generation.workWidth ?? task?.workWidth ?? crop.width ?? task?.width ?? 0));
-  const height = Math.max(0, Number(generation.workHeight ?? task?.workHeight ?? crop.height ?? task?.height ?? 0));
-  const sourceWidth = Math.max(width, Number(generation.sourceWidth ?? task?.sourceWidth ?? photo?.width ?? 0));
-  const sourceHeight = Math.max(height, Number(generation.sourceHeight ?? task?.sourceHeight ?? photo?.height ?? 0));
-  const coverageValue = generation.sourceCoverage ?? task?.sourceCoverage;
+  const width = Math.max(0, Number(generation.workWidth ?? crop.width ?? 0));
+  const height = Math.max(0, Number(generation.workHeight ?? crop.height ?? 0));
+  const sourceWidth = Math.max(width, Number(generation.sourceWidth || 0));
+  const sourceHeight = Math.max(height, Number(generation.sourceHeight || 0));
+  const coverageValue = generation.sourceCoverage;
   const reportedCoverage = coverageValue === undefined || coverageValue === null || coverageValue === '' ? Number.NaN : Number(coverageValue);
   const areaRatio = Number.isFinite(reportedCoverage) ? Math.max(0, Math.min(1, reportedCoverage)) : sourceWidth && sourceHeight ? Math.min(1, width * height / (sourceWidth * sourceHeight)) : undefined;
-  const fullFrameValue = generation.fullFrame ?? task?.fullFrame;
+  const fullFrameValue = generation.fullFrame;
   const fullFrame = typeof fullFrameValue === 'boolean' ? fullFrameValue : undefined;
-  const manualCropValue = generation.requiresManualCrop ?? task?.requiresManualCrop;
+  const manualCropValue = generation.requiresManualCrop;
   const requiresManualCrop = typeof manualCropValue === 'boolean' ? manualCropValue : undefined;
-  const exceedsValue = generation.exceedsWorkTileEdge ?? task?.exceedsWorkTileEdge;
+  const exceedsValue = generation.exceedsWorkTileEdge;
   const exceedsWorkTileEdge = typeof exceedsValue === 'boolean' ? exceedsValue : width && height ? width > 4000 || height > 4000 : undefined;
-  const detector = String(task?.detector || task?.detectionBackend || task?.backend || task?.engine || '');
+  const detector = String(task?.detector || '');
   const backend = detector === 'rtmdet-pairdetr-sam2' || /advanced|pairdetr|sam2/i.test(detector) ? '增强' : detector === 'rtmdet-ins-m' || /basic|ins-m/i.test(detector) ? '基础' : '未知';
-  const fallbackReason = String(task?.fallbackReason || task?.backendFallbackReason || task?.detectionFallbackReason || '');
+  const fallbackReason = String(generation.fallbackReason || '');
   const reason = String(generation.reason || task?.reason || '');
   return { width, height, sourceWidth, sourceHeight, areaRatio, entire: fullFrame === true, fullFrame, requiresManualCrop, over4000: exceedsWorkTileEdge === true, exceedsWorkTileEdge, backend, detector, fallbackReason, reason };
 };
@@ -213,17 +209,17 @@ export const returnModificationAssessment = (match: Json) => {
   const finiteMetric = (value: unknown) => value === undefined || value === null || value === '' || !Number.isFinite(Number(value)) ? undefined : Number(value);
   const changedFraction = finiteMetric(evidence.changedFraction);
   const meanAbsoluteDifference = finiteMetric(evidence.meanAbsoluteDifference);
-  const score = changedFraction ?? finiteMetric(match.modificationScore ?? match.changeScore ?? match.editScore);
-  const unchangedProbability = Number(match.unchangedProbability ?? match.sameImageProbability);
-  const explicitlyUnchanged = evidence.reallyModified === false || match.modified === false || match.isModified === false || match.unchanged === true;
+  const score = changedFraction;
+  const unchangedProbability = Number(match.unchangedProbability);
+  const explicitlyUnchanged = evidence.reallyModified === false;
   const evidenceWarning = evidence.exactSame === true || evidence.nearUnchanged === true || evidence.mistakenFullOriginal === true || evidence.abnormalDimensions === true;
   const suspicious = Boolean(warnings.length || explicitlyUnchanged || evidenceWarning || score !== undefined && score < .03 || Number.isFinite(unchangedProbability) && unchangedProbability >= .85);
-  const known = Boolean(Object.keys(evidence).length || warnings.length || explicitlyUnchanged || score !== undefined || Number.isFinite(unchangedProbability) || typeof match.modified === 'boolean' || typeof match.isModified === 'boolean');
+  const known = Boolean(Object.keys(evidence).length || warnings.length || score !== undefined || Number.isFinite(unchangedProbability));
   return { known, suspicious, label: !known ? '修改有效性待人工查看' : suspicious ? '返图疑似未修改 / 需人工核对' : '检测到有效修改', score, changedFraction, meanAbsoluteDifference, warnings, evidence };
 };
 
 export const returnMatchAssessment = (match: Json) => {
-  const scoreValue = match.score ?? match.matchScore;
+  const scoreValue = match.score;
   const numericScore = scoreValue === undefined || scoreValue === null || scoreValue === '' ? Number.NaN : Number(scoreValue);
   const score = Number.isFinite(numericScore) ? numericScore : undefined;
   const confidence = ['high', 'medium', 'low', 'unknown', 'review'].includes(String(match.matchConfidence)) ? String(match.matchConfidence) : '';
@@ -240,7 +236,7 @@ export const mergeAudit = (value: Json | undefined) => {
   const incomplete = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity) && !subject.assignment?.completed).length;
   const missing = subjects.filter((subject: Json) => Boolean(subject.assignment?.returnMissing)).length;
   const cropReview = workspace.photos.flatMap((photo: Json) => photo.tasks || []).filter((task: Json) => Boolean(task.needsReview || task.patchMissing)).length;
-  const pendingReview = Number(workspace.pendingReturnReviewCount ?? workspace.reviewCount ?? 0) || 0;
+  const pendingReview = Number(workspace.pendingReturnReviewCount || 0);
   if (unconfirmed) blockers.push({ code: 'unconfirmed-identity', label: '人物未标记', count: unconfirmed });
   if (cropReview) blockers.push({ code: 'crop-review', label: '工作图待复核', count: cropReview });
   if (incomplete) blockers.push({ code: 'incomplete-task', label: '任务未完成', count: incomplete });
@@ -281,8 +277,8 @@ export const workflowGroups = (workspace: Json, preferredIdentityOrder: string[]
 export const progressCandidates = (result: Json, sourcePaths: string[] = []) => {
   const normalizedSources = sourcePaths.map(value => value.replace(/\\/g, '/').toLocaleLowerCase());
   return (result.progressFolders || []).filter((folder: Json) => folder.mediaKind === 'image' && !folder.folderMissing && folder.nodeRole === 'progress' && folder.relationKind !== 'auxiliary' && !normalizedSources.some(source => {
-    const folderPath = String(folder.folderPath || '').replace(/\\/g, '/').toLocaleLowerCase();
-    return source === folderPath || source.startsWith(`${folderPath}/`);
+    const relativeDirectory = String(folder.contentRef?.relativeDirectory || '').replace(/\\/g, '/').toLocaleLowerCase();
+    return source === relativeDirectory || source.startsWith(`${relativeDirectory}/`);
   }));
 };
 
@@ -345,4 +341,4 @@ export const clampZoom = (value: number) => Math.max(1, Math.min(5, Number.isFin
 export const normalizeRotation = (value: number) => ((Math.round(value / 90) * 90) % 360 + 360) % 360;
 export const shouldBlink = (mode: CompareMode, active: boolean) => mode === 'blink' && active;
 
-export const returnReviewItems = (review: Json | undefined) => review?.items || review?.matches || review?.returns || [];
+export const returnReviewItems = (review: Json | undefined) => Array.isArray(review?.matches) ? review.matches : [];

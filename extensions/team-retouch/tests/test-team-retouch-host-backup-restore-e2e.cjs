@@ -73,8 +73,10 @@ const main = async () => {
   const liveDatabasePath = path.join(liveComponentRoot, 'storage.sqlite3'); const liveDb = ensureSchema(liveDatabasePath);
   liveDb.prepare('INSERT INTO team_retouch_photos(project_id,photo_id,base_version_id,display_name,relative_path,relative_path_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run('project-b', 'photo-b', 'version-b', 'B', '待处理/B/b.jpg', 'ready', 1, 1);
   liveDb.prepare('INSERT INTO team_project_revisions(project_id,revision) VALUES(?,?)').run('project-b', 3); liveDb.close();
-  fs.mkdirSync(path.join(liveComponentRoot, 'media', 'photo-b', 'version-b', 'analysis'), { recursive: true });
-  const targetB = path.join(liveComponentRoot, 'media', 'photo-b', 'version-b', 'analysis', 'mask.bin'); fs.writeFileSync(targetB, 'target-b-unchanged');
+  const projectAHash = crypto.createHash('sha256').update('project-a').digest('hex');
+  const projectBHash = crypto.createHash('sha256').update('project-b').digest('hex');
+  fs.mkdirSync(path.join(liveComponentRoot, 'projects', projectBHash, 'media', 'photo-b', 'version-b', 'analysis'), { recursive: true });
+  const targetB = path.join(liveComponentRoot, 'projects', projectBHash, 'media', 'photo-b', 'version-b', 'analysis', 'mask.bin'); fs.writeFileSync(targetB, 'target-b-unchanged');
   const privateA = path.join(sourceStage, 'a.bin'); const privateB = path.join(sourceStage, 'b.bin'); fs.writeFileSync(privateA, 'source-a'); fs.writeFileSync(privateB, 'source-b');
   const storeObject = filePath => {
     const hash = digest(filePath); const destination = path.join(target, STORE_DIRECTORY, 'objects', hash.slice(0, 2), hash.slice(2));
@@ -86,8 +88,8 @@ const main = async () => {
   const componentInputs = [
     ['team-retouch/storage.sqlite3', sourceDatabasePath],
     ...(fs.existsSync(`${sourceDatabasePath}-wal`) ? [['team-retouch/storage.sqlite3-wal', `${sourceDatabasePath}-wal`]] : []),
-    ['team-retouch/media/photo-a/version-a/analysis/mask.bin', privateA],
-    ['team-retouch/media/photo-b/version-b/analysis/mask.bin', privateB],
+    [`team-retouch/projects/${projectAHash}/media/photo-a/version-a/analysis/mask.bin`, privateA],
+    [`team-retouch/projects/${projectBHash}/media/photo-b/version-b/analysis/mask.bin`, privateB],
   ];
   assert(componentInputs.some(([entryPath]) => entryPath === 'team-retouch/storage.sqlite3-wal'), 'fixture keeps the committed project A row in a separate WAL object');
   const files = componentInputs.map(([entryPath, filePath]) => ({ scope: 'component-storage', path: entryPath, ...storeObject(filePath), projectIds: [] }));
@@ -96,7 +98,7 @@ const main = async () => {
     formatVersion: 1, id: snapshotId, complete: true, createdAt: Date.now(), appVersion: 'test',
     workspace: { id: 'source-workspace', root: sourceRoot, dataRoot: sourceDataRoot }, database,
     projects: [{ id: 'project-a', name: 'A', status: 'active', relativePath: '待处理/A' }], files,
-    componentBackups: [{ componentId: 'team-retouch', componentVersion: '1.0.0', sources: [{ scope: 'component-storage', path: 'team-retouch/storage.sqlite3', format: 'component-storage-v1' }] }],
+    componentBackups: [{ componentId: 'team-retouch', componentVersion: '2.0.0', sources: [{ scope: 'component-storage', path: 'team-retouch/storage.sqlite3', format: 'component-storage-v1' }] }],
   };
   const snapshotRoot = path.join(target, STORE_DIRECTORY, 'snapshots', snapshotId); fs.mkdirSync(snapshotRoot, { recursive: true });
   fs.writeFileSync(path.join(snapshotRoot, 'manifest.json'), JSON.stringify(manifest));
@@ -165,29 +167,33 @@ const main = async () => {
     assert.equal(JSON.stringify(restored).includes('dispositions'), false, 'full receipt dispositions are not copied into the task result');
     const successfulReceipt = applyReceipts.at(-1);
     const dispositionByKey = new Map(successfulReceipt.dispositions.map(item => [item.sourceKey, item]));
-    assert.equal(dispositionByKey.get('component-storage\0team-retouch/media/photo-a/version-a/analysis/mask.bin')?.disposition, 'applied', 'project A private file is applied');
-    assert.equal(dispositionByKey.get('component-storage\0team-retouch/media/photo-b/version-b/analysis/mask.bin')?.disposition, 'intentionally-skipped', 'project B private file is explicitly skipped');
-    assert.equal(dispositionByKey.get('component-storage\0team-retouch/media/photo-b/version-b/analysis/mask.bin')?.reason, 'other-project');
+    assert.equal(dispositionByKey.get(`component-storage\0team-retouch/projects/${projectAHash}/media/photo-a/version-a/analysis/mask.bin`)?.disposition, 'applied', 'project A private file is applied');
+    assert.equal(dispositionByKey.get(`component-storage\0team-retouch/projects/${projectBHash}/media/photo-b/version-b/analysis/mask.bin`)?.disposition, 'intentionally-skipped', 'project B private file is explicitly skipped');
+    assert.equal(dispositionByKey.get(`component-storage\0team-retouch/projects/${projectBHash}/media/photo-b/version-b/analysis/mask.bin`)?.reason, 'other-project');
     assert.equal(dispositionByKey.get('component-storage\0team-retouch/storage.sqlite3-wal')?.disposition, 'applied', 'the WAL sidecar has an explicit applied disposition');
     const restoredDb = new DatabaseSync(liveDatabasePath);
     assert.equal(restoredDb.prepare("SELECT name FROM team_person_identities WHERE project_id='project-a'").get().name, 'Person A');
     assert.equal(restoredDb.prepare("SELECT display_name FROM team_retouch_photos WHERE project_id='project-b'").get().display_name, 'B'); restoredDb.close();
-    assert.equal(fs.readFileSync(path.join(liveComponentRoot, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin'), 'utf8'), 'source-a');
+    assert.equal(fs.readFileSync(path.join(liveComponentRoot, 'projects', projectAHash, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin'), 'utf8'), 'source-a');
     assert.equal(fs.readFileSync(targetB, 'utf8'), 'target-b-unchanged');
     assert.equal(fs.readdirSync(path.join(target, STORE_DIRECTORY, 'temporary')).some(name => name.startsWith('component-restore-')), false, 'source/receipt stage is cleaned after finalize');
 
     const beforeFailure = fs.readFileSync(targetB);
-    fs.writeFileSync(path.join(liveComponentRoot, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin'), 'target-a-before-failed-restore');
-    const beforeFailedA = fs.readFileSync(path.join(liveComponentRoot, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin'));
+    fs.writeFileSync(path.join(liveComponentRoot, 'projects', projectAHash, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin'), 'target-a-before-failed-restore');
+    const beforeFailedA = fs.readFileSync(path.join(liveComponentRoot, 'projects', projectAHash, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin'));
     tamperReceipt = true; phases.length = 0;
     await assert.rejects(withTimeout(service.restoreProject(workspace, snapshotId, 'project-a')), /回执|哈希/);
     assert(phases.includes('apply') && phases.includes('rollback'), 'invalid real service receipt drives Host rollback phase');
-    assert.deepEqual(fs.readFileSync(path.join(liveComponentRoot, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin')), beforeFailedA, 'Host rollback restores project A bytes changed by the rejected apply');
+    assert.deepEqual(fs.readFileSync(path.join(liveComponentRoot, 'projects', projectAHash, 'media', 'photo-a', 'version-a', 'analysis', 'mask.bin')), beforeFailedA, 'Host rollback restores project A bytes changed by the rejected apply');
     assert.deepEqual(fs.readFileSync(targetB), beforeFailure, 'real service failure restores unrelated component bytes');
     assert.equal(fs.readdirSync(path.join(target, STORE_DIRECTORY, 'temporary')).some(name => name.startsWith('component-restore-')), false, 'source/receipt stage is cleaned after rollback');
   } finally {
     sourceDb.close(); await manager.destroy().catch(() => undefined); await supervisor.stopAll('test-complete').catch(() => undefined);
-    await backgroundTasks.destroy?.(); fs.rmSync(sandbox, { recursive: true, force: true });
+    await backgroundTasks.destroy?.();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try { fs.rmSync(sandbox, { recursive: true, force: true }); break; }
+      catch (error) { if (attempt === 19) { if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error; break; } await new Promise(resolve => setTimeout(resolve, 25)); }
+    }
   }
   console.log('BackupService -> ComponentServiceManager -> Team Retouch file-protocol E2E passed');
 };

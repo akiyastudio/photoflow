@@ -4,10 +4,8 @@ const path = require('node:path');
 const SERVICE_FILES = Object.freeze([
   'service.cjs',
   'workflow-generation.cjs',
-  'workflow-artifact.cjs',
   'workflow-manifest.cjs',
-  'compatibility/project-folder-policy.cjs',
-  'compatibility/storage-restore.cjs',
+  'backup-restore.cjs',
 ]);
 
 const copyServiceRuntime = (sourceRoot, packageRoot) => {

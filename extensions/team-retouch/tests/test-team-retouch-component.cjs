@@ -10,7 +10,9 @@ const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-compon
 const advancedPackageScript = fs.readFileSync(path.join(root, 'scripts', 'build-advanced-package.cjs'), 'utf8');
 const icon = fs.readFileSync(path.join(root, 'renderer', 'team-retouch.svg'), 'utf8');
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-assert.deepEqual(manifest.componentHost.adoptionGrants, ['component.storage.previous.v1', 'project.output.existing.v1']);
+assert.equal(manifest.apiVersion, 1);
+assert.equal(manifest.componentHost.contractVersion, 2);
+assert.equal(Object.hasOwn(manifest.componentHost, 'adoptionGrants'), false);
 assert(manifest.componentHost.service.capabilities.every(capability => /^[a-z][a-z0-9.-]*$/.test(capability) && !/\.v\d+$/.test(capability)));
 assert(manifest.componentHost.service.rpcMethods.every(method => method.startsWith('team.') && /\.v\d+$/.test(method)));
 const allowed = [...(sdk.match(/const allowedMethods = new Set\(\[([\s\S]*?)\]\);/)?.[1] || '').matchAll(/'(team\.[^']+\.v\d+)'/g)].map(match => match[1]);
@@ -24,7 +26,7 @@ assert(packageScript.includes("require.resolve('vite/package.json'") && packageS
 assert(packageScript.includes("require('./package-layout.cjs')") && packageScript.includes('copyServiceRuntime(root,packageRoot)'), 'production packaging must stage the complete isolated service runtime');
 assert(packageScript.includes("process.argv.indexOf('--output-dir')") && advancedPackageScript.includes("process.argv.indexOf('--output-dir')"), 'standard and advanced packages must honor an explicit output directory');
 for (const action of Object.values(manifest.componentHost.service.lifecycleActions)) assert.equal(action.sha256, sha256(path.join(root, action.entry)));
-for (const entry of ['renderer/index.html','renderer/settings.html','renderer/team-retouch.svg','service.cjs','workflow-generation.cjs','workflow-artifact.cjs','workflow-manifest.cjs','package.json','package-lock.json']) assert(fs.existsSync(path.join(root, entry)), `missing plugin-owned file: ${entry}`);
+for (const entry of ['renderer/index.html','renderer/settings.html','renderer/team-retouch.svg','service.cjs','workflow-generation.cjs','workflow-manifest.cjs','backup-restore.cjs','package.json','package-lock.json']) assert(fs.existsSync(path.join(root, entry)), `missing plugin-owned file: ${entry}`);
 assert(icon.includes('fill="#eff6ff"') && icon.includes('stroke="#1c60e6"') && icon.includes('M18 21a8 8 0 0 0-16 0'), 'team-retouch brand icon must use the video-transcription light background while retaining the blue UsersRound mark');
 assert(!icon.includes('linearGradient') && !icon.includes('#6558e8') && !icon.includes('#a45de5'), 'team-retouch brand icon must not regress to the purple filled redesign');
 console.log('Team-retouch independent component boundary tests passed');

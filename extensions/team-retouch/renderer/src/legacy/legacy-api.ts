@@ -17,7 +17,7 @@ const mediaRef = (kind: MediaKind, photoId = '', baseVersionId = '', taskId = ''
   ['photoflow-ref', kind, photoId, baseVersionId, taskId, reviewSessionId, returnId, personIndex].map((part, index) => index < 2 ? part : encodeURIComponent(part)).join(':');
 export const parseLegacyMediaRef = (value = ''): LegacyMediaReference | undefined => {
   const parts = String(value).split(':');
-  if (![7, 8].includes(parts.length) || parts[0] !== 'photoflow-ref') return undefined;
+  if (parts.length !== 8 || parts[0] !== 'photoflow-ref') return undefined;
   const kind = parts[1] as MediaKind;
   if (!['original', 'working', 'returned', 'review-return'].includes(kind)) return undefined;
   let photoId: string; let baseVersionId: string; let taskId: string; let reviewSessionId: string; let returnId: string; let personIndex: string;
@@ -51,7 +51,7 @@ export const hydrateLegacyWorkspace = (workspace: Json) => {
   });
   const assignments = (workspace.assignments || []).map((assignment: Json) => {
     const photo = photos.find((item: Json) => String(item.photoId) === String(assignment.photoId) && String(item.baseVersionId) === String(assignment.baseVersionId));
-    const task = photo?.tasks?.find((item: Json) => (item.members?.length ? item.members : [{ personIndex: item.personIndex }]).some((member: Json) => Number(member.personIndex) === Number(assignment.personIndex)));
+    const task = photo?.tasks?.find((item: Json) => item.members.some((member: Json) => Number(member.personIndex) === Number(assignment.personIndex)));
     return { ...assignment, ...(assignment.completed && assignment.completionKind === 'returned' && task ? { editedPatchPath: mediaRef('returned', String(assignment.photoId), String(assignment.baseVersionId), String(task.id), '', '', String(assignment.personIndex)) } : {}) };
   });
   return { ...workspace, photos, assignments };
@@ -64,7 +64,6 @@ const hydrateReviewResult = (result: Json) => {
   });
   return { ...result, matches };
 };
-const payload = (args: any[]) => { for (let index = args.length - 1; index >= 0; index -= 1) { const value = args[index]; if (value && typeof value === 'object' && !Array.isArray(value)) return value; } return {}; };
 const revisionCoordinator = createTeamRevisionCoordinator();
 const ok = <T extends Json = Json>(method: string, value?: Json) => revisionCoordinator.run<T>(method, value, request => rpc<T>(method, request));
 export const teamProjectRpc = <T extends Json = Json>(method: string, value?: Json) => ok<T>(method, value);
@@ -97,12 +96,8 @@ const authorizeMedia = async (ref: LegacyMediaReference, variant: 'preview' | 'o
   return result;
 };
 export const componentStatusFromAdvancedPreflight = (state: Json) => {
-  const advancedAvailable = state.advancedAvailable !== undefined
-    ? state.advancedAvailable === true
-    : state.available !== undefined ? state.available === true : state.installed === true;
-  const advancedState = ['ready', 'not-installed', 'repair-needed', 'unavailable'].includes(String(state.state || ''))
-    ? state.state
-    : advancedAvailable ? 'ready' : state.installed === true ? 'repair-needed' : state.installed === false ? 'not-installed' : undefined;
+  const advancedAvailable = state.advancedAvailable === true;
+  const advancedState = ['ready', 'not-installed', 'repair-needed', 'unavailable'].includes(String(state.state || '')) ? state.state : 'unavailable';
   return {
     id: 'team-retouch', installed: true, runtimeAvailable: true, identityAvailable: true,
     advancedAvailable, advancedState,
@@ -120,38 +115,35 @@ export const legacyApi = {
     mediaAuthorizationGeneration += 1; expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next; revisionCoordinator.setScope(next);
   },
   getMediaAuthorizationScope: () => mediaAuthorizationScope,
-  getTeamPatches: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') }), String(args[4] || '')),
+  getTeamPatches: async (request: { relativePath: string; baseVersionId: string }) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: request.relativePath }), request.baseVersionId),
   getTeamProjectWorkspace: async () => hydrateLegacyWorkspace(await ok('team.project.get.v1')),
-  calibrateTeamProjectWorkspace: (maxItems = 24) => ok('team.project.calibrate-step.v1', { maxItems }),
-  detectTeamPatchPeople: async (...args: any[]) => hydrateLegacyBundle(await durable('team.patch.detect.v1', payload(args))),
-  detectTeamPatchBatch: (...args: any[]) => durable('team.patch.detect-batch.v1', payload(args)),
-  updateTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await durable('team.patch.update.v1', payload(args))),
-  deleteTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.delete.v1', payload(args))),
-  removeProjectTeamPhoto: (...args: any[]) => ok('team.project.remove-photo.v1', payload(args)),
-  excludeTeamPerson: async (...args: any[]) => hydrateLegacyWorkspace(await durable('team.person.exclude.v1', payload(args))),
-  saveTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.save.v1', payload(args))),
-  assignTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.assign.v1', payload(args))),
-  confirmTeamIdentityGroup: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.confirm-group.v1', payload(args))),
-  deleteTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.delete.v1', payload(args))),
+  detectTeamPatchPeople: async (request: Json) => hydrateLegacyBundle(await durable('team.patch.detect.v1', request)),
+  detectTeamPatchBatch: (request: Json) => durable('team.patch.detect-batch.v1', request),
+  updateTeamPatch: async (request: Json) => hydrateLegacyBundle(await durable('team.patch.update.v1', request)),
+  deleteTeamPatch: async (request: Json) => hydrateLegacyBundle(await ok('team.patch.delete.v1', request)),
+  removeProjectTeamPhoto: (request: Json) => ok('team.project.remove-photo.v1', request),
+  excludeTeamPerson: async (request: Json) => hydrateLegacyWorkspace(await durable('team.person.exclude.v1', request)),
+  saveTeamIdentity: async (request: Json) => hydrateLegacyWorkspace(await ok('team.identity.save.v1', request)),
+  assignTeamIdentity: async (request: Json) => hydrateLegacyWorkspace(await ok('team.identity.assign.v1', request)),
+  confirmTeamIdentityGroup: async (request: Json) => hydrateLegacyWorkspace(await ok('team.identity.confirm-group.v1', request)),
+  deleteTeamIdentity: async (request: Json) => hydrateLegacyWorkspace(await ok('team.identity.delete.v1', request)),
   suggestTeamIdentities: async () => hydrateLegacyWorkspace(await durable('team.identity.suggest.v1', {})),
   getTeamIdentitySimilarities: () => ok('team.identity.similarities.v1'),
-  completeTeamIdentity: (...args: any[]) => ok('team.identity.complete.v1', payload(args)),
-  uploadTeamPatch: (...args: any[]) => ok('team.patch.upload.v1', payload(args)),
-  removeTeamPatchUpload: (...args: any[]) => ok('team.patch.remove-upload.v1', payload(args)),
-  mergeTeamPatches: (...args: any[]) => durable('team.patch.merge.v1', payload(args)),
-  saveTeamWorkflowSettings: (...args: any[]) => ok('team.workflow.settings.save.v1', payload(args)),
+  completeTeamIdentity: (request: Json) => ok('team.identity.complete.v1', request),
+  uploadTeamPatch: (request: Json) => ok('team.patch.upload.v1', request),
+  removeTeamPatchUpload: (request: Json) => ok('team.patch.remove-upload.v1', request),
+  mergeTeamPatches: (request: Json) => durable('team.patch.merge.v1', request),
+  saveTeamWorkflowSettings: (request: Json) => ok('team.workflow.settings.save.v1', request),
   getTeamWorkflowGenerationStatus: () => ok('team.workflow.status.v1'),
-  generateTeamWorkflow: (...args: any[]) => durable('team.workflow.generate.v1', payload(args)),
-  cancelTeamWorkflowGeneration: (operationId: string) => ok('team.operation.cancel.v1', { operationId }),
-  exportTeamIdentityTasks: (...args: any[]) => ok('team.workflow.open-export.v1', payload(args)),
-  openTeamPatchFolder: async () => ({ success: true }),
+  generateTeamWorkflow: (request: Json) => durable('team.workflow.generate.v1', request),
+  cancelTeamWorkflowGeneration: (request: { operationId: string }) => ok('team.operation.cancel.v1', request),
+  exportTeamIdentityTasks: (request: Json) => ok('team.workflow.open-export.v1', request),
   selectTeamPatchReturns: () => ok('team.patch.select-returns.v1'),
-  returnTeamWorkflowBatch: async (...args: any[]) => hydrateReviewResult(await durable('team.workflow.return-batch.v1', payload(args))),
+  returnTeamWorkflowBatch: async (request: Json) => hydrateReviewResult(await durable('team.workflow.return-batch.v1', request)),
   getTeamWorkflowReturnReview: async () => { const result = await ok('team.workflow.return-review.get.v1'); return { ...result, review: result.review ? hydrateReviewResult(result.review) : result.review }; },
-  discardTeamWorkflowReturnReview: (...args: any[]) => ok('team.workflow.return-review.discard.v1', { reviewSessionId: String(args[2] || '') }),
-  ignoreTeamWorkflowReturnReview: (...args: any[]) => ok('team.workflow.return-review.ignore.v1', { reviewSessionId: String(args[2] || ''), returnId: String(args[3] || '') }),
-  confirmTeamWorkflowReturn: (...args: any[]) => {
-    const request = payload(args);
+  discardTeamWorkflowReturnReview: (request: { reviewSessionId: string }) => ok('team.workflow.return-review.discard.v1', request),
+  ignoreTeamWorkflowReturnReview: (request: { reviewSessionId: string; returnId: string }) => ok('team.workflow.return-review.ignore.v1', request),
+  confirmTeamWorkflowReturn: (request: Json) => {
     const scope = revisionCoordinator.getScope();
     return retryOnceAfterRevisionConflict(
       () => ok('team.workflow.return-confirm.v1', request),
@@ -161,17 +153,16 @@ export const legacyApi = {
       },
     );
   },
-  drainTeamWorkflowReconciles: (maxItems = 20, taskIds: string[] = []) => ok('team.workflow.reconcile-drain.v1', { maxItems, ...(taskIds.length ? { taskIds } : {}) }),
+  drainTeamWorkflowReconciles: ({ maxItems = 20, taskIds = [] }: { maxItems?: number; taskIds?: string[] } = {}) => ok('team.workflow.reconcile-drain.v1', { maxItems, ...(taskIds.length ? { taskIds } : {}) }),
   getProgressFolders: () => readProgressCached(),
-  registerProgressWithGraph: async (...args: any[]) => {
-    const result = await ok('team.progress.create.v1', payload(args));
+  registerProgressWithGraph: async (request: Json) => {
+    const result = await ok('team.progress.create.v1', request);
     progressQuery = undefined;
     return result;
   },
-  openTeamPatch: async (reference: string) => { const ref = parseLegacyMediaRef(reference); return ref?.kind === 'working' ? ok('team.patch.open.v1', ref) : { success: false, error: '工作图引用已失效' }; },
-  getMediaThumbnail: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '预览引用尚未建立' }; try { const result = await authorizeMedia(ref, 'preview', Number(args[4]) || 0); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', previewUrl: result.url, previewUrls: { small: result.url, medium: result.url, large: result.url } }; } catch { return missingMediaResult('thumbnail'); } },
-  getMediaOriginal: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '原图引用尚未建立' }; try { const result = await authorizeMedia(ref, 'original', 100); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', mediaUrl: result.url, orientation: { matrix: [1, 0, 0, 1] } }; } catch { return missingMediaResult('original'); } },
-  onThumbnailStateChanged: (_callback: (value: any) => void) => () => undefined,
+  openTeamPatch: async ({ reference }: { reference: string }) => { const ref = parseLegacyMediaRef(reference); return ref?.kind === 'working' ? ok('team.patch.open.v1', ref) : { success: false, error: '工作图引用已失效' }; },
+  getMediaThumbnail: async ({ reference, priority = 0 }: { reference: string; priority?: number }): Promise<Json> => { const ref = parseLegacyMediaRef(reference) || parseLegacyMediaRef(mediaAliases.get(reference) || ''); if (!ref) return { success: false, state: 'MISSING', error: '预览引用尚未建立' }; try { const result = await authorizeMedia(ref, 'preview', priority); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', previewUrl: result.url, previewUrls: { small: result.url, medium: result.url, large: result.url } }; } catch { return missingMediaResult('thumbnail'); } },
+  getMediaOriginal: async ({ reference }: { reference: string }): Promise<Json> => { const ref = parseLegacyMediaRef(reference) || parseLegacyMediaRef(mediaAliases.get(reference) || ''); if (!ref) return { success: false, state: 'MISSING', error: '原图引用尚未建立' }; try { const result = await authorizeMedia(ref, 'original', 100); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', mediaUrl: result.url, orientation: { matrix: [1, 0, 0, 1] } }; } catch { return missingMediaResult('original'); } },
   onTeamPatchDetectionProgress: (callback: (value: any) => void) => event('team.patch.detect.progress.v1', callback),
   onTeamPatchBatchProgress: (callback: (value: any) => void) => event('team.patch.detect-batch.progress.v1', callback),
   onTeamPatchReturnBatchProgress: (callback: (value: any) => void) => event('team.return.progress.v1', callback),

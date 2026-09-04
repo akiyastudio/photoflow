@@ -33,6 +33,8 @@ const { ensureSchema, withRestoreLease, withRestorePhase } = require('../service
   const storage = { databasePath, dataPath: path.dirname(databasePath), controlPath: path.join(phaseRoot, 'control') };
   fs.mkdirSync(storage.controlPath, { recursive: true });
   ensureSchema(databasePath).close();
+  const snapshotPath = path.join(phaseRoot, 'current-snapshot.sqlite3');
+  fs.copyFileSync(databasePath, snapshotPath);
   const base = { operationId: 'phase-operation', targetWorkspace: { root: 'workspace-a' } };
   const prepared = await withRestorePhase(context, { ...base, phase: 'prepare' }, 'project', async () => undefined);
   assert.equal(prepared.status, 'prepared'); assert.ok(prepared.quiesceToken);
@@ -40,10 +42,10 @@ const { ensureSchema, withRestoreLease, withRestorePhase } = require('../service
   assert.equal(await withRestorePhase(context, { ...base, phase: 'apply', quiesceToken: prepared.quiesceToken, targetStorage: storage }, 'project', async () => 'applied'), 'applied');
   await assert.rejects(withRestorePhase(context, { ...base, phase: 'apply', quiesceToken: prepared.quiesceToken, targetStorage: { ...storage, databasePath: path.join(phaseRoot, 'other.sqlite3') } }, 'project', async () => undefined), error => error?.code === 'COMPONENT_RESTORE_HOLD_INVALID');
   fs.rmSync(databasePath, { force: true }); fs.rmSync(`${databasePath}-wal`, { force: true }); fs.rmSync(`${databasePath}-shm`, { force: true });
-  const rolledBackLegacy = new DatabaseSync(databasePath); rolledBackLegacy.exec("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','1')"); rolledBackLegacy.close();
-  assert.equal((await withRestorePhase(context, { ...base, phase: 'rollback', quiesceToken: prepared.quiesceToken }, 'project', async () => undefined)).status, 'rolled-back');
+  ensureSchema(databasePath).close();
+  assert.equal((await withRestorePhase(context, { ...base, phase: 'rollback', quiesceToken: prepared.quiesceToken }, 'project', async () => { fs.rmSync(databasePath, { force: true }); fs.copyFileSync(snapshotPath, databasePath); })).status, 'rolled-back');
   const reopened = ensureSchema(databasePath);
-  assert.equal(reopened.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '10', 'rollback invalidates the schema cache so restored old storage migrates on reopen'); reopened.close();
+  assert.equal(reopened.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '10', 'rollback invalidates the schema cache and revalidates restored current storage'); reopened.close();
   assert.equal((await withRestorePhase(context, { ...base, phase: 'rollback', quiesceToken: prepared.quiesceToken }, 'project', async () => undefined)).idempotent, true);
   fs.rmSync(phaseRoot, { recursive: true, force: true });
   console.log('Team-retouch component-owned restore quiesce tests passed');

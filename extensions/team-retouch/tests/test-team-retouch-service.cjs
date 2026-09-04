@@ -12,13 +12,13 @@ const simulator = createHostSimulator({
   service: path.join(__dirname, '..', 'service.cjs'),
   context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'project-1', projectName: 'Project', projectStatus: 'active' },
   capabilities: {
-    'component.storage': ok({ apiVersion: 7, dataPath, databasePath: path.join(dataPath, 'storage.sqlite3'), projectId: 'project-1', ownership: 'component-private' }),
-    'component.settings': payload => payload.action === 'get' ? { apiVersion: 7, revision: 0, settings: {} } : { apiVersion: 7, revision: 1, settings: payload.settings || {} },
-    'project.media.page': ok({ apiVersion: 7, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }),
-    'project.progress': ok({ apiVersion: 7, progress: [], edges: [] }),
-    'tasks': ok({ apiVersion: 7, task: null, cancelled: false }),
-    'component.events': ok({ apiVersion: 7, emitted: true }),
-    'notifications': ok({ apiVersion: 7, accepted: true })
+    'component.storage': ok({ dataPath, databasePath: path.join(dataPath, 'storage.sqlite3'), projectId: 'project-1', ownership: 'component-private' }),
+    'component.settings': payload => payload.action === 'get' ? { revision: 0, settings: {} } : { revision: 1, settings: payload.settings || {} },
+    'project.media.page': ok({ items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }),
+    'project.progress': ok({ progress: [], edges: [] }),
+    'tasks': ok({ task: null, cancelled: false }),
+    'component.events': ok({ emitted: true }),
+    'notifications': ok({ accepted: true })
   }
 });
 (async () => {

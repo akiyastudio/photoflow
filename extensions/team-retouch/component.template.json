@@ -11,8 +11,7 @@
     "win32-x64": "team-retouch.exe"
   },
   "advancedRuntime": {
-    "apiVersion": 1,
-    "compatibleLegacyComponentVersions": ["26.7.30.1"]
+    "apiVersion": 1
   },
   "requiredFiles": [
     "ui/index.html",
@@ -20,10 +19,8 @@
     "ui/team-retouch.svg",
     "service.cjs",
     "workflow-generation.cjs",
-    "workflow-artifact.cjs",
     "workflow-manifest.cjs",
-    "compatibility/project-folder-policy.cjs",
-    "compatibility/storage-restore.cjs",
+    "backup-restore.cjs",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
@@ -31,9 +28,6 @@
   ],
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
-    "legacySettingsAdoptions": [{ "topLevelKey": "personDetection" }],
-    "adoptionGrants": ["component.storage.previous.v1", "project.output.existing.v1"],
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" },
@@ -50,13 +44,12 @@
         "workspace": { "method": "team.backup-restore.workspace.v1" },
         "project": { "method": "team.backup-restore.project.v1" },
         "sources": [
-          { "scope": "component-storage", "path": "team-retouch/storage.sqlite3", "format": "component-storage-v1" },
-          { "scope": "domain-database", "path": "team-retouch.sqlite3", "format": "legacy-domain-v1" }
+          { "scope": "component-storage", "path": "team-retouch/storage.sqlite3", "format": "component-storage-v1" }
         ]
       },
       "rpcMethods": [
         "team.backup-restore.workspace.v1", "team.backup-restore.project.v1",
-        "team.project.get.v1", "team.project.migrate-step.v1", "team.project.calibrate-step.v1", "team.project.register.v1", "team.project.remove-photo.v1",
+        "team.project.get.v1", "team.project.register.v1", "team.project.remove-photo.v1",
         "team.identity.save.v1", "team.identity.assign.v1",
         "team.identity.confirm-group.v1", "team.identity.delete.v1",
         "team.person.exclude.v1", "team.patch.get.v1",
@@ -70,7 +63,7 @@
         "team.workflow.return-review.get.v1", "team.workflow.return-review.discard.v1", "team.workflow.return-review.ignore.v1",
         "team.workflow.return-batch.v1", "team.workflow.return-confirm.v1", "team.workflow.reconcile-drain.v1",
         "team.patch.select-returns.v1", "team.patch.return-batch.v1",
-        "team.workflow.artifact.migrate.v1", "team.operation.run.v1", "team.operation.get.v1", "team.operation.cancel.v1",
+        "team.operation.run.v1", "team.operation.get.v1", "team.operation.cancel.v1",
         "team.progress.list.v1", "team.progress.create.v1",
         "team.settings.get.v1", "team.settings.update.v1",
         "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
@@ -95,15 +88,14 @@
         {
           "name": "团片协作",
           "protectFromGenericRename": true,
-          "reserveProgressRelocationName": true,
-          "legacyAdoptionGrant": "project.output.existing.v1"
+          "reserveProgressRelocationName": true
         }
       ],
       "lifecycleActions": {
-        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
-        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
-        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
-        "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "91e59ae1c2689350c1c24003731a41ce5d9208dadf2a19110e488d7d78a89395" }
+        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "aabfbe687faef010ca4bcb667b236935de60b3f5a6a45de486dd512ed1d5327e" },
+        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "aabfbe687faef010ca4bcb667b236935de60b3f5a6a45de486dd512ed1d5327e" },
+        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "aabfbe687faef010ca4bcb667b236935de60b3f5a6a45de486dd512ed1d5327e" },
+        "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "571244742a03999526d0220d48cdffe55d624c228e81bd09fed1d7b57a42cdbf" }
       }
     }
   }

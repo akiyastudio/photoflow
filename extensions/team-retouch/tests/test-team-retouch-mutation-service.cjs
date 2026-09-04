@@ -41,7 +41,7 @@ if (args[0] === 'detect-batch') {
   const results = manifest.items.map((item, index) => {
     const target = path.join(item.deliveryDir, item.deliveryPrefix + '_人物01.png');
     fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, 'patch');
-    return { success: true, key: item.key, detector: 'fake-batch', personCount: 1, tasks: [{ id: 'batch-task-' + index, personIndex: 1, bbox: { x: 1, y: 1, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 }, patchPath: target }] };
+    return { success: true, key: item.key, detector: 'fake-batch', personCount: 1, tasks: [{ id: 'batch-task-' + index, personIndex: 1, members: [{ personIndex: 1, bbox: { x: 1, y: 1, width: 10, height: 10 } }], bbox: { x: 1, y: 1, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 }, patchPath: target, generation: { version: 2, sourceWidth: 20, sourceHeight: 20, workWidth: 20, workHeight: 20 } }] };
   });
   console.log(JSON.stringify({ success: true, results, persistentBackend: true, requestedMode: 'auto' })); process.exit(0);
 }
@@ -50,7 +50,7 @@ console.log(JSON.stringify({ type: 'progress', progress: 25, message: 'detect-pr
 const target = path.join(value('--delivery-dir'), value('--delivery-prefix') + '_人物01.png');
 fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, 'patch');
 if (value('--input').includes('fail')) process.exit(9);
-console.log(JSON.stringify({ detector: 'fake-child', personCount: 1, tasks: [{ id: 'task-1', personIndex: 1, bbox: { x: 1, y: 1, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 }, patchPath: target }] }));
+console.log(JSON.stringify({ detector: 'fake-child', personCount: 1, tasks: [{ id: 'task-1', personIndex: 1, members: [{ personIndex: 1, bbox: { x: 1, y: 1, width: 10, height: 10 } }], bbox: { x: 1, y: 1, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 }, patchPath: target, generation: { version: 2, sourceWidth: 20, sourceHeight: 20, workWidth: 20, workHeight: 20 } }] }));
 `);
 
 let currentBasePath = basePath;
@@ -81,30 +81,29 @@ const ready = new Promise((resolve, reject) => {
       let result;
       let error;
       try {
-        if (frame.method === 'component.storage') result = { apiVersion: 7, dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
-        else if (frame.method === 'component.settings') result = { apiVersion: 7, revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
-        else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { apiVersion: 7, emitted: true }; }
-        else if (frame.method === 'tasks') result = { apiVersion: 7, task: null, cancelled: false };
-        else if (frame.method === 'dialogs') result = { apiVersion: 7, cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
-        else if (frame.method === 'project.input.tokens') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 7, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        if (frame.method === 'component.storage') result = { dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
+        else if (frame.method === 'component.settings') result = { revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
+        else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { emitted: true }; }
+        else if (frame.method === 'tasks') result = { task: null, cancelled: false };
+        else if (frame.method === 'dialogs') result = { cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
+        else if (frame.method === 'project.input.tokens') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
         else if (frame.method === 'project.media.variants') {
           const requested = frame.payload.relativePath;
           let photoId = frame.payload.photoId || (requested === 'two.jpg' ? 'photo-2' : 'photo-1');
           if (!['photo-1', 'photo-2'].includes(photoId)) throw new Error('outside the bound project');
           const versionId = frame.payload.versionId || (photoId === 'photo-2' ? 'version-2' : 'version-1');
           const filePath = requested ? (requested === 'two.jpg' ? secondBasePath : basePath) : currentBasePath;
-          result = { apiVersion: 7, mediaRef: { photoId, versionId, relativePath: requested || 'one.jpg' }, metadata: { photoId, versionId, currentVersionId: versionId, displayName: photoId === 'photo-2' ? 'Second' : 'Base', originalName: path.basename(filePath), relativePath: requested || 'one.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token: `test-input:${filePath}`, expiresAt: Date.now() + 1000 } };
+          result = { mediaRef: { photoId, versionId, relativePath: requested || 'one.jpg' }, metadata: { photoId, versionId, currentVersionId: versionId, displayName: photoId === 'photo-2' ? 'Second' : 'Base', originalName: path.basename(filePath), relativePath: requested || 'one.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token: `test-input:${filePath}`, expiresAt: Date.now() + 1000 } };
         } else if (frame.method === 'project.output') {
-          if (frame.payload.action === 'stage') { const stageId = crypto.randomUUID(); const privatePath = path.join(dataRoot, 'stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 7, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
-          else if (frame.payload.action === 'adopt') throw new Error('legacy output missing');
-          else if (frame.payload.action === 'write') { if (frame.payload.replace) controlledReplacementWrites += 1; const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 7, stageId: frame.payload.stageId, artifactId: crypto.randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
-          else if (frame.payload.action === 'validate') result = { apiVersion: 7, stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
-          else if (frame.payload.action === 'commit') { const replay = outputByIdempotencyKey.get(frame.payload.idempotencyKey); if (replay) result = replay; else { const stage = outputStages.get(frame.payload.stageId); const commitId = crypto.randomUUID(); const outputs = stage.files.map(file => { const filePath = path.join(projectOutputRoot, file.outputRelativePath); fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.copyFileSync(path.join(stage.privatePath, file.sourceName), filePath); return { artifactId: crypto.randomUUID(), relativePath: file.outputRelativePath, filePath, sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex') }; }); result = { apiVersion: 7, commitId, idempotencyKey: frame.payload.idempotencyKey, outputs }; outputReceipts.set(commitId, result); outputByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
-          else if (frame.payload.action === 'materializeOwned') { const output = outputReceipts.get(frame.payload.commitId).outputs.find(item => item.artifactId === frame.payload.artifactId); const importId = crypto.randomUUID(); const directory = path.join(dataRoot, 'imported-outputs', importId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(output.filePath)); fs.copyFileSync(output.filePath, privatePath); result = { apiVersion: 7, importId, privatePath, byteLength: fs.statSync(privatePath).size, sha256: output.sha256, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
-          else if (frame.payload.action === 'rollback') { const stage = outputStages.get(frame.payload.stageId); if (stage) fs.rmSync(stage.privatePath, { recursive: true, force: true }); outputStages.delete(frame.payload.stageId); result = { apiVersion: 7, stageId: frame.payload.stageId, rolledBack: true }; }
+          if (frame.payload.action === 'stage') { const stageId = crypto.randomUUID(); const privatePath = path.join(dataRoot, 'stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { stageId, privatePath, expiresAt: Date.now() + 60000 }; }
+          else if (frame.payload.action === 'write') { if (frame.payload.replace) controlledReplacementWrites += 1; const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { stageId: frame.payload.stageId, artifactId: crypto.randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
+          else if (frame.payload.action === 'validate') result = { stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
+          else if (frame.payload.action === 'commit') { const replay = outputByIdempotencyKey.get(frame.payload.idempotencyKey); if (replay) result = replay; else { const stage = outputStages.get(frame.payload.stageId); const commitId = crypto.randomUUID(); const outputs = stage.files.map(file => { const filePath = path.join(projectOutputRoot, file.outputRelativePath); fs.mkdirSync(path.dirname(filePath), { recursive: true }); fs.copyFileSync(path.join(stage.privatePath, file.sourceName), filePath); return { artifactId: crypto.randomUUID(), relativePath: file.outputRelativePath, filePath, sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex') }; }); result = { commitId, idempotencyKey: frame.payload.idempotencyKey, outputs }; outputReceipts.set(commitId, result); outputByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
+          else if (frame.payload.action === 'materializeOwned') { const output = outputReceipts.get(frame.payload.commitId).outputs.find(item => item.artifactId === frame.payload.artifactId); const importId = crypto.randomUUID(); const directory = path.join(dataRoot, 'imported-outputs', importId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(output.filePath)); fs.copyFileSync(output.filePath, privatePath); result = { importId, privatePath, byteLength: fs.statSync(privatePath).size, sha256: output.sha256, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
+          else if (frame.payload.action === 'rollback') { const stage = outputStages.get(frame.payload.stageId); if (stage) fs.rmSync(stage.privatePath, { recursive: true, force: true }); outputStages.delete(frame.payload.stageId); result = { stageId: frame.payload.stageId, rolledBack: true }; }
           else throw new Error(`unexpected output action ${frame.payload.action}`);
-        } else if (frame.method === 'project.progress') result = { apiVersion: 7, progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
-        else if (frame.method === 'version.create') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { apiVersion: 7, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
+        } else if (frame.method === 'project.progress') result = { progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
+        else if (frame.method === 'version.create') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
         else throw new Error(`unexpected capability ${frame.method}`);
       } catch (value) { error = value; }
       child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: !error, result, error: error?.message })}\n`);
@@ -162,9 +161,18 @@ const ready = new Promise((resolve, reject) => {
     noRetouchDb.function('team_request_id', () => '');
     const sourceTask = noRetouchDb.prepare(`SELECT patch_path FROM team_patch_tasks WHERE project_id='project-1' AND photo_id='photo-1' AND base_version_id='version-1' AND is_deleted=0 LIMIT 1`).get();
     const now = Date.now();
-    noRetouchDb.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-1', 'task-no-retouch', 'photo-1', 'version-1', 2, 'Skipped person', '{}', '{}', sourceTask.patch_path, JSON.stringify([{ personIndex: 2 }]), 'exported', now, now);
+    noRetouchDb.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,generation_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-1', 'task-no-retouch', 'photo-1', 'version-1', 2, 'Skipped person', '{}', '{}', sourceTask.patch_path, JSON.stringify([{ personIndex: 2 }]), JSON.stringify({ version: 2 }), 'exported', now, now);
     noRetouchDb.prepare(`INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,completion_kind,return_missing,completed_at,updated_at,task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-1', 'photo-1', 'version-1', 2, null, 1, 'manual', 1, 'no-retouch', 0, now, now, 'task-no-retouch');
+    const pureTasks = noRetouchDb.prepare("SELECT id,members_json FROM team_patch_tasks WHERE project_id='project-1' AND photo_id='photo-2' AND base_version_id='version-2' AND is_deleted=0").all();
+    for (const task of pureTasks) for (const member of JSON.parse(task.members_json)) noRetouchDb.prepare(`INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,completion_kind,return_missing,completed_at,updated_at,task_id) VALUES(?,?,?,?,NULL,1,'manual',1,'no-retouch',0,?,?,?) ON CONFLICT(project_id,photo_id,base_version_id,person_index) DO UPDATE SET completed=1,completion_kind='no-retouch',edited_patch_path=NULL,task_id=excluded.task_id`).run('project-1', 'photo-2', 'version-2', Number(member.personIndex), now, now, task.id);
     noRetouchDb.close();
+    currentBasePath = secondBasePath;
+    const pureNoRetouch = await invoke('team.patch.merge.v1', { photoId: 'photo-2', baseVersionId: 'version-2', outputProgressId: 'progress-2' });
+    assert.equal(pureNoRetouch.merge.noRetouch, true, 'pure no-retouch publishes the original baseline as a zero-modification version');
+    const mergeOutputsBeforeMixed = [...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length;
+    const mergeVersionsBeforeMixed = [...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length;
+    const mergeFilesBeforeMixed = fs.readdirSync(path.join(projectOutputRoot, 'merged')).length;
+    currentBasePath = basePath;
     const faultDb = new DatabaseSync(databasePath); faultDb.exec(`CREATE TRIGGER fail_merge_db_update BEFORE UPDATE OF status ON team_patch_tasks WHEN NEW.status='merged' BEGIN SELECT RAISE(ABORT,'injected merge DB failure'); END;`); faultDb.close();
     await assert.rejects(invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' }), /injected merge DB failure/);
     const repairDb = new DatabaseSync(databasePath); repairDb.exec('DROP TRIGGER fail_merge_db_update'); repairDb.close();
@@ -176,14 +184,14 @@ const ready = new Promise((resolve, reject) => {
     mergedStatusDb.close();
     const replayed = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' });
     assert.equal(replayed.merge.versionId, merged.merge.versionId, 'identical merge input reuses the stable version id after crash recovery');
-    assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, 1, 'merge crash retry creates one committed output receipt');
-    assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, 1, 'merge crash retry creates one version');
-    assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, 1, 'stable merge output name prevents duplicate project files');
+    assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, mergeOutputsBeforeMixed + 1, 'merge crash retry creates one committed output receipt');
+    assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, mergeVersionsBeforeMixed + 1, 'merge crash retry creates one version');
+    assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, mergeFilesBeforeMixed + 1, 'stable merge output name prevents duplicate project files');
     const rebuilt = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2', rebuildToken: 'explicit-rebuild-1' });
     assert.notEqual(rebuilt.merge.versionId, merged.merge.versionId, 'an explicit rebuild creates a fresh output version instead of replaying the deleted output receipt');
-    assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, 2, 'an explicit rebuild publishes one new output receipt');
-    assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, 2, 'an explicit rebuild creates one new version');
-    assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, 2, 'an explicit rebuild uses a new stable output name');
+    assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, mergeOutputsBeforeMixed + 2, 'an explicit rebuild publishes one new output receipt');
+    assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, mergeVersionsBeforeMixed + 2, 'an explicit rebuild creates one new version');
+    assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, mergeFilesBeforeMixed + 2, 'an explicit rebuild uses a new stable output name');
     assert.equal(outputStages.size, 0, 'commit replay and success both clean their redundant output stages');
     assert(emittedTopics.has('team.patch.detect.progress.v1') && emittedTopics.has('team.patch.detect-batch.progress.v1'), 'single and batch detection events retain distinct declared V2 topics');
     console.log('Team-retouch mutation subprocess, privilege, and rollback tests passed');

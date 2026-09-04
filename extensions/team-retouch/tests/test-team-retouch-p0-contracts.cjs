@@ -27,12 +27,14 @@ const { createHostSimulator } = require('./host-simulator.cjs');
   const dataPath = path.join(sandbox, 'storage'); fs.mkdirSync(dataPath, { recursive: true });
   const databasePath = path.join(dataPath, 'storage.sqlite3');
   let taskCapabilityCalls = 0;
+  let lifecycleCalls = 0;
   const simulator = createHostSimulator({
     service: path.join(__dirname, '..', 'service.cjs'),
     context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'durable-project', projectName: 'Durable', projectStatus: 'active' },
     capabilities: {
-      'component.storage': () => ({ apiVersion: 7, dataPath, databasePath, projectId: 'durable-project', ownership: 'component-private' }),
-      'tasks': () => { taskCapabilityCalls += 1; return { apiVersion: 7, task: null, cancelled: false }; },
+      'component.storage': () => ({ dataPath, databasePath, projectId: 'durable-project', ownership: 'component-private' }),
+      'tasks': () => { taskCapabilityCalls += 1; return { task: null, cancelled: false }; },
+      'component.lifecycle': () => { lifecycleCalls += 1; return { success: true, state: 'ready' }; },
     },
   });
   try {
@@ -42,13 +44,25 @@ const { createHostSimulator } = require('./host-simulator.cjs');
     assert.deepEqual({ accepted: accepted.accepted, state: accepted.state, operationId: accepted.operationId }, { accepted: true, state: 'accepted', operationId: 'durable-1' });
     assert(ackMs < 1000, `durable acceptance exceeded 1s: ${ackMs.toFixed(1)}ms`);
     assert.equal(taskCapabilityCalls, 0, 'no Host capability remains running after the acceptance response');
+    assert.equal(accepted.revision, '0', 'durable acceptance does not mutate the domain revision');
     const status = await simulator.request('team.operation.get.v1', { operationId: 'durable-1' });
     assert.equal(status.operation.state, 'accepted');
+    await assert.rejects(simulator.request('team.identity.assign.v1', { photoId: 'missing', baseVersionId: 'missing', personIndex: 1, expectedRevision: '0' }), /Undeclared simulator capability/);
+    const runnable = await simulator.request('team.advanced.preflight.v1', { acceptOnly: true, operationId: 'accept-run-success', expectedRevision: '0' });
+    assert.equal(runnable.revision, undefined); assert.equal(runnable.scope, 'application.settings');
+    const ran = await simulator.request('team.operation.run.v1', { operationId: 'accept-run-success', expectedRevision: '0' });
+    assert.equal(ran.success, true, 'an accepted durable operation runs against its unchanged baseline');
+    assert.equal(lifecycleCalls, 1);
+    const staleAccepted = await simulator.request('team.advanced.preflight.v1', { acceptOnly: true, operationId: 'accept-run-stale', expectedRevision: '0' });
+    assert.equal(staleAccepted.revision, undefined); assert.equal(staleAccepted.scope, 'application.settings');
     const identityMutationStartedAt = performance.now();
     const identityMutation = await simulator.request('team.identity.save.v1', { name: 'Revision Contract', assignments: [] });
     const identityMutationMs = performance.now() - identityMutationStartedAt;
     assert(identityMutationMs < 1000, `lightweight revision-checked mutation exceeded 1s: ${identityMutationMs.toFixed(1)}ms`);
     assert.match(identityMutation.revision, /^\d+$/, 'mutations return the authoritative monotonic workspace revision');
+    const globalRun = await simulator.request('team.operation.run.v1', { operationId: 'accept-run-stale', expectedRevision: identityMutation.revision });
+    assert.equal(globalRun.success, true, 'application.settings lifecycle is independent of project revision');
+    assert.equal(lifecycleCalls, 2);
     await assert.rejects(simulator.request('team.identity.save.v1', { name: 'Stale Mutation', assignments: [], expectedRevision: '0' }), /已被其他操作更新/, 'stale mutations fail inside the public write transaction');
     const durableKinds = [
       ['team.patch.detect.v1', 'detect', { photoId: 'photo', baseVersionId: 'version' }],
@@ -80,5 +94,5 @@ const { createHostSimulator } = require('./host-simulator.cjs');
     assert(!fs.readFileSync(databasePath).includes(Buffer.from(secretToken)), 'durable SQLite payload never contains one-time return tokens');
     await simulator.request('team.operation.cancel.v1', { operationId: 'secret-return' });
     console.log(`Team-retouch P0 contracts passed: maximum durable ack ${maximumDurableAckMs.toFixed(1)}ms, lightweight mutation ${identityMutationMs.toFixed(1)}ms, media concurrency ${maximum}`);
-  } finally { simulator.close(); fs.rmSync(sandbox, { recursive: true, force: true }); }
+  } finally { await simulator.close(); fs.rmSync(sandbox, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

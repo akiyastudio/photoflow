@@ -5,6 +5,7 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 const files = ['renderer/src/**/*.{ts,tsx}'];
+const cjsServiceFiles = ['service.cjs', 'workflow-*.cjs', 'backup-restore.cjs'];
 export default [
   { ignores: ['dist/**', '.venv/**', 'node_modules/**'] },
   { ...js.configs.recommended, files },
@@ -21,5 +22,10 @@ export default [
       'react-hooks/exhaustive-deps': 'off',
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }]
     }
-  }
+  },
+  {
+    files: cjsServiceFiles,
+    languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs', globals: globals.node },
+    rules: { 'no-undef': 'error' },
+  },
 ];

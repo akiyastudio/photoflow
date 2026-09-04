@@ -55,7 +55,6 @@ const assignmentKey = (photoId: string, baseVersionId: string, personIndex: numb
 const isGeneratedIdentity = (identity: TeamIdentity) => /^\u5f85\u786e\u8ba4\u4eba\u7269\s+\d+$/.test(identity.name);
 const similarityPairKey = (left: string, right: string) => left < right ? `${left}|${right}` : `${right}|${left}`;
 
-const IDENTITY_THUMBNAIL_SIZE = 384;
 
 const subjectsFromWorkspace = (workspace: TeamIdentityWorkspace): Subject[] => {
   const assignments = new Map(workspace.assignments.map(item => [assignmentKey(item.photoId, item.baseVersionId, item.personIndex), item]));
@@ -63,7 +62,7 @@ const subjectsFromWorkspace = (workspace: TeamIdentityWorkspace): Subject[] => {
   const subjects = new Map<string, Subject>();
   for (const photo of workspace.photos) {
     for (const task of photo.tasks) {
-      const members = task.members?.length ? task.members : [{ personIndex: task.personIndex, bbox: task.bbox }];
+      const members = task.members;
       for (const member of members) {
         const key = assignmentKey(photo.photoId, photo.baseVersionId, member.personIndex);
         const assignment = assignments.get(key);
@@ -79,7 +78,7 @@ const SubjectFullscreenViewer = ({ url, filePath, cacheConfig, title, onClose }:
   useEffect(() => {
     let active = true;
     setDisplayUrl(url);
-    void legacyApi.getMediaOriginal(filePath, 'image', cacheConfig).then(result => { if (active && result.mediaUrl) setDisplayUrl(result.mediaUrl); }).catch(() => undefined);
+    void legacyApi.getMediaOriginal({ reference: filePath }).then(result => { if (active && result.mediaUrl) setDisplayUrl(result.mediaUrl); }).catch(() => undefined);
     return () => { active = false; };
   }, [url, filePath, cacheConfig.directory, cacheConfig.maxSizeGB]);
   useEscapeLayer(true, onClose);
@@ -102,7 +101,7 @@ const SubjectThumb = memo(({ subject, cacheConfig, active: componentActive = tru
     const observer = node ? new IntersectionObserver(([entry]) => {
       if (!entry.isIntersecting) return;
       observer?.disconnect();
-      const request = legacyApi.getMediaThumbnail(imagePath, 'image', cacheConfig, IDENTITY_THUMBNAIL_SIZE, 1, 0);
+      const request = legacyApi.getMediaThumbnail({ reference: imagePath, priority: 1 });
       void request.then(result => {
         if (!active) return;
         if (result.previewUrl) setUrl(result.previewUrl);
@@ -201,10 +200,10 @@ const ReturnImage = ({ filePath, cacheConfig, active: componentActive = true, ea
     const loadImage = async () => {
       let nextUrl = '';
       if (eager) {
-        const original = await legacyApi.getMediaOriginal(filePath, 'image', cacheConfig);
+        const original = await legacyApi.getMediaOriginal({ reference: filePath });
         if (original.success && original.mediaUrl) nextUrl = original.mediaUrl;
       } else {
-        const thumbnail = await legacyApi.getMediaThumbnail(filePath, 'image', cacheConfig, 480, 1, 0);
+        const thumbnail = await legacyApi.getMediaThumbnail({ reference: filePath, priority: 1 });
         nextUrl = thumbnail.previewUrl || '';
       }
       if (!active || !nextUrl) return;
@@ -470,7 +469,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (workflowReturnResult.reviewSessionId) {
       setBusy('workflow-review-discard');
       try {
-        const result = await legacyApi.discardTeamWorkflowReturnReview(workspacePath, project.name, workflowReturnResult.reviewSessionId);
+        const result = await legacyApi.discardTeamWorkflowReturnReview({ reviewSessionId: workflowReturnResult.reviewSessionId });
         if (!result.success) {
           onNotice(`放弃返图审核批次失败：${result.error || '未知错误'}`, 'error');
           return;
@@ -502,7 +501,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (showLoading) setLoading(true);
     setWorkspaceLoadError('');
     try {
-      const result = await legacyApi.getTeamProjectWorkspace(workspacePath, project.name, project.status);
+      const result = await legacyApi.getTeamProjectWorkspace();
       if (!result.success) throw new Error(result.error || '未知错误');
       if (sequence !== workspaceLoadSequenceRef.current) return;
       setWorkspace(result);
@@ -523,11 +522,11 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     let active = true;
     setWorkflowReturnResult(null);
     setWorkflowReturnReviewOpen(false);
-    void legacyApi.drainTeamWorkflowReconciles(20).then(result => {
+    void legacyApi.drainTeamWorkflowReconciles({ maxItems: 20 }).then(result => {
       if (!active) return;
       if (result.state === 'failed') onNotice(`返图已确认，但接力更新失败：${result.error || '请稍后重试'}`, 'error');
     }).catch(error => { if (active) onNotice(`返图接力恢复失败：${error instanceof Error ? error.message : String(error)}`, 'error'); });
-    void legacyApi.getTeamWorkflowReturnReview(workspacePath, project.name, project.status).then(result => {
+    void legacyApi.getTeamWorkflowReturnReview().then(result => {
       if (!active) return;
       if (!result.success) {
         onNotice(`恢复未确认返图失败：${result.error || '未知错误'}`, 'error');
@@ -554,7 +553,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         setWorkflowGeneration(value);
       }
     });
-    void legacyApi.getTeamWorkflowGenerationStatus(workspacePath, project.status, project.name).then(result => {
+    void legacyApi.getTeamWorkflowGenerationStatus().then(result => {
       if (active && result.success && result.job) setWorkflowGeneration(result.job);
     });
     return () => { active = false; unsubscribe(); };
@@ -573,7 +572,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         }
         setAssigningSubject(subject);
         if (!similarities.length) {
-          const result = await legacyApi.getTeamIdentitySimilarities(workspacePath, project.name);
+          const result = await legacyApi.getTeamIdentitySimilarities();
           if (result.success) setSimilarities(result.similarities);
         }
       }
@@ -698,7 +697,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!await ensureFaceRecognitionConsent(appDialog)) return;
     setBusy('suggest');
     try {
-      const result = await legacyApi.suggestTeamIdentities(workspacePath, project.name);
+      const result = await legacyApi.suggestTeamIdentities();
       if (!result.success) { onNotice(`自动人物分组失败：${result.error || '未知错误'}`, 'error'); return; }
       setSimilarities([]);
       setWorkspace({ ...result, similarities: undefined, workflowSettings: workspace.workflowSettings });
@@ -710,13 +709,13 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const createIdentity = async () => {
     const answer = await appDialog.prompt({ title: '新建人物身份', message: '填写姓名或便于团队识别的称呼。', defaultValue: `人物 ${workspace.identities.length + 1}`, confirmLabel: '新建' });
     if (!answer?.trim()) return;
-    const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, name: answer.trim() });
+    const result = await legacyApi.saveTeamIdentity({ name: answer.trim() });
     if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error');
     else setWorkspace(current => ({ ...current, identities: [...current.identities, { id: result.identityId, name: answer.trim(), color: '#2563eb', createdAt: Date.now(), updatedAt: Date.now() }] }));
   };
   const renameIdentity = async (identity: TeamIdentity, name: string) => {
     if (!name.trim() || name.trim() === identity.name) return;
-    const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id, name: name.trim() });
+    const result = await legacyApi.saveTeamIdentity({ identityId: identity.id, name: name.trim() });
     if (!result.success) onNotice(`保存姓名失败：${result.error || '未知错误'}`, 'error'); else { setWorkspace(current => ({ ...current, identities: current.identities.map(item => item.id === identity.id ? { ...item, name: name.trim(), updatedAt: Date.now() } : item) })); onNotice('人物姓名已更新', 'success'); }
   };
   const assign = async (subject: Subject, identityId: string) => {
@@ -744,7 +743,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setWorkspace(current => replaceAssignment(current, optimisticAssignment));
     setResourcePending(subject.key, true);
     try {
-      const result = await legacyApi.assignTeamIdentity(workspacePath, { projectName: project.name, photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, identityId: nextIdentityId, source: 'manual', confidence: 1, completed });
+      const result = await legacyApi.assignTeamIdentity({ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, identityId: nextIdentityId, source: 'manual', confidence: 1, completed });
       if (!result.success) throw new Error(result.error || '未知错误');
       setAssigningSubject(null);
       if (previousAssignment?.identityId && previousAssignment.identityId !== nextIdentityId) {
@@ -774,7 +773,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!answer?.trim()) return;
     setResourcePending(subject.key, true);
     try {
-      const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] });
+      const result = await legacyApi.saveTeamIdentity({ name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] });
       if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error'); else {
         setAssigningSubject(null);
         void load(false);
@@ -786,7 +785,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const removeIdentity = async (identity: TeamIdentity) => {
     const answer = await appDialog.confirm({ title: `删除人物“${identity.name}”？`, message: '只删除身份与归属标记，不会删除照片或团片协作工作图。', confirmLabel: '删除', tone: 'danger' });
     if (!answer) return;
-    const result = await legacyApi.deleteTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id });
+    const result = await legacyApi.deleteTeamIdentity({ identityId: identity.id });
     if (!result.success) onNotice(`删除人物失败：${result.error || '未知错误'}`, 'error');
     else setWorkspace(current => ({ ...current, identities: current.identities.filter(item => item.id !== identity.id), assignments: current.assignments.map(item => item.identityId === identity.id ? { ...item, identityId: undefined, completed: false, updatedAt: Date.now() } : item) }));
   };
@@ -799,7 +798,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const nextSameWeekIdentityIds = [...new Set(requestedSameWeekIdentityIds)].filter(identityId => nextOrder.slice(1).includes(identityId));
     setBusy('workflow-settings');
     try {
-      const result = await legacyApi.saveTeamWorkflowSettings(workspacePath, { projectName: project.name, preferredIdentityOrder: nextOrder, sameWeekIdentityIds: nextSameWeekIdentityIds });
+      const result = await legacyApi.saveTeamWorkflowSettings({ preferredIdentityOrder: nextOrder, sameWeekIdentityIds: nextSameWeekIdentityIds });
       if (!result.success) { onNotice(`保存开工顺序失败：${result.error || '未知错误'}`, 'error'); return; }
       setWorkspace(current => ({ ...current, workflowNeedsRegeneration: Boolean(current.workflowGenerated), workflowSettings: result.workflowSettings || { ...current.workflowSettings, preferredIdentityOrder: nextOrder, preferredIdentityId: nextOrder[0], sameWeekIdentityIds: nextSameWeekIdentityIds } }));
       onNotice(successMessage, 'success');
@@ -873,7 +872,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     for (let index = 0; index < uniqueTaskIds.length; index += 50) {
       const chunk = uniqueTaskIds.slice(index, index + 50);
       try {
-        const result = await legacyApi.drainTeamWorkflowReconciles(chunk.length, chunk);
+        const result = await legacyApi.drainTeamWorkflowReconciles({ maxItems: chunk.length, taskIds: chunk });
         recoveredCount += Number(result.recoveredCount) || 0;
         if (result.state !== 'ready') return { ...result, recoveredCount };
       } catch (error) {
@@ -888,7 +887,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (pendingResources.has(item.key)) return;
     setResourcePending(item.key, true);
     try {
-      const result = await legacyApi.completeTeamIdentity(workspacePath, { photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed, completionKind: completed ? 'no-retouch' : '', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex), projectName: project.name, status: project.status });
+      const result = await legacyApi.completeTeamIdentity({ photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed, completionKind: completed ? 'no-retouch' : '', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex) });
       if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`, 'error');
       else {
         const reconciliation = await drainTaskChains([item.task.id]);
@@ -918,7 +917,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const worker = async () => {
         while (!errorMessage && cursor < pending.length) {
           const item = pending[cursor++];
-          const result = await legacyApi.completeTeamIdentity(workspacePath, { photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed: true, completionKind: 'no-retouch', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex), projectName: project.name, status: project.status });
+          const result = await legacyApi.completeTeamIdentity({ photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed: true, completionKind: 'no-retouch', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex) });
           if (!result.success) { errorMessage = result.error || '未知错误'; return; }
           completedTaskIds.push(item.task.id);
           completedCount += 1;
@@ -940,7 +939,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (pendingResources.has(item.key)) return;
     setResourcePending(item.key, true);
     try {
-      const result = await legacyApi.uploadTeamPatch(workspacePath, { photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex, projectName: project.name, status: project.status });
+      const result = await legacyApi.uploadTeamPatch({ photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex });
       if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`, 'error');
       else if (!result.cancelled) {
         const reconciliation = await drainTaskChains([item.task.id]);
@@ -956,7 +955,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (pendingResources.has(item.key)) return;
     setResourcePending(item.key, true);
     try {
-      const result = await legacyApi.removeTeamPatchUpload(workspacePath, { photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex, projectName: project.name, status: project.status });
+      const result = await legacyApi.removeTeamPatchUpload({ photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex });
       if (!result.success) onNotice(`删除返图失败：${result.error || '未知错误'}`, 'error');
       else {
         const reconciliation = await drainTaskChains([item.task.id]);
@@ -970,17 +969,16 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const openTaskFolder = async (identity: TeamIdentity, week: number) => {
     setBusy(`open:${week}:${identity.id}`);
     try {
-      const open = () => legacyApi.exportTeamIdentityTasks(workspacePath, project.status, project.name, { week, identityId: identity.id });
+      const open = () => legacyApi.exportTeamIdentityTasks({ week, identityId: identity.id });
       const outcome = await prepareAndOpenWorkflowTaskFolder({
         open,
-        drain: maxItems => legacyApi.drainTeamWorkflowReconciles(maxItems),
+        drain: maxItems => legacyApi.drainTeamWorkflowReconciles({ maxItems }),
         onPreparing: () => onNotice('任务文件夹正在重建，请稍候…', 'info'),
       });
       const { result, reconciliation } = outcome;
       if (!result.success) onNotice(`打开任务文件夹失败：${result.error || '未知错误'}`, 'error');
       else if (result.state === 'preparing') onNotice(reconciliation?.error ? `任务文件夹暂未准备完成：${reconciliation.error}` : '任务文件夹仍在准备，请稍后重试', 'warning');
       else if (outcome.preparationAttempted) { onNotice('任务文件夹已准备并打开', 'success'); void load(false); }
-      else if (result.path) void legacyApi.openTeamPatchFolder(result.path);
     } catch (error) { onNotice(`打开任务文件夹失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setBusy(''); }
   };
@@ -991,13 +989,12 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setWorkflowReturnReviewOpen(false);
     setWorkflowReturnProgress(beginWorkflowReturnProgress(operationId));
     try {
-      const selected = await legacyApi.selectTeamPatchReturns(project.name);
+      const selected = await legacyApi.selectTeamPatchReturns();
       if (!selected.success) throw new Error(selected.error || '无法选择返图');
       if (selected.cancelled || !selected.files?.length) { if (selected.cancelled) onNotice('已取消选择返图', 'info'); return; }
       setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, { operationId, phase: 'reading', progress: 4, message: `已选择 ${selected.files.length} 张返图，正在读取内容` }) : current);
-      const result = await legacyApi.returnTeamWorkflowBatch(workspacePath, project.name, {
+      const result = await legacyApi.returnTeamWorkflowBatch({
         operationId,
-        status: project.status,
         returnedFiles: selected.files,
         items: items.map(item => ({
           photoId: item.photo.photoId,
@@ -1040,8 +1037,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       .map(item => item.personIndex);
     setBusy(`workflow-confirm:${match.returnId}`);
     try {
-      const result = await legacyApi.confirmTeamWorkflowReturn(workspacePath, project.name, {
-        status: project.status,
+      const result = await legacyApi.confirmTeamWorkflowReturn({
         reviewSessionId: workflowReturnResult?.reviewSessionId,
         returnId: match.returnId,
         photoId: candidate.photoId,
@@ -1069,7 +1065,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       });
       onProjectChanged();
       onNotice(`返图已确认：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}；接力准备中`, 'success');
-      void legacyApi.drainTeamWorkflowReconciles(1, [candidate.taskId]).then(drain => {
+      void legacyApi.drainTeamWorkflowReconciles({ maxItems: 1, taskIds: [candidate.taskId] }).then(drain => {
         const relayState = drain.state === 'ready' ? 'ready' : drain.state === 'failed' ? 'failed' : 'preparing';
         setWorkflowReturnResult(current => current ? { ...current, matches: current.matches.map(item => item.returnId === match.returnId ? { ...item, relayState, relayError: drain.error || '' } : item) } : current);
         if (relayState === 'ready') { onNotice('返图接力已就绪', 'success'); void load(false); }
@@ -1101,7 +1097,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!confirmed) return false;
     setBusy(`workflow-ignore:${match.returnId}`);
     let result;
-    try { result = await legacyApi.ignoreTeamWorkflowReturnReview(workspacePath, project.name, reviewSessionId, match.returnId); }
+    try { result = await legacyApi.ignoreTeamWorkflowReturnReview({ reviewSessionId, returnId: match.returnId }); }
     catch (error) { onNotice(`移除非任务返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); return false; }
     finally { setBusy(''); }
     if (!result.success) {
@@ -1166,7 +1162,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const operationId = crypto.randomUUID();
       requestedOperationId = operationId;
       setWorkflowGeneration({ operationId, projectName: project.name, state: 'running', phase: 'preparing', progress: 0, completedFiles: 0, totalFiles: 0, copiedBytes: 0, totalBytes: 0, currentName: '', message: '正在准备协作流程…' });
-      return legacyApi.generateTeamWorkflow(workspacePath, project.status, project.name, { operationId, preferredIdentityOrder, sameWeekIdentityIds, groups, replace });
+      return legacyApi.generateTeamWorkflow({ operationId, preferredIdentityOrder, sameWeekIdentityIds, groups, replace });
     };
     let result = await run();
     if (result.requiresConfirmation) {
@@ -1194,7 +1190,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const cancelWorkflowGeneration = async () => {
     if (!workflowGeneration?.operationId || !workflowGenerating) return;
     setWorkflowGeneration(current => current ? { ...current, phase: 'cancelling', message: '正在安全停止…' } : current);
-    const result = await legacyApi.cancelTeamWorkflowGeneration(workflowGeneration.operationId);
+    const result = await legacyApi.cancelTeamWorkflowGeneration({ operationId: workflowGeneration.operationId });
     if (!result.success) onNotice(`停止生成失败：${result.error || '未知错误'}`, 'error');
   };
 
@@ -1225,7 +1221,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
           const photo = mergeablePhotos[cursor++];
           let succeeded = false;
           try {
-            const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+            const result = await legacyApi.mergeTeamPatches({
               photoId: photo.photoId,
               baseVersionId: photo.baseVersionId,
             outputProgressId: target.id,
@@ -1261,7 +1257,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       setMergeProgress(current => ({ ...current, phase: 'merging' }));
       let succeeded = false;
       try {
-        const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+        const result = await legacyApi.mergeTeamPatches({
           photoId: photo.photoId,
           baseVersionId: photo.baseVersionId,
           outputProgressId: target.id,
@@ -1298,7 +1294,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
           const photo = mergedPhotos[cursor++];
           let succeeded = false;
           try {
-            const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+            const result = await legacyApi.mergeTeamPatches({
               photoId: photo.photoId,
               baseVersionId: photo.baseVersionId,
               outputProgressId: target.id,

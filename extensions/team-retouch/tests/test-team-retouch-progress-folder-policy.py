@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import re
 import tempfile
 from pathlib import Path
 
@@ -20,12 +19,9 @@ def declared_project_folder_policy():
     declarations = manifest["componentHost"]["service"]["projectFolders"]
     assert len(declarations) == 1
     declaration = declarations[0]
-    compatibility_source = (EXTENSION_ROOT / "compatibility" / "project-folder-policy.cjs").read_text(encoding="utf-8")
-    assert re.search(rf"folderName:\s*['\"]{re.escape(declaration['name'])}['\"]", compatibility_source)
-    assert re.search(rf"adoptionGrant:\s*['\"]{re.escape(declaration['legacyAdoptionGrant'])}['\"]", compatibility_source)
     assert declaration["protectFromGenericRename"] is True
     assert declaration["reserveProgressRelocationName"] is True
-    assert declaration["legacyAdoptionGrant"] in manifest["componentHost"]["adoptionGrants"]
+    assert "adoptionGrants" not in manifest["componentHost"]
     return declaration["name"]
 
 

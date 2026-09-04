@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
+const service = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8');
+assert(manifest.componentHost.service.rpcMethods.includes('team.workflow.generate.v1'));
+assert.equal(service.includes('createTeamWorkflowArtifactService'), false);
+assert.equal(fs.existsSync(path.join(root, 'workflow-manifest.cjs')), true);
+console.log('Team-retouch current workflow artifact contract passed');

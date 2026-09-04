@@ -1,0 +1,10 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
+const service = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8');
+assert.deepEqual(manifest.componentHost.service.backupRestore.sources, [{ scope: 'component-storage', path: 'team-retouch/storage.sqlite3', format: 'component-storage-v1' }]);
+assert(service.includes("require('./backup-restore.cjs')"));
+assert.equal(service.includes('legacy-domain'), false);
+console.log('Team-retouch current backup RPC declaration passed');

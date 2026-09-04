@@ -4,7 +4,7 @@ type Json = Record<string, any>;
 // renderer can issue requests from both the shell and the workflow dialogs, so
 // they must share one revision queue instead of racing through separate callers.
 export const TEAM_REVISION_MUTATIONS = new Set([
-  'team.project.migrate-step.v1', 'team.project.calibrate-step.v1', 'team.workflow.reconcile-drain.v1',
+  'team.workflow.reconcile-drain.v1',
   'team.project.register.v1', 'team.project.remove-photo.v1', 'team.identity.save.v1', 'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.delete.v1', 'team.identity.suggest.v1',
   'team.person.exclude.v1', 'team.patch.detect.v1', 'team.patch.detect-batch.v1', 'team.patch.update.v1', 'team.patch.delete.v1', 'team.patch.cleanup.v1', 'team.patch.upload.v1', 'team.patch.remove-upload.v1', 'team.patch.merge.v1',
   'team.identity.complete.v1', 'team.workflow.settings.save.v1', 'team.workflow.generate.v1', 'team.workflow.open-export.v1', 'team.workflow.return-batch.v1', 'team.workflow.return-confirm.v1', 'team.patch.return-batch.v1', 'team.operation.run.v1',

@@ -336,10 +336,15 @@ def task_mask_weights(task, image_width, image_height, crop):
     """
     mask_path = task.get("maskPath")
     if not mask_path or not os.path.isfile(mask_path):
-        return None, None
-    with Image.open(mask_path) as source:
-        source.load()
-        full_proxy = np.asarray(source.convert("L"))
+        raise ValueError(f"Patch {task.get('id')} 缺少可信人物遮罩，已拒绝合并")
+    try:
+        with Image.open(mask_path) as source:
+            source.load()
+            full_proxy = np.asarray(source.convert("L"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Patch {task.get('id')} 的人物遮罩损坏，已拒绝合并") from error
+    if full_proxy.ndim != 2 or not full_proxy.size or not np.any(full_proxy > 0):
+        raise ValueError(f"Patch {task.get('id')} 的人物遮罩为空，已拒绝合并")
     x, y, crop_width, crop_height = crop
     proxy_height, proxy_width = full_proxy.shape[:2]
     scale_x = proxy_width / image_width
@@ -349,6 +354,8 @@ def task_mask_weights(task, image_width, image_height, crop):
     right = max(left + 1, min(proxy_width, int(np.ceil((x + crop_width) * scale_x))))
     bottom = max(top + 1, min(proxy_height, int(np.ceil((y + crop_height) * scale_y))))
     proxy_crop = full_proxy[top:bottom, left:right]
+    if not proxy_crop.size or not np.any(proxy_crop > 0):
+        raise ValueError(f"Patch {task.get('id')} 的人物遮罩与工作图不相交，已拒绝合并")
     target = cv2.resize(proxy_crop, (crop_width, crop_height), interpolation=cv2.INTER_LINEAR) / 255.0
     core = cv2.GaussianBlur(np.clip(target.astype(np.float32), 0.0, 1.0), (0, 0), 1.0)
     kernel_size = max(7, int(min(crop_height, crop_width) * 0.006))

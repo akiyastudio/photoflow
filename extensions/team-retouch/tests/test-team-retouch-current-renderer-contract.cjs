@@ -1,0 +1,14 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const api = fs.readFileSync(path.join(root, 'renderer/src/legacy/legacy-api.ts'), 'utf8');
+const sdk = fs.readFileSync(path.join(root, 'renderer/src/sdk.ts'), 'utf8');
+assert.equal(api.includes('payload(args)'), false);
+assert.equal(api.includes('onThumbnailStateChanged'), false);
+assert.equal(api.includes('openTeamPatchFolder'), false);
+assert.equal(api.includes('state.available'), false);
+assert.equal(api.includes('state.installed'), false);
+assert(sdk.includes('contractVersion: 1'));
+assert(sdk.includes('themeContractVersion: 1'));
+console.log('Team-retouch current renderer adapter contract passed');

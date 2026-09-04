@@ -79,7 +79,7 @@ await assert.rejects(
 );
 assert.equal(refreshes, 1);
 
-for (const method of ['team.project.migrate-step.v1', 'team.project.calibrate-step.v1', 'team.workflow.reconcile-drain.v1', 'team.workflow.return-confirm.v1', 'team.operation.run.v1']) {
+for (const method of ['team.workflow.reconcile-drain.v1', 'team.workflow.return-confirm.v1', 'team.operation.run.v1']) {
   assert.equal(TEAM_REVISION_MUTATIONS.has(method), true, `${method} must participate in the shared mutation queue`);
 }
 

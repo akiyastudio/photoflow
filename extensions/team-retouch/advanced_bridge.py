@@ -7,14 +7,22 @@ import json
 import os
 import shlex
 import subprocess
+import re
+import queue
+import threading
+import time
+from collections import deque
 from pathlib import Path
 
 
-# Both names have been used by released and development setup flows. Try both
-# automatically; PHOTOFLOW_WSL_DISTRO remains authoritative when explicitly set.
-DEFAULT_DISTROS = ("PhotoFlowNative", "PhotoflowLab")
+DISTRO_NAME = "PhotoFlowNative"
 PAIR_PYTHON = "$HOME/miniforge3/envs/pairdetr/bin/python"
 SAM2_PYTHON = "$HOME/miniforge3/envs/sam2/bin/python"
+
+
+def _mask_sort_key(path):
+    match = re.search(r"(\d+)(?=\.[^.]+$)", Path(path).name)
+    return (int(match.group(1)) if match else 2 ** 31, Path(path).name)
 
 
 def component_directory():
@@ -34,7 +42,7 @@ def script_path(name):
 
 def distro_candidates():
     configured = os.environ.get("PHOTOFLOW_WSL_DISTRO", "").strip()
-    return (configured,) if configured else DEFAULT_DISTROS
+    return (configured or DISTRO_NAME,)
 
 
 def decode_process_output(value):
@@ -93,6 +101,9 @@ def run_shell(command, timeout=900):
 class _WslJsonService:
     def __init__(self, python_path, script):
         self.process = None
+        self.stdout_lines = None
+        self.stderr_tail = None
+        self.reader_threads = []
         errors = []
         command = f"{python_path} {shlex.quote(wsl_path(script))} --serve"
         for candidate in distro_candidates():
@@ -102,10 +113,19 @@ class _WslJsonService:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
+            self._start_readers(process)
             while True:
-                line = process.stdout.readline()
+                try:
+                    line = self._readline(120)
+                except TimeoutError:
+                    self._close_process(process, force=True)
+                    errors.append(f"{candidate}: WSL inference service startup timed out")
+                    break
                 if not line:
-                    detail = decode_process_output(b"".join(output_chunks) + process.stderr.read()) or f"退出代码 {process.poll()}"
+                    # EOF is a failed startup too. Fully reap this candidate
+                    # before deciding whether another distro may be attempted.
+                    self._close_process(process, force=True)
+                    detail = decode_process_output((b"".join(output_chunks) + b"".join(self.stderr_tail))[-8000:]) or f"退出代码 {process.poll()}"
                     errors.append(f"{candidate}: {detail}")
                     break
                 try:
@@ -121,16 +141,69 @@ class _WslJsonService:
                 break
         raise RuntimeError("；".join(errors))
 
-    def request(self, payload):
+    def _start_readers(self, process):
+        # The producer must never wait for the JSON consumer.  PairDETR and
+        # SAM can emit large diagnostics bursts before the caller resumes.
+        self.stdout_lines = queue.SimpleQueue()
+        self.stderr_tail = deque(maxlen=128)
+        def read_stdout():
+            for line in iter(process.stdout.readline, b""):
+                self.stdout_lines.put(line)
+            self.stdout_lines.put(None)
+        def read_stderr():
+            for chunk in iter(lambda: process.stderr.read(1024), b""):
+                self.stderr_tail.append(chunk)
+        self.reader_threads = [
+            threading.Thread(target=read_stdout, daemon=True, name="photoflow-wsl-stdout"),
+            threading.Thread(target=read_stderr, daemon=True, name="photoflow-wsl-stderr"),
+        ]
+        for worker in self.reader_threads:
+            worker.start()
+
+    def _readline(self, timeout):
+        try:
+            return self.stdout_lines.get(timeout=max(0.001, timeout))
+        except queue.Empty as error:
+            raise TimeoutError(f"WSL inference service did not respond within {timeout:.1f} seconds") from error
+
+    def _close_process(self, process=None, force=False):
+        process = process or self.process
+        if process is None:
+            return
+        if process.poll() is None:
+            (process.kill if force else process.terminate)()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        for stream in (getattr(process, "stdin", None), getattr(process, "stdout", None), getattr(process, "stderr", None)):
+            try:
+                stream.close()
+            except Exception:
+                pass
+        for worker in self.reader_threads:
+            if worker is not threading.current_thread():
+                worker.join(timeout=2)
+
+    def request(self, payload, timeout=20 * 60):
         if self.process is None or self.process.poll() is not None:
             raise RuntimeError("WSL 推理服务已经退出")
         encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
         self.process.stdin.write((json.dumps({"payload_b64": encoded}) + "\n").encode("ascii"))
         self.process.stdin.flush()
+        deadline = time.monotonic() + timeout
         while True:
-            line = self.process.stdout.readline()
+            try:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"WSL inference service did not respond within {timeout} seconds")
+                line = self._readline(remaining)
+            except TimeoutError:
+                self._close_process(force=True)
+                raise
             if not line:
-                detail = decode_process_output(self.process.stderr.read())
+                detail = decode_process_output(b"".join(self.stderr_tail)[-8000:])
                 raise RuntimeError(detail or "WSL 推理服务未返回结果")
             try:
                 message = json.loads(line.decode("utf-8", errors="replace"))
@@ -151,13 +224,13 @@ class _WslJsonService:
                 self.process.stdin.flush()
                 self.process.wait(timeout=20)
         except Exception:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+            self._close_process()
         finally:
+            self._close_process()
             self.process = None
+            self.stdout_lines = None
+            self.stderr_tail = None
+            self.reader_threads = []
 
 
 class AdvancedBatchSession:
@@ -207,7 +280,7 @@ class AdvancedBatchSession:
             "image": wsl_path(input_path), "boxes": wsl_path(boxes_path),
             "output_dir": wsl_path(sam_root), "max_image_edge": 4096,
         })
-        return sorted(sam_root.glob("mask-*.png"))
+        return sorted(sam_root.glob("mask-*.png"), key=_mask_sort_key)
 
 
 def probe_advanced(timeout=12, retry_timeout=12):
@@ -271,5 +344,5 @@ def run_sam2(input_path, fused, output_root):
         "--max-image-edge", "4096",
     ])
     run_shell(command, 20 * 60)
-    masks = sorted(sam_root.glob("mask-*.png"))
+    masks = sorted(sam_root.glob("mask-*.png"), key=_mask_sort_key)
     return masks

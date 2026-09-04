@@ -45,7 +45,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   }, [sourceProgressKey]);
 
   const refresh = useCallback(async () => {
-    const result = normalizeLegacyProgressResult(await legacyApi.getProgressFolders(workspacePath, project.name));
+    const result = normalizeLegacyProgressResult(await legacyApi.getProgressFolders());
     if (!result.success) throw new Error(result.error || '无法读取项目进度');
     const { progressFolders, graphEdges } = result;
     const sources = resolveTeamSourceProgressIds(normalizedSourcePaths, progressFolders);
@@ -85,13 +85,12 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   const ensureWorkflowInputs = useCallback(async (workflowProgressId?: string) => {
     if (!workflowProgressId) return;
     const latest = await refresh();
-    const registered = await legacyApi.registerProgressWithGraph(workspacePath, project.status, {
-      projectName: project.name,
+    const registered = await legacyApi.registerProgressWithGraph({
       progress: { progressId: workflowProgressId },
       workflowInputProgressIds: latest.sourceProgressIds,
     });
     if (!registered.success) throw new Error(registered.error || '无法登记团片来源关系');
-  }, [refresh, workspacePath, project.status, project.name]);
+  }, [refresh]);
 
   const ensureTargetProgress = async (workflowProgressId?: string) => {
     const latest = await refresh();
@@ -116,8 +115,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
         relativePath: '团片协作合并',
         displayName: '团片协作合并',
       };
-    const registered = await legacyApi.registerProgressWithGraph(workspacePath, project.status, {
-      projectName: project.name,
+    const registered = await legacyApi.registerProgressWithGraph({
       progress: requestProgress,
       workflowInputProgressIds: [resolvedWorkflowProgressId],
     });

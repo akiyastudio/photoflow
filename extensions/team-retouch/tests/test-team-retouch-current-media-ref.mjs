@@ -41,11 +41,11 @@ cases.push({ ref: legacyMediaRef('returned', 'photo:person', 'base/person', 'tas
 for (const item of cases) assert.deepEqual(parseLegacyMediaRef(item.ref), item.value, `${item.value.kind} reference must round-trip`);
 for (const invalid of ['', 'photoflow-ref:original:photo:version', 'photoflow-ref:unknown:a:b:c:d:e', 'photoflow-ref:working:p:v:::', 'photoflow-ref:original:%E0%A4%A:v:::', `${cases[0].ref}:extra`]) assert.equal(parseLegacyMediaRef(invalid), undefined, `malformed reference must be rejected: ${invalid}`);
 
-assert.equal((await legacyApi.getMediaOriginal(cases[0].ref)).mediaUrl, 'photoflow-media:test/1');
-assert.equal((await legacyApi.getMediaThumbnail(cases[1].ref)).previewUrl, 'photoflow-media:test/2');
-assert.equal((await legacyApi.getMediaThumbnail(cases[2].ref)).previewUrl, 'photoflow-media:test/3');
-assert.equal((await legacyApi.getMediaOriginal(cases[3].ref)).mediaUrl, 'photoflow-media:test/4');
-assert.equal((await legacyApi.openTeamPatch(cases[1].ref)).success, true);
+assert.equal((await legacyApi.getMediaOriginal({ reference: cases[0].ref })).mediaUrl, 'photoflow-media:test/1');
+assert.equal((await legacyApi.getMediaThumbnail({ reference: cases[1].ref })).previewUrl, 'photoflow-media:test/2');
+assert.equal((await legacyApi.getMediaThumbnail({ reference: cases[2].ref })).previewUrl, 'photoflow-media:test/3');
+assert.equal((await legacyApi.getMediaOriginal({ reference: cases[3].ref })).mediaUrl, 'photoflow-media:test/4');
+assert.equal((await legacyApi.openTeamPatch({ reference: cases[1].ref })).success, true);
 assert.deepEqual(calls, [
   { method: 'team.media.authorize.v1', payload: { ...cases[0].value, variant: 'original' } },
   { method: 'team.media.authorize.v1', payload: { ...cases[1].value, variant: 'preview' } },
@@ -53,10 +53,10 @@ assert.deepEqual(calls, [
   { method: 'team.media.authorize.v1', payload: { ...cases[3].value, variant: 'original' } },
   { method: 'team.patch.open.v1', payload: cases[1].value },
 ]);
-const rejected = await legacyApi.openTeamPatch(cases[2].ref);
+const rejected = await legacyApi.openTeamPatch({ reference: cases[2].ref });
 assert.equal(rejected.success, false, 'open action must reject a returned-media reference');
 assert.equal(calls.length, 5, 'invalid open action must not reach RPC');
-const hydratedBundle = await legacyApi.getTeamPatches('workspace', '后期中', '项目', '图片后期_1/27.jpg', 'registration-base');
+const hydratedBundle = await legacyApi.getTeamPatches({ relativePath: '图片后期_1/27.jpg', baseVersionId: 'registration-base' });
 assert.deepEqual(calls.at(-1), { method: 'team.patch.get.v1', payload: { relativePath: '图片后期_1/27.jpg' } }, 'a resolved history card loads its patch bundle by the corresponding relativePath');
 assert.deepEqual(parseLegacyMediaRef(hydratedBundle.photo.originalFilePath), { kind: 'original', photoId: 'bundle-photo', baseVersionId: 'registration-base' }, 'original preview uses the registered base rather than the newer current version');
 assert.deepEqual(parseLegacyMediaRef(hydratedBundle.tasks[0].patchPath), { kind: 'working', photoId: 'bundle-photo', baseVersionId: 'registration-base', taskId: 'bundle-task' });
@@ -68,26 +68,26 @@ const results = [];
 for (const request of requests) {
   const reference = request.kind === 'original' ? legacyMediaRef('original', request.photoId, request.baseVersionId) : legacyMediaRef('working', request.photoId, request.baseVersionId, request.taskId);
   try {
-    const result = request.kind === 'original' ? await legacyApi.getMediaOriginal(reference) : await legacyApi.getMediaThumbnail(reference);
+    const result = request.kind === 'original' ? await legacyApi.getMediaOriginal({ reference }) : await legacyApi.getMediaThumbnail({ reference });
     results.push({ success: Boolean(result.mediaUrl || result.previewUrl), error: result.error });
   } catch (error) { results.push({ success: false, error: readableLegacyMediaError(error, request.kind) }); }
 }
 const summary = summarizeLegacyPreviewResults(requests, results);
 assert.deepEqual({ total: summary.total, succeeded: summary.succeeded, failed: summary.failed }, { total: 106, succeeded: 105, failed: 1 }, '27 original and 79 patch authorizations execute independently');
 assert.match(summary.failures[0].error, /历史版本不存在|工作图任务不存在|历史预览文件缺失/, 'the failed item keeps a visible actionable diagnostic');
-const missingCard = await legacyApi.getMediaThumbnail(legacyMediaRef('working', 'fixture-photo-14', 'fixture-base-14', failedTaskId));
+const missingCard = await legacyApi.getMediaThumbnail({ reference: legacyMediaRef('working', 'fixture-photo-14', 'fixture-base-14', failedTaskId) });
 assert.deepEqual({ success: missingCard.success, state: missingCard.state }, { success: false, state: 'MISSING' }, 'expired historical component media degrades to one missing card instead of rejecting the stage');
 
 const sharedRef = legacyMediaRef('working', 'shared-photo', 'shared-version', 'shared-task');
 legacyApi.setMediaAuthorizationScope('project-a');
-const projectARequest = legacyApi.getMediaThumbnail(sharedRef);
+const projectARequest = legacyApi.getMediaThumbnail({ reference: sharedRef });
 await new Promise(resolve => setTimeout(resolve, 0));
 legacyApi.setMediaAuthorizationScope('project-b');
-const projectBResult = await legacyApi.getMediaThumbnail(sharedRef);
+const projectBResult = await legacyApi.getMediaThumbnail({ reference: sharedRef });
 resolveProjectA({ success: true, url: 'photoflow-media:project-a' });
 const projectAResult = await projectARequest;
 assert.equal(projectBResult.previewUrl, 'photoflow-media:project-b', 'project B reauthorizes an identical media ref instead of reusing project A URL/inflight');
 assert.equal(projectAResult.previewUrl, undefined, 'a late project A authorization cannot write back after scope changes');
 assert.equal(sharedAuthorizationCount, 2, 'identical IDs in A and B create independent scoped authorizations');
 
-console.log('Team-retouch legacy media reference round-trip tests passed');
+console.log('Team-retouch current media reference contract tests passed');

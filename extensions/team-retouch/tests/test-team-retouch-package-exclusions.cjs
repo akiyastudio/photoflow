@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
+const packageLayout = fs.readFileSync(path.join(root, 'scripts', 'package-layout.cjs'), 'utf8');
+const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
+assert.equal(Object.hasOwn(manifest.componentHost, 'adoptionGrants'), false);
+assert.equal(JSON.stringify(manifest).includes('migration-backups'), false);
+assert.equal(packageLayout.includes('migration-backups'), false);
+assert.equal(packageScript.includes("fs.cpSync(path.join(root,'migration-backups')"), false);
+assert.deepEqual(manifest.componentHost.service.backupRestore.sources, [{ scope: 'component-storage', path: 'team-retouch/storage.sqlite3', format: 'component-storage-v1' }]);
+console.log('Team-retouch package exclusions and current storage declaration passed');

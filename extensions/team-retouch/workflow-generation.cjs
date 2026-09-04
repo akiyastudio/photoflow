@@ -5,6 +5,13 @@ const crypto = require('crypto');
 const CANCELLED_CODE = 'EOPCANCELLED';
 const cancelledError = () => Object.assign(new Error('工作流程生成已取消'), { code: CANCELLED_CODE });
 const taskKey = (photoId, baseVersionId, taskId) => `${photoId}\0${baseVersionId}\0${taskId}`;
+const sha256File = filePath => new Promise((resolve, reject) => {
+  const digest = crypto.createHash('sha256');
+  const input = fs.createReadStream(filePath);
+  input.on('error', reject);
+  input.on('data', chunk => digest.update(chunk));
+  input.on('end', () => resolve(digest.digest('hex')));
+});
 
 const mapWorkspaceTasks = workspace => {
   const tasks = new Map();
@@ -52,7 +59,7 @@ const buildWorkflowPlan = async ({ groups, workspace, stagingDirectory, safeSegm
     if (activeIndex < 0) continue;
     const active = ordered[activeIndex];
     const predecessorReturn = ordered.slice(0, activeIndex).reverse().map(item => assignments.get(`${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`)?.editedPatchPath).find(filePath => filePath && exists(filePath));
-    activeItems.set(`${taskId}\0${Number(active.personIndex)}`, { sourcePath: predecessorReturn || '', allowLegacyLatest: activeIndex > 0 });
+    activeItems.set(`${taskId}\0${Number(active.personIndex)}`, { sourcePath: predecessorReturn || '' });
   }
   const usedFoldersByWeek = new Map();
   const manifestGroups = [];
@@ -72,25 +79,30 @@ const buildWorkflowPlan = async ({ groups, workspace, stagingDirectory, safeSegm
     for (const item of group.items || []) {
       const task = workspaceTasks.get(taskKey(item.photoId, item.baseVersionId, item.taskId));
       if (!task) continue;
-      const containsPerson = (task.members?.length ? task.members : [{ personIndex: task.personIndex }]).some(member => Number(member.personIndex) === Number(item.personIndex));
+      const containsPerson = task.members.some(member => Number(member.personIndex) === Number(item.personIndex));
       if (!containsPerson) continue;
       const activeKey = `${item.taskId}\0${Number(item.personIndex)}`;
       const activeState = activeItems.get(activeKey);
-      const sourcePath = activeState?.sourcePath || (activeState?.allowLegacyLatest && task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath);
+      const sourcePath = activeState?.sourcePath || task.patchPath;
       const destination = uniquePlannedDestination(groupDirectory, `${safeSegment(item.photoName, '图片')}_人物${item.personIndex}${path.extname(sourcePath || task.patchPath) || '.png'}`, reserved);
       manifestItems.push({ ...item, available: activeItems.has(activeKey), relativePath: path.relative(stagingDirectory, destination).replace(/\\/g, '/') });
       if (activeItems.has(activeKey) && sourcePath && fs.existsSync(sourcePath)) files.push({ sourcePath, destination, photoName: String(item.photoName || ''), personIndex: Number(item.personIndex) || 0 });
     }
     if (manifestItems.length) manifestGroups.push({ week, identityId: String(group.identityId || ''), identityName: String(group.identityName || identityFolderName), relativePath: path.relative(stagingDirectory, groupDirectory).replace(/\\/g, '/'), items: manifestItems });
   }
-  await runLimited(files, 12, async file => {
+  const digestBySource = new Map();
+  await runLimited(files, 3, async file => {
     const sourceStat = await stat(file.sourcePath);
     if (!sourceStat.isFile()) throw new Error(`工作图不是普通文件：${path.basename(file.sourcePath)}`);
     file.size = sourceStat.size;
     file.mtimeMs = sourceStat.mtimeMs;
+    const sourceKey = path.resolve(file.sourcePath);
+    let digest = digestBySource.get(sourceKey);
+    if (!digest) { digest = sha256File(file.sourcePath); digestBySource.set(sourceKey, digest); }
+    file.sha256 = await digest;
   });
   const totalBytes = files.reduce((total, file) => total + file.size, 0);
-  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ groups: manifestGroups, files: files.map(file => ({ sourcePath: path.resolve(file.sourcePath), destination: path.relative(stagingDirectory, file.destination), size: file.size, mtimeMs: file.mtimeMs })) })).digest('hex');
+  const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ groups: manifestGroups, files: files.map(file => ({ sourcePath: path.resolve(file.sourcePath), destination: path.relative(stagingDirectory, file.destination), size: file.size, sha256: file.sha256 })) })).digest('hex');
   return { manifestGroups, files, totalBytes, fingerprint };
 };
 
@@ -104,7 +116,7 @@ const copyWorkflowPlan = async ({ files, totalBytes, copyFileAtomic, concurrency
     let reusable = false;
     try {
       const destinationStat = await fs.promises.stat(file.destination);
-      reusable = destinationStat.isFile() && destinationStat.size === file.size && Math.abs(destinationStat.mtimeMs - file.mtimeMs) < 2000;
+      reusable = destinationStat.isFile() && destinationStat.size === file.size && await sha256File(file.destination) === file.sha256;
     } catch { reusable = false; }
     if (reusable) { completedFiles += 1; copiedBytes += file.size; report(file, 'resuming'); }
     else { await fs.promises.rm(file.destination, { force: true }).catch(() => undefined); pendingFiles.push(file); }
@@ -118,12 +130,18 @@ const copyWorkflowPlan = async ({ files, totalBytes, copyFileAtomic, concurrency
       const file = pendingFiles[index];
       let fileBytes = 0;
       try {
+        const sourceBefore = await fs.promises.stat(file.sourcePath);
+        if (!sourceBefore.isFile() || sourceBefore.size !== file.size || await sha256File(file.sourcePath) !== file.sha256) throw Object.assign(new Error(`工作图在计划后已变化：${path.basename(file.sourcePath)}`), { code: 'COMPONENT_SOURCE_CHANGED', retryable: true });
         await copyFileAtomic(file.sourcePath, file.destination, { isCancelled, onProgress: value => {
           const currentBytes = Math.max(0, Math.min(file.size, Number(value.bytesCopied) || 0));
           copiedBytes += Math.max(0, currentBytes - fileBytes);
           fileBytes = currentBytes;
           report(file);
         } });
+        if (await sha256File(file.destination) !== file.sha256) {
+          await fs.promises.rm(file.destination, { force: true }).catch(() => undefined);
+          throw Object.assign(new Error(`工作流复制摘要不匹配：${path.basename(file.destination)}`), { code: 'COMPONENT_COPY_DIGEST_MISMATCH', retryable: true });
+        }
         if (fileBytes < file.size) copiedBytes += file.size - fileBytes;
         completedFiles += 1;
         report(file);

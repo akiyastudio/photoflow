@@ -1,0 +1,69 @@
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const { ensureSchema } = require('../service.cjs');
+const { restoreProjectBundle } = require('../backup-restore.cjs');
+
+const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const hash = value => crypto.createHash('sha256').update(value).digest('hex');
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-current-restore-'));
+try {
+  const sourceId = 'source-project'; const targetId = 'target-project';
+  const sourceHash = hash(sourceId); const targetHash = hash(targetId);
+  const sourceDataRoot = path.join(sandbox, 'old-data');
+  const targetDataRoot = path.join(sandbox, 'new-data');
+  const sourceComponentRoot = path.join(sourceDataRoot, 'components', 'team-retouch');
+  const targetComponentRoot = path.join(targetDataRoot, 'components', 'team-retouch');
+  const sourceDatabase = path.join(sandbox, 'source.sqlite3');
+  const targetDatabase = path.join(targetComponentRoot, 'storage.sqlite3');
+  const staleTargetFile = path.join(targetComponentRoot, 'projects', targetHash, 'stale.bin');
+  const otherProjectFile = path.join(targetComponentRoot, 'projects', hash('other-project'), 'keep.bin');
+  for (const [file, value] of [[staleTargetFile, 'remove-me'], [otherProjectFile, 'keep-me']]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, value); }
+  const oldArtifact = path.join(sourceComponentRoot, 'projects', sourceHash, 'media', 'photo', 'version', 'artifact.bin');
+  fs.mkdirSync(path.dirname(oldArtifact), { recursive: true }); fs.writeFileSync(oldArtifact, 'media-current-layout');
+  const sourceDb = ensureSchema(sourceDatabase);
+  sourceDb.prepare('INSERT INTO team_project_revisions(project_id,revision) VALUES(?,?)').run(sourceId, 4);
+  sourceDb.prepare(`INSERT INTO team_task_artifacts(project_id,id,task_id,stage_id,person_index,kind,artifact_path,digest,metadata_json,created_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+    .run(sourceId, 'artifact', 'task', null, 1, 'patch', oldArtifact, digest(oldArtifact), JSON.stringify({ path: oldArtifact }), 1, 0);
+  sourceDb.close();
+  const staged = path.join(sandbox, 'staged'); fs.mkdirSync(staged, { recursive: true });
+  const make = (name, value) => { const file = path.join(staged, name); fs.writeFileSync(file, value); return file; };
+  const media = make('media.bin', 'media-current-layout');
+  const settings = make('settings.json', JSON.stringify({ projectId: sourceId, path: oldArtifact }));
+  const similarities = make('similarities.json', JSON.stringify({ projectId: sourceId, similarities: [] }));
+  const job = make('job.json', JSON.stringify({ projectId: sourceId, projectName: 'Old', state: 'completed' }));
+  const entries = [
+    [`team-retouch/projects/${sourceHash}/media/photo/version/artifact.bin`, media],
+    [`team-retouch/workflow-settings/${sourceHash}.json`, settings],
+    [`team-retouch/identity-similarities/${sourceHash}.json`, similarities],
+    [`team-retouch/workflow-jobs/${hash(sourceId)}.json`, job],
+  ].map(([relativePath, file]) => ({ relativePath, path: file, size: fs.statSync(file).size, sha256: digest(file), format: 'component-private-v1' }));
+  const payload = {
+    operationId: 'restore-current-layout',
+    project: { sourceId, id: targetId, sourceName: 'Old', targetName: 'New', sourceStatus: 'active', targetStatus: 'active' },
+    sourceWorkspace: { dataRoot: sourceDataRoot, root: path.join(sandbox, 'old-workspace') },
+    targetWorkspace: { dataRoot: targetDataRoot, root: path.join(sandbox, 'new-workspace') },
+    targetStorage: { dataPath: targetComponentRoot, controlPath: path.join(targetComponentRoot, '.control') },
+  };
+  const result = restoreProjectBundle({
+    source: { relativePath: 'team-retouch/storage.sqlite3', path: sourceDatabase, format: 'component-storage-v1' },
+    sources: [{ relativePath: 'team-retouch/storage.sqlite3', path: sourceDatabase, format: 'component-storage-v1' }, ...entries],
+    destinationPath: targetDatabase, destinationDataPath: targetComponentRoot, payload, ensureSchema,
+  });
+  assert.equal(result.status, 'committed');
+  const restored = new DatabaseSync(targetDatabase, { readOnly: true });
+  const artifact = restored.prepare('SELECT artifact_path,metadata_json FROM team_task_artifacts WHERE project_id=?').get(targetId); restored.close();
+  const expectedArtifact = path.join(targetComponentRoot, 'projects', targetHash, 'media', 'photo', 'version', 'artifact.bin');
+  assert.equal(artifact.artifact_path, expectedArtifact, 'database absolute project-private paths are rebound to the target project hash');
+  assert.equal(JSON.parse(artifact.metadata_json).path, expectedArtifact, 'JSON database paths are rebound too');
+  assert.equal(fs.readFileSync(expectedArtifact, 'utf8'), 'media-current-layout');
+  assert.equal(fs.existsSync(staleTargetFile), false, 'exact project restore removes target-project files absent from the source snapshot');
+  assert.equal(fs.readFileSync(otherProjectFile, 'utf8'), 'keep-me', 'exact project restore leaves every other project hash untouched');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'workflow-settings', `${targetHash}.json`), 'utf8')).projectId, targetId);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'identity-similarities', `${targetHash}.json`), 'utf8')).projectId, targetId);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'workflow-jobs', `${hash(targetId)}.json`), 'utf8')).projectId, targetId);
+  console.log('Team-retouch current project-private storage restore passed');
+} finally { fs.rmSync(sandbox, { recursive: true, force: true }); }

@@ -223,10 +223,13 @@ class IdentityRuntime:
             aligned = cv2.resize(face_crop, (112, 112), interpolation=cv2.INTER_AREA)
             feature, model_quality = self._face_feature(aligned)
             size_quality = min(1.0, min(fx2 - fx1, fy2 - fy1) / 100)
-            quality = .22 + .2 * size_quality
+            gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
+            contrast_quality = min(1.0, float(gray.std()) / 42.0)
+            sharpness_quality = min(1.0, float(cv2.Laplacian(gray, cv2.CV_32F).var()) / 140.0)
+            quality = (.18 + .2 * size_quality) * contrast_quality * (.35 + .65 * sharpness_quality)
             if model_quality is not None:
-                quality = .82 * quality + .18 * model_quality
-            return feature, quality, {"x": fx1, "y": fy1, "width": fx2 - fx1, "height": fy2 - fy1}
+                quality = .9 * quality + .1 * model_quality * contrast_quality
+            return feature, float(np.clip(quality, 0, 1)), {"x": fx1, "y": fy1, "width": fx2 - fx1, "height": fy2 - fy1}
         return None, 0.0, None
 
     def _body_input(self, rgb, item):
@@ -243,7 +246,9 @@ class IdentityRuntime:
         clipped_edges = sum((x1 <= 1, y1 <= 1, x2 >= width - 1, y2 >= height - 1))
         completeness = max(.35, 1 - clipped_edges * .14)
         occlusion = float(item.get("occlusion") or 0)
-        quality = resolution * aspect_quality * completeness * max(.35, 1 - occlusion * .65)
+        appearance_std = float(cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY).std())
+        texture_quality = float(np.clip((appearance_std - 2.0) / 22.0, 0, 1))
+        quality = resolution * aspect_quality * completeness * max(.35, 1 - occlusion * .65) * texture_quality
         return np.ascontiguousarray(tensor.transpose(2, 0, 1)), float(np.clip(quality, 0, 1))
 
     def describe(self, rgb, item):
@@ -322,20 +327,72 @@ def pair_metrics(left, right):
         "qualifies": bool(qualifies and not contradiction),
         "contradiction": bool(contradiction),
         "evidence": evidence,
+        "faceQuality": face_quality,
     }
 
 
-def ranked_similarity_pairs(descriptors, limit_per_subject=32):
+class CompactPairMetrics:
+    """Triangular numeric cache with bounded memory and dict-compatible access."""
+    def __init__(self, subject_count):
+        self.subject_count = int(subject_count)
+        pair_count = self.subject_count * (self.subject_count - 1) // 2
+        self.values = np.zeros((pair_count, 4), dtype=np.float32)
+        self.flags = np.zeros(pair_count, dtype=np.uint8)
+
+    def _index(self, key):
+        left, right = sorted((int(key[0]), int(key[1])))
+        if left == right or left < 0 or right >= self.subject_count:
+            raise KeyError(key)
+        return left * (2 * self.subject_count - left - 1) // 2 + right - left - 1
+
+    def __contains__(self, key):
+        return bool(self.flags[self._index(key)] & 1)
+
+    def __setitem__(self, key, value):
+        index = self._index(key)
+        self.values[index] = (
+            float(value["score"]),
+            float(value["faceScore"]) if value["faceScore"] is not None else np.nan,
+            float(value["bodyScore"]),
+            float(value.get("faceQuality", 0)),
+        )
+        evidence = 2 if value.get("evidence") == "face+body" else 0
+        self.flags[index] = 1 | evidence | (4 if value.get("qualifies") else 0) | (8 if value.get("contradiction") else 0)
+
+    def __getitem__(self, key):
+        index = self._index(key)
+        flags = int(self.flags[index])
+        if not flags & 1:
+            raise KeyError(key)
+        score, face_score, body_score, face_quality = self.values[index]
+        return {
+            "score": float(score),
+            "faceScore": None if np.isnan(face_score) else float(face_score),
+            "bodyScore": float(body_score),
+            "faceQuality": float(face_quality),
+            "qualifies": bool(flags & 4),
+            "contradiction": bool(flags & 8),
+            "evidence": "face+body" if flags & 2 else "body-only",
+        }
+
+
+def ranked_similarity_pairs(descriptors, limit_per_subject=32, metrics_cache=None):
     """Return a compact symmetric top-k cache for interactive candidate ranking."""
     if len(descriptors) < 2:
         return []
     ranked = [[] for _item in descriptors]
+    metrics_cache = metrics_cache if metrics_cache is not None else {}
+    def metric(left_index, right_index):
+        key = (min(left_index, right_index), max(left_index, right_index))
+        if key not in metrics_cache:
+            metrics_cache[key] = pair_metrics(descriptors[key[0]], descriptors[key[1]])
+        return metrics_cache[key]
     for left_index in range(len(descriptors)):
         for right_index in range(left_index + 1, len(descriptors)):
             left, right = descriptors[left_index], descriptors[right_index]
             if left["photoId"] == right["photoId"]:
                 continue
-            metrics = pair_metrics(left, right)
+            metrics = metric(left_index, right_index)
             ranked[left_index].append((metrics["score"], right_index, metrics))
             ranked[right_index].append((metrics["score"], left_index, metrics))
     selected = set()
@@ -344,7 +401,7 @@ def ranked_similarity_pairs(descriptors, limit_per_subject=32):
             selected.add((min(source_index, target_index), max(source_index, target_index)))
     results = []
     for left_index, right_index in sorted(selected):
-        metrics = pair_metrics(descriptors[left_index], descriptors[right_index])
+        metrics = metric(left_index, right_index)
         results.append({
             "leftKey": descriptors[left_index]["key"],
             "rightKey": descriptors[right_index]["key"],
@@ -356,13 +413,14 @@ def ranked_similarity_pairs(descriptors, limit_per_subject=32):
     return results
 
 
-def constrained_clusters(descriptors):
+def constrained_clusters(descriptors, metrics_cache=None):
     if not descriptors:
         return []
-    metrics = {}
+    metrics = metrics_cache if metrics_cache is not None else {}
     for left in range(len(descriptors)):
         for right in range(left + 1, len(descriptors)):
-            metrics[(left, right)] = pair_metrics(descriptors[left], descriptors[right])
+            if (left, right) not in metrics:
+                metrics[(left, right)] = pair_metrics(descriptors[left], descriptors[right])
 
     def metric(left, right):
         return metrics[(min(left, right), max(left, right))]
@@ -474,7 +532,7 @@ def constrained_clusters(descriptors):
         pair_values = [metric(left, right) for offset, left in enumerate(cluster["members"]) for right in cluster["members"][offset + 1:] if descriptors[left]["photoId"] != descriptors[right]["photoId"]]
         supporting = [item for item in pair_values if item["qualifies"]]
         score = min((item["score"] for item in supporting), default=.65)
-        face_supported = bool(supporting) and all(item["evidence"] == "face+body" for item in supporting)
+        face_supported = bool(supporting) and all(item["evidence"] == "face+body" and item.get("faceQuality", 0) >= .45 for item in supporting)
         results.append({
             "confidence": "high" if face_supported and score >= .78 else "suggested",
             "score": round(float(score), 4),
