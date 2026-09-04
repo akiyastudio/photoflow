@@ -4,17 +4,19 @@ const { runApplicationQuit } = require('../electron/services/application-quit-co
 const fixture = ({ background = true, failStopOnce = false, confirm = true } = {}) => {
   const events = [];
   let stopFailure = failStopOnce;
+  let processesPresent = background;
   const lifecycle = {
     cancelApplicationQuit: () => events.push('cancel-gate'),
     waitForAllWork: async () => events.push('work-drained'),
     commitApplicationQuit: () => events.push('commit'),
   };
   const processSupervisor = {
-    list: () => background ? [{ state: 'running', owner: { componentId: 'fixture.component' } }] : [],
+    list: () => processesPresent ? [{ state: 'running', owner: { componentId: 'fixture.component' } }] : [],
     stopWhere: async () => events.push('component-processes-stopped'),
     stopAll: async () => {
       events.push('all-processes-stop');
       if (stopFailure) { stopFailure = false; throw Object.assign(new Error('termination failed'), { code: 'PROCESS_TERMINATION_FAILED' }); }
+      processesPresent = false;
       events.push('all-processes-stopped');
     },
   };
@@ -53,7 +55,9 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
 
   const unconfirmed = fixture({ background: false, confirm: true });
   let stopAttempts = 0;
-  unconfirmed.options.processSupervisor.list = () => [{ state: 'stopped', terminationFailed: true, owner: { componentId: 'fixture.component' } }];
+  unconfirmed.options.processSupervisor.list = () => stopAttempts < 2
+    ? [{ state: 'stopped', terminationFailed: true, owner: { componentId: 'fixture.component' } }]
+    : [];
   unconfirmed.options.processSupervisor.stopAll = async () => { stopAttempts += 1; unconfirmed.events.push('all-processes-stop'); };
   unconfirmed.options.processSupervisor.hasUnconfirmedOwner = () => stopAttempts < 2;
   await assert.rejects(runApplicationQuit(unconfirmed.options), error => error.code === 'PROCESS_TERMINATION_FAILED');
@@ -63,6 +67,21 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   await runApplicationQuit(unconfirmed.options);
   assert.equal(unconfirmed.events.filter(event => event === 'commit').length, 1);
   assert.equal(unconfirmed.events.filter(event => event === 'video-disposed').length, 1);
+
+  const staleOwner = fixture({ background: false, confirm: true });
+  staleOwner.options.componentIds = [];
+  let staleStopAttempts = 0;
+  staleOwner.options.processSupervisor.list = () => staleStopAttempts < 2
+    ? [{ state: 'stopped', terminationFailed: true, owner: { componentId: 'stale.component' } }]
+    : [];
+  staleOwner.options.processSupervisor.stopAll = async () => { staleStopAttempts += 1; staleOwner.events.push('all-processes-stop'); };
+  staleOwner.options.processSupervisor.hasUnconfirmedOwner = componentId => componentId === 'stale.component' && staleStopAttempts < 2;
+  await assert.rejects(runApplicationQuit(staleOwner.options), error => error.code === 'PROCESS_TERMINATION_FAILED' && error.componentIds.includes('stale.component'));
+  assert.equal(staleOwner.events.includes('commit'), false, 'stale supervisor owner blocks commit even when registry is empty');
+  assert.equal(staleOwner.events.includes('video-disposed'), false);
+  await runApplicationQuit(staleOwner.options);
+  assert.equal(staleOwner.events.filter(event => event === 'commit').length, 1);
+  assert.equal(staleOwner.events.filter(event => event === 'video-disposed').length, 1);
 
   console.log('Application quit commit-point tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

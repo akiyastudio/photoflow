@@ -12,23 +12,29 @@ const runApplicationQuit = async ({
   teardown = [],
   writeLog = () => undefined,
 }) => {
-  const background = processSupervisor.list().filter(status => status.owner?.componentId && (activeProcess(status) || status.terminationFailed === true));
+  const initialStatuses = processSupervisor.list();
+  const supervisedOwnerIds = initialStatuses.map(status => String(status.owner?.componentId || '').trim()).filter(Boolean);
+  const guardedComponentIds = [...new Set([...componentIds, ...supervisedOwnerIds])];
+  const background = initialStatuses.filter(status => status.owner?.componentId && (activeProcess(status) || status.terminationFailed === true));
   if (background.length && !await confirmBackgroundProcesses(background)) {
     componentLifecycleCoordinator.cancelApplicationQuit();
     throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
   }
 
-  const barriers = componentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
+  const barriers = guardedComponentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
   try {
     await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
     await componentServiceManager?.stopAll('application-quit');
     await componentViewManager?.closeAllAndWait();
-    componentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
+    guardedComponentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
     await Promise.all(barriers.map(barrier => barrier.drain({ timeoutMs: 7500 })));
     await componentLifecycleCoordinator.waitForAllWork({ timeoutMs: 7500 });
     await processSupervisor.stopAll('application-quit');
-    const unconfirmed = componentIds.filter(componentId => processSupervisor.hasUnconfirmedOwner?.(componentId) === true);
-    if (unconfirmed.length) throw Object.assign(new Error('组件后台进程树终止状态仍未确认'), { code: 'PROCESS_TERMINATION_FAILED', componentIds: unconfirmed });
+    const finalStatuses = processSupervisor.list();
+    const remainingOwners = finalStatuses.filter(status => status.owner?.componentId && (activeProcess(status) || status.terminationFailed === true));
+    const stickyUnconfirmedIds = guardedComponentIds.filter(componentId => processSupervisor.hasUnconfirmedOwner?.(componentId) === true);
+    const unconfirmedIds = [...new Set([...remainingOwners.map(status => String(status.owner.componentId)), ...stickyUnconfirmedIds])];
+    if (unconfirmedIds.length) throw Object.assign(new Error('组件后台进程树终止状态仍未确认'), { code: 'PROCESS_TERMINATION_FAILED', componentIds: unconfirmedIds });
   } catch (error) {
     barriers.forEach(barrier => barrier.release());
     componentLifecycleCoordinator.cancelApplicationQuit();
