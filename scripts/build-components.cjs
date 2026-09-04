@@ -37,5 +37,8 @@ for (const component of packages) {
     fs.rmSync(expectedArchive, { force: true });
     throw new Error(`Component package was not produced: ${component.id} ${component.version}`);
   }
+  const verification = spawnSync(process.execPath, [path.join(root, 'scripts', 'verify-component-packages.cjs'), expectedArchive], { cwd: root, stdio: 'inherit' });
+  if (verification.error) throw verification.error;
+  if ((verification.status ?? 1) !== 0) throw new Error(`Component package verification failed; diagnostic archive retained: ${expectedArchive}`);
 }
 console.log(`Built ${packages.length} discovered component package(s).`);

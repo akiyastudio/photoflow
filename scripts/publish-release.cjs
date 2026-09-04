@@ -178,6 +178,10 @@ const run = async () => {
   const installerPath = path.resolve(args.installer || findInstaller(version));
   if (!fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
   runLegalReleaseReadyGate(installerPath);
+  runCommand(process.execPath, [
+    path.join(repositoryRoot, 'scripts', 'generate-delivery-manifest.cjs'),
+    '--installer', installerPath,
+  ], '验证 Setup 与组件 ZIP 并生成交付清单（组件 ZIP 不由本发布脚本上传）');
 
   let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim() || readWindowsUserToken();
   let persistToken = false;

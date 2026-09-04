@@ -185,10 +185,6 @@ for (const entry of Object.values(runtimeManifest.complianceArtifacts)) {
   fs.copyFileSync(path.resolve(mpvRoot, entry.file), path.join(target, path.basename(entry.file)));
 }
 fs.copyFileSync(templatePath, path.join(target, 'component.json'));
-const integrityManifest = createComponentIntegrityManifest(target, manifest.id, manifest.version);
-const serializedIntegrity = `${JSON.stringify(integrityManifest, null, 2)}\n`;
-fs.writeFileSync(path.join(target, 'component-integrity.json'), serializedIntegrity, 'utf8');
-
 const files = fs.readdirSync(target, { withFileTypes: true })
   .filter(entry => entry.isFile())
   .sort((left, right) => left.name.localeCompare(right.name, 'en'))
@@ -213,6 +209,9 @@ fs.writeFileSync(path.join(target, 'build-info.json'), JSON.stringify({
   },
   files,
 }, null, 2));
+const integrityManifest = createComponentIntegrityManifest(target, manifest.id, manifest.version);
+const serializedIntegrity = `${JSON.stringify(integrityManifest, null, 2)}\n`;
+fs.writeFileSync(path.join(target, 'component-integrity.json'), serializedIntegrity, 'utf8');
 
 const archiveEntries = fs.readdirSync(target, { withFileTypes: true })
   .filter(entry => entry.isFile())

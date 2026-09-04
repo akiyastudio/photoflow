@@ -3,8 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const INTEGRITY_SCHEMA_VERSION = 1;
-const EXECUTABLE_FILE_PATTERN = /\.(?:exe|dll|node|ps1|cmd|bat)$/i;
-const REQUIRED_METADATA_FILES = new Set(['component.json', 'runtime-manifest.json']);
+const EXCLUDED_MUTABLE_FILES = new Set(['component-integrity.json']);
 
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -25,6 +24,7 @@ const sha256FileAsync = filePath => new Promise((resolve, reject) => {
 const listIntegrityFiles = root => {
   const resolvedRoot = path.resolve(root);
   const files = [];
+  const caseFolded = new Set();
   const pending = [resolvedRoot];
   while (pending.length) {
     const directory = pending.pop();
@@ -37,7 +37,10 @@ const listIntegrityFiles = root => {
         continue;
       }
       if (!entry.isFile()) throw new Error(`组件包含不支持的文件类型：${relative}`);
-      if (EXECUTABLE_FILE_PATTERN.test(entry.name) || REQUIRED_METADATA_FILES.has(entry.name.toLowerCase())) files.push(relative);
+      const folded = relative.toLowerCase();
+      if (caseFolded.has(folded)) throw new Error(`组件包含大小写冲突路径：${relative}`);
+      caseFolded.add(folded);
+      if (!EXCLUDED_MUTABLE_FILES.has(relative)) files.push(relative);
     }
   }
   return files.sort((left, right) => left.localeCompare(right, 'en'));
