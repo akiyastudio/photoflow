@@ -437,6 +437,20 @@ const registerSystemIpc = context => {
     for (const batch of batchesByCleanupBudget(targets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) { const results = await componentCleanupPublicationService.inspectPathsBatch(batch); if (results.length !== batch.length || results.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整'); batch.forEach((target, index) => identities.set(target, results[index].identity)); }
     return { rootIdentity: identities.get(isolatedPath), entries: proof.entries.map(entry => ({ path: entry.path, identity: identities.get(path.join(isolatedPath, ...entry.path.split('/'))) })) };
   };
+  const deleteComponentCleanupSidecar = async ({ path: sidecarPath, expectedContent }) => {
+    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
+    const expected = Buffer.from(expectedContent, 'utf8'); const expectedSha256 = crypto.createHash('sha256').update(expected).digest('hex');
+    const handle = await fs.promises.open(sidecarPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try {
+      const stat = await handle.stat(); if (!stat.isFile() || stat.size !== expected.length) throw new Error('组件清理 sidecar 大小与 immutable proof 不一致');
+      const native = await componentCleanupPublicationService.inspectPath(sidecarPath); if (!native?.success || !native.identity) throw new Error('组件清理 sidecar 原生身份检查不完整');
+      const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
+      const linked = await fs.promises.lstat(sidecarPath); const held = await handle.stat();
+      if (linked.isSymbolicLink() || linked.dev !== held.dev || linked.ino !== held.ino || linked.size !== held.size || hash.digest('hex') !== expectedSha256) throw new Error('组件清理 sidecar 与 immutable proof 不一致');
+      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: sidecarPath, sha256: expectedSha256, size: expected.length, identity: native.identity });
+      if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw new Error('组件清理 sidecar 对象身份绑定删除未完全提交');
+    } finally { await handle.close().catch(() => undefined); }
+  };
   const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath, proof }) => {
     if (!componentCleanupPublicationService.nativeAvailable()) throw new Error('对象身份绑定删除服务不可用');
     if (receipt.kind === 'file') {
@@ -682,7 +696,7 @@ const registerSystemIpc = context => {
         task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
         if (backgroundTasks?.flush?.() !== true) throw Object.assign(new Error('无法同步持久化组件清理完成前状态'), { cleanupPendingReceipts: targets });
       }
-      for (const target of targets) await finalizeComponentCleanupProof(target, { dataCleanupCompletePersisted: true });
+      for (const target of targets) await finalizeComponentCleanupProof(target, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar });
       return { removedCount: targets.length };
     };
     if (!backgroundTasks?.run) {
