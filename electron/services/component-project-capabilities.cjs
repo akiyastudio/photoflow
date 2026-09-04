@@ -37,9 +37,9 @@ const discardInputGrant = async (fs, grant, { waitForMaterialize = true } = {}) 
   clearTimeout(grant?.cleanupTimer); if (grant) grant.cleanupTimer = null;
   if(waitForMaterialize&&grant?.materializePromise)await grant.materializePromise.catch(()=>undefined);
   if (!grant?.snapshotRoot || grant.snapshotCleanup) return grant?.snapshotCleanup || Promise.resolve();
-  const snapshotRoot = grant.snapshotRoot;
+  const snapshotRoot = grant.snapshotRoot;const snapshotPath=grant.snapshotPath;
   grant.snapshotRoot = ''; grant.snapshotPath = '';
-  grant.snapshotCleanup = fs.promises.rm(snapshotRoot, { recursive: true, force: true }).finally(() => { grant.snapshotCleanup = null; });
+  grant.snapshotCleanup = fs.promises.rm(snapshotRoot, { recursive: true, force: true }).catch(error=>{grant.snapshotRoot=snapshotRoot;grant.snapshotPath=snapshotPath;throw error;}).finally(() => { grant.snapshotCleanup = null; });
   return grant.snapshotCleanup;
 };
 
@@ -1224,7 +1224,7 @@ const registerComponentProjectCapabilities = ({
         return snapshots;
       } catch (error) { for (const {token,grant} of grants) {delete grant.originalExpiresAt;delete grant.reservedBy;delete grant.reservationExpiresAt;grant.snapshotOwner=token;armGrantTimer(token,grant,grant.ttlRemainingMs||INPUT_TOKEN_TTL_MS);} throw error; }
     },
-    commitReservation: async reservationId => { const cleanups=[];for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { inputGrants.delete(token); cleanups.push(discardInputGrant(fs, grant)); } const results=await Promise.allSettled(cleanups);const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);if(errors.length)throw new AggregateError(errors,'Unable to clean committed component input snapshots'); },
+    commitReservation: async reservationId => { const cleanups=[];for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { inputGrants.delete(token);cleanups.push({token,grant,promise:discardInputGrant(fs,grant)}); }const results=await Promise.allSettled(cleanups.map(item=>item.promise));let pending=0;results.forEach((result,index)=>{if(result.status==='rejected'){pending+=1;const item=cleanups[index];const retry=setTimeout(()=>{void discardInputGrant(fs,item.grant).catch(()=>undefined);},1000);retry.unref?.();}});return{consumed:cleanups.length,cleanupPending:pending}; },
     releaseReservation: reservationId => { for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { delete grant.originalExpiresAt; delete grant.reservedBy; delete grant.reservationExpiresAt; grant.snapshotOwner = token; armGrantTimer(token,grant,grant.ttlRemainingMs||INPUT_TOKEN_TTL_MS); } },
     clearComponent: async componentId => {
       const prefix = `${String(componentId || '')}\0`;
