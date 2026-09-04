@@ -2,9 +2,13 @@ const { execFile } = require('child_process');
 
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
 const childHasExited = child => !child || child.exitCode != null || child.signalCode != null;
+const childStreamsClosed = child => {
+  const streams = [child?.stdout, child?.stderr].filter(Boolean);
+  return streams.length > 0 && streams.every(stream => stream.closed === true || stream.destroyed === true || stream.readableEnded === true);
+};
 const waitForChildExit = (child, deadlineAt = Infinity, { requireClose = false } = {}) => {
   let observedExit = false; let observedClose = false;
-  const completed = () => (childHasExited(child) || observedExit) && (!requireClose || child.__photoFlowCloseObserved === true || observedClose);
+  const completed = () => (childHasExited(child) || observedExit) && (!requireClose || child.__photoFlowCloseObserved === true || observedClose || childStreamsClosed(child));
   if (completed()) return Promise.resolve(true);
   return new Promise(resolve => {
     let timer = null;
@@ -58,7 +62,13 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
     if (rollbackSettleMs > 0) await delay(rollbackSettleMs);
     return { exited: true, forced: true, activeProcessCount: 0 };
   }
+  // Register before taskkill (or any other asynchronous termination action),
+  // so exit+close cannot occur between the action and fence construction.
+  const rawWindowsCloseFence = platform === 'win32'
+    ? waitForChildExit(child, terminationDeadline, { requireClose: true })
+    : null;
   if (platform === 'win32' && child.__photoFlowTreeTerminationUnconfirmed && childHasExited(child)) {
+    await rawWindowsCloseFence;
     const error = new Error('组件服务父进程已退出，但无法确认其 Windows 子进程树已终止');
     error.code = 'PROCESS_TREE_TERMINATION_UNCONFIRMED'; error.pid = child.pid || null;
     throw error;
@@ -79,7 +89,7 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
     // still useful for fencing its streams. This never upgrades the result to
     // tree-confirmed success: descendants may remain unknown.
     try { child.kill?.('SIGKILL'); } catch { /* preserve the original tree failure */ }
-    const helperClosed = await waitForChildExit(child, terminationDeadline, { requireClose: true });
+    const helperClosed = await rawWindowsCloseFence;
     const error = new Error(helperClosed
       ? 'Windows 组件服务进程树终止失败，且无法确认完整进程树已经清空'
       : 'Windows 组件服务进程树终止失败，且辅助进程未在截止时间前关闭');
@@ -88,7 +98,7 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
     throw error;
   }
   let exited = platform === 'win32'
-    ? await waitForChildExit(child, terminationDeadline, { requireClose: true })
+    ? await rawWindowsCloseFence
     : childHasExited(child);
   if (!exited && platform !== 'win32') exited = await waitForChildExit(child, Date.now() + Math.min(500, Math.floor(Math.max(0, terminationDeadline - Date.now()) / 2)));
   if (!exited && platform !== 'win32') {

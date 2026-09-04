@@ -30,7 +30,7 @@ class FakeChild extends EventEmitter {
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const main = async () => {
-  const rawWindowsChild = pid => { const child = new EventEmitter(); child.pid = pid; child.exitCode = null; child.signalCode = null; child.stdin = new PassThrough(); return child; };
+  const rawWindowsChild = pid => { const child = new EventEmitter(); child.pid = pid; child.exitCode = null; child.signalCode = null; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); return child; };
   const invalidPidChild = rawWindowsChild(0); let invalidPidSettled = false;
   const invalidPidTermination = terminateAndWait(invalidPidChild, Date.now() + 200, { platform: 'win32' }).finally(() => { invalidPidSettled = true; });
   const invalidPidRejected = assert.rejects(invalidPidTermination, error => error.code === 'PROCESS_TREE_TERMINATION_FAILED' && error.cause?.code === 'PROCESS_TERMINATION_INVALID_PID');
@@ -40,10 +40,20 @@ const main = async () => {
   const neverClosedChild = rawWindowsChild(0); const neverClosedStartedAt = Date.now();
   await assert.rejects(terminateAndWait(neverClosedChild, Date.now() + 40, { platform: 'win32' }), error => error.code === 'PROCESS_TERMINATION_FAILED' && error.cause?.code === 'PROCESS_TERMINATION_INVALID_PID');
   assert(Date.now() - neverClosedStartedAt >= 30, 'raw helper termination failure must remain fenced until its total deadline');
+  assert.equal(neverClosedChild.listenerCount('exit'), 0); assert.equal(neverClosedChild.listenerCount('close'), 0, 'deadline fences must clean their listeners');
 
   const successfulTreeChild = rawWindowsChild(12345); let successfulTreeSettled = false;
   const successfulTreeTermination = terminateAndWait(successfulTreeChild, Date.now() + 200, { platform: 'win32', execFileImpl: (_file, _args, _options, callback) => callback(null) }).finally(() => { successfulTreeSettled = true; });
   successfulTreeChild.exitCode = 0; successfulTreeChild.emit('exit', 0, null); await delay(30); assert.equal(successfulTreeSettled, false, 'successful taskkill must still wait for raw helper close'); successfulTreeChild.emit('close', 0, null); await successfulTreeTermination;
+  assert.equal(successfulTreeChild.listenerCount('exit'), 0); assert.equal(successfulTreeChild.listenerCount('close'), 0);
+
+  const closeBeforeCallbackChild = rawWindowsChild(12346); let completeTaskkill;
+  const closeBeforeCallback = terminateAndWait(closeBeforeCallbackChild, Date.now() + 200, { platform: 'win32', execFileImpl: (_file, _args, _options, callback) => { completeTaskkill = callback; } });
+  closeBeforeCallbackChild.exitCode = 0; closeBeforeCallbackChild.emit('exit', 0, null); closeBeforeCallbackChild.emit('close', 0, null); await delay(5); completeTaskkill(null); await closeBeforeCallback;
+  assert.equal(closeBeforeCallbackChild.listenerCount('exit'), 0); assert.equal(closeBeforeCallbackChild.listenerCount('close'), 0, 'a pre-registered fence must survive close-before-taskkill-callback without leaking listeners');
+
+  const alreadyClosedChild = rawWindowsChild(12347); alreadyClosedChild.exitCode = 0; alreadyClosedChild.stdout.destroy(); alreadyClosedChild.stderr.destroy();
+  const alreadyClosedStartedAt = Date.now(); await terminateAndWait(alreadyClosedChild, Date.now() + 200, { platform: 'win32', execFileImpl: () => { throw new Error('taskkill must not run for an already closed child'); } }); assert(Date.now() - alreadyClosedStartedAt < 100, 'closed stdio plus terminal exit state must prove a pre-call close without waiting to deadline');
 
   const children = [];
   const logs = [];
