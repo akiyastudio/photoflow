@@ -121,7 +121,7 @@ const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs',
 assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
 assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath,[\s\S]*inspectComponentArchive\(packageSnapshotPath,[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath,/);
 assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive[\s\S]*captureComponentTreeIdentity/);
-assert.match(mainSource, /fs\.promises\.cp[\s\S]*verifyComponentTreeIdentity\(stagingPath[\s\S]*rename\(stagingPath, destination\)[\s\S]*verifyComponentTreeIdentity\(destination/);
+assert.match(mainSource, /fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity\(stagingPath[\s\S]*componentTransactions\.install/);
 assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-install-trust-'));

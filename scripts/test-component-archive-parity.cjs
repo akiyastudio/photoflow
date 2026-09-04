@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Transform } = require('node:stream');
-const { MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_PACKAGE_BYTES, componentTreeIdentityReceipt, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentTreeIdentityReceipt } = require('../electron/component-package-archive.cjs');
+const { MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_PACKAGE_BYTES, captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, componentTreeIdentityDigest, componentTreeIdentityReceipt, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentTreeIdentityReceipt } = require('../electron/component-package-archive.cjs');
 const { createComponentRegistry, readComponentPackageManifest } = require('../electron/component-registry.cjs');
 const { verifyComponentPackage } = require('./verify-component-packages.cjs');
 const { writeZip } = require('./test-helpers/zip-fixture.cjs');
@@ -53,6 +53,18 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     try { await assert.rejects(extractComponentArchive(outputRaceInspection, outputRaceRoot), /输出路径.*替换/); }
     finally { fs.promises.lstat = originalOutputLstat; }
 
+    writeZip(archive, base());
+    const trustedExtractRoot = path.join(root, 'trusted-extract');
+    const trustedExtract = await extractComponentArchive(inspectComponentArchive(archive), trustedExtractRoot);
+    const trustedSubtree = componentSubtreeIdentity(trustedExtract.treeIdentity, trustedExtract.manifestEntry);
+    const trustedComponentRoot = path.join(trustedExtractRoot, 'pkg');
+    fs.writeFileSync(path.join(trustedComponentRoot, 'worker.cjs'), 'module.exports = null;');
+    await assert.rejects(captureVerifiedComponentTreeIdentity(trustedComponentRoot, trustedSubtree, { includeNode: true }), /发生变化/);
+    fs.writeFileSync(path.join(trustedComponentRoot, 'worker.cjs'), 'module.exports = true;');
+    const copyRoot = path.join(root, 'copy-race'); fs.cpSync(trustedComponentRoot, copyRoot, { recursive: true });
+    fs.writeFileSync(path.join(copyRoot, 'worker.cjs'), 'module.exports = null;');
+    await assert.rejects(captureVerifiedComponentTreeIdentity(copyRoot, trustedSubtree), /发生变化/);
+
     const cases = [
       ['duplicate', [...base(), ['pkg/worker.cjs', 'again']]],
       ['case collision', [...base(), ['PKG/Worker.cjs', 'again']]],
@@ -89,6 +101,21 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     assert.equal(fs.existsSync(racedSnapshot), true, 'snapshot cleanup must not unlink a replacement it does not own');
     fs.rmSync(racedSnapshot); fs.rmSync(displacedSnapshot);
 
+    const rewrittenSnapshot = path.join(root, 'rewritten-after-sync.zip');
+    const originalOpen = fs.promises.open;
+    let rewrittenAfterSync = false;
+    fs.promises.open = async (target, ...args) => {
+      const opened = await originalOpen(target, ...args);
+      if (path.resolve(target) === path.resolve(rewrittenSnapshot)) {
+        const originalSync = opened.sync.bind(opened);
+        opened.sync = async () => { await originalSync(); if (!rewrittenAfterSync) { rewrittenAfterSync = true; const bytes = fs.readFileSync(rewrittenSnapshot); bytes[0] ^= 0xff; fs.writeFileSync(rewrittenSnapshot, bytes); } };
+      }
+      return opened;
+    };
+    try { await assert.rejects(snapshotComponentArchive(archive, rewrittenSnapshot), /输出内容与源文件不一致/); }
+    finally { fs.promises.open = originalOpen; }
+    assert.equal(fs.existsSync(rewrittenSnapshot), false, 'an in-place rewritten snapshot is rejected and its owned path is cleaned');
+
     const excessiveParents = path.join(root, 'excessive-implicit-parents.zip');
     writeZip(excessiveParents, [['component.json', manifest], ...Array.from({ length: 6_667 }, (_, index) => [`roots-${index}/a/b/file.bin`, ''])]);
     assert.throws(() => inspectComponentArchive(excessiveParents), /隐式目录数量|路径.*数量/);
@@ -107,18 +134,38 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     await assert.rejects(verifyComponentPackage(archive), /CRC-32/);
     const failedInspection = inspectComponentArchive(archive);
     const originalRm = fs.promises.rm;
-    fs.promises.rm = async (target, options) => { if (String(target).includes('.failed-')) throw Object.assign(new Error('injected cleanup denial'), { code: 'EACCES' }); return originalRm(target, options); };
+    let partialDeletionInjected = false;
+    fs.promises.rm = async (target, options) => {
+      if (!partialDeletionInjected && String(target).includes('.failed-')) {
+        partialDeletionInjected = true;
+        const victim = fs.readdirSync(target, { recursive: true }).map(relative => path.join(target, relative)).find(candidate => fs.lstatSync(candidate).isFile());
+        await originalRm(victim, { force: true });
+        throw Object.assign(new Error('injected partial cleanup denial'), { code: 'EACCES' });
+      }
+      return originalRm(target, options);
+    };
     let retainedRecoveryPath = '';
+    let retainedReceipt = null;
     try {
       await assert.rejects(extractComponentArchive(failedInspection, path.join(root, 'injected-cleanup-failure')), error => {
         retainedRecoveryPath = error.recoveryPath;
-        return error.code !== 'ENOENT' && Array.isArray(error.cleanupPendingPaths) && error.cleanupPendingPaths.includes(error.recoveryPath) && fs.existsSync(error.recoveryPath);
+        retainedReceipt = error.cleanupPendingReceipts?.[0];
+        return Array.isArray(error.cleanupPendingPaths) && error.cleanupPendingPaths.includes(error.recoveryPath) && retainedReceipt?.path === error.recoveryPath && fs.existsSync(error.recoveryPath);
       });
     } finally { fs.promises.rm = originalRm; }
-    await fs.promises.rm(retainedRecoveryPath, { recursive: true, force: false });
+    assert.equal(componentTreeIdentityDigest(await captureComponentTreeIdentity(retainedRecoveryPath)), retainedReceipt.treeDigest, 'partial cleanup persists a receipt for only the remaining subtree');
+    await cleanupOwnedComponentPath(retainedReceipt);
     assert.equal(fs.existsSync(retainedRecoveryPath), false, 'a retained quarantine converges when durable cleanup retries');
+    assert.equal((await cleanupOwnedComponentPath(retainedReceipt)).alreadyMissing, true, 'receipt-bound ENOENT retry converges without reprocessing deleted nodes');
+    await assert.rejects(cleanupOwnedComponentPath({ path: retainedRecoveryPath }), /缺少身份收据/);
+    const compactLargeTreeReceipt = { path: retainedRecoveryPath, kind: 'directory', nodeIdentity: { dev: 1, ino: 2, birthtimeMs: 3 }, treeDigest: componentTreeIdentityDigest(Array.from({ length: 6_000 }, (_, index) => ({ path: `f-${index}`, kind: 'file', size: 1, sha256: 'a'.repeat(64), node: { dev: 1, ino: index, birthtimeMs: 1 }, mode: 0o600 }))) };
+    assert(JSON.stringify(compactLargeTreeReceipt).length < 1_000, 'durable cleanup metadata remains O(1) for trees beyond 5,000 files');
     const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
     assert.match(systemIpcSource, /error\?\.cleanupPendingReceipts[\s\S]*pendingCleanup[\s\S]*queueSystemFilesystemCleanup\(pendingCleanup/);
+    assert.match(systemIpcSource, /filter\(candidate => candidate && typeof candidate === 'object'[\s\S]*candidate\.nodeIdentity/);
+    assert.doesNotMatch(systemIpcSource, /typeof candidate === 'string' \? \{ path:/, 'automatic cleanup has no raw-path fallback');
+    assert.match(systemIpcSource, /setTimeout\([\s\S]*run\(\)\.catch/, 'timer-launched cleanup routes failures into a promise rejection handler');
+    assert.match(systemIpcSource, /assertInstallActive\(\);[\s\S]*fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity[\s\S]*assertInstallActive\(\)/, 'deadline checks bracket copy and receipt verification');
 
     const volume = await fs.promises.statfs(root, { bigint: true });
     const moreThanHalf = Number((volume.bavail * volume.bsize / 2n) + 1n);

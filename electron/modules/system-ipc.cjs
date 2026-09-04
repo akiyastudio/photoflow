@@ -5,7 +5,7 @@ const { componentDataRoot, createComponentLifecycleService } = require('../servi
 const { createComponentTransactionService, nodeIdentity: componentPathIdentity } = require('../services/component-transaction-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
-const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
+const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, componentTreeIdentityDigest, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 const { validateComponentPackageInspection } = require('../component-registry.cjs');
 
@@ -610,7 +610,7 @@ const registerSystemIpc = context => {
   const queueSystemFilesystemCleanup = (paths, title, restartTask = null) => {
     const allowedRoots = [app.getPath('temp'), app.getPath('userData'), pluginService.installRoot].filter(Boolean).map(candidate => path.resolve(candidate));
     const seenTargets = new Set();
-    const targets = (paths || []).filter(Boolean).map(candidate => typeof candidate === 'string' ? { path: path.resolve(candidate) } : { ...candidate, path: path.resolve(candidate.path) }).filter(target => !seenTargets.has(target.path) && allowedRoots.some(root => {
+    const targets = (paths || []).filter(candidate => candidate && typeof candidate === 'object' && !candidate.manualRecovery && candidate.nodeIdentity && ['file', 'directory'].includes(candidate.kind)).map(candidate => ({ ...candidate, path: path.resolve(candidate.path) })).filter(target => !seenTargets.has(target.path) && allowedRoots.some(root => {
       const relative = path.relative(root, target.path);
       return relative && !relativePathEscapes(path, relative);
     }) && (seenTargets.add(target.path) || true));
@@ -619,29 +619,14 @@ const registerSystemIpc = context => {
       task?.report(10, title);
       const failures = [];
       for (const target of targets) try {
-        if (target.nodeIdentity) {
-          const stat = await fs.promises.lstat(target.path);
-          if (stat.isSymbolicLink() || !sameDirectoryNode(target.nodeIdentity, directoryNodeIdentity(stat))) throw new Error('持久清理目标身份已变化');
-          if (target.kind === 'directory') {
-            if (!stat.isDirectory() || !Array.isArray(target.treeIdentity)) throw new Error('持久清理目录收据无效');
-            await verifyComponentTreeIdentity(target.path, target.treeIdentity, { includeNode: true });
-            const isolatedPath = `${target.path}.cleanup-${crypto.randomUUID()}`;
-            await fs.promises.rename(target.path, isolatedPath);
-            try {
-              await assertDirectoryNodeIdentity(fs, isolatedPath, target.nodeIdentity, '持久清理隔离目录');
-              await verifyComponentTreeIdentity(isolatedPath, target.treeIdentity, { includeNode: true });
-              await fs.promises.rm(isolatedPath, { recursive: true, force: false });
-            } catch (cleanupError) {
-              const originalOccupant = await fs.promises.lstat(target.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
-              if (!originalOccupant) await fs.promises.rename(isolatedPath, target.path).catch(restoreError => { cleanupError.message = `${cleanupError.message || String(cleanupError)}；隔离清理路径恢复失败：${restoreError.message || String(restoreError)}`; });
-              throw cleanupError;
-            }
-          } else {
-            if (!stat.isFile()) throw new Error('持久清理文件收据无效');
-            await fs.promises.unlink(target.path);
-          }
-        } else await fs.promises.rm(target.path, { recursive: true, force: true });
-      } catch (error) { failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
+        await cleanupOwnedComponentPath(target);
+      } catch (error) {
+        const updated = error.cleanupPendingReceipts?.[0];
+        if (updated) Object.assign(target, updated);
+        task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets });
+        failures.push({ target, error });
+        writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) });
+      }
       if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
       task?.report(100, '清理完成');
       return { removedCount: targets.length };
@@ -981,6 +966,7 @@ const registerSystemIpc = context => {
       if (!archiveStat.isFile() || archiveStat.isSymbolicLink()) throw new Error('组件包必须是普通文件且不能是链接');
       capacityReservation = await reserveComponentInstallCapacity(app.getPath('temp'), archiveStat.size + 128 * 1024 * 1024);
       const operation = { signal: installAbortController.signal, deadlineAt: Date.now() + 5 * 60 * 1000 };
+      const assertInstallActive = () => { if (operation.signal.aborted) throw Object.assign(new Error('组件安装已取消'), { name: 'AbortError' }); if (Date.now() >= operation.deadlineAt) throw Object.assign(new Error('组件安装超时'), { name: 'AbortError' }); };
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
       packageSnapshotPath = `${packageStagePath}.zip`;
       const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath, operation);
@@ -1022,7 +1008,7 @@ const registerSystemIpc = context => {
       const integrityToken = pluginService.componentIntegrityToken(componentId, componentRoot);
       const extractedIntegrityStatus = integrityToken.startsWith('integrity|') ? 'pinned-unverified' : integrityToken.startsWith('metadata|') ? 'unsigned' : 'invalid';
       if (extractedIntegrityStatus !== snapshotTrust.integrityStatus) throw new Error('组件快照完整性状态在解压后发生变化');
-      componentTreeIdentity = await captureComponentTreeIdentity(componentRoot, operation);
+      componentTreeIdentity = componentSubtreeIdentity(extractedPackage.treeIdentity, extractedPackage.manifestEntry);
       await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity, { ...operation, includeNode: true });
       const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
       await installVolumeReservation.resize((componentSizeBytes * 2) + 128 * 1024 * 1024);
@@ -1033,10 +1019,11 @@ const registerSystemIpc = context => {
       const { installRoot, container } = installLocation;
       const destination = path.join(container, 'runtime');
       stagingPath = path.join(installRoot, `.${componentId}-install-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
+      assertInstallActive();
       await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
       stagingNodeIdentity = await readDirectoryNodeIdentity(fs, stagingPath, '组件发布暂存目录');
-      await verifyComponentTreeIdentity(stagingPath, componentTreeIdentity);
-      componentTreeIdentity = await captureComponentTreeIdentity(stagingPath);
+      componentTreeIdentity = await captureVerifiedComponentTreeIdentity(stagingPath, componentTreeIdentity);
+      assertInstallActive();
       await assertDirectoryNodeIdentity(fs, installRoot, installLocation.rootIdentity, '组件安装根目录');
       await assertDirectoryNodeIdentity(fs, container, installLocation.containerIdentity, '组件容器');
       const previous = pluginService.list().find(item => item.id === componentId);
@@ -1049,7 +1036,7 @@ const registerSystemIpc = context => {
         onAdmitted: () => { stagingPath = ''; stagingNodeIdentity = null; },
       });
       const cleanupPaths = [
-        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeIdentity: packageStageTreeIdentity } : null,
+        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
         packageSnapshotPath && packageSnapshotNodeIdentity ? { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity } : null,
       ].filter(Boolean);
       packageStagePath = '';

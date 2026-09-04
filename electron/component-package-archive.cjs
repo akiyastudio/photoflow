@@ -138,7 +138,7 @@ const snapshotComponentArchive = async (sourcePath, targetPath, options = {}) =>
     const before = await handle.stat();
     const identity = fileIdentity(before);
     if (!before.isFile() || !sameFileIdentity(identity, fileIdentity(sourceLstat))) throw new Error('组件包在快照前被替换或修改');
-    targetHandle = await fs.promises.open(targetPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+    targetHandle = await fs.promises.open(targetPath, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
     const hash = crypto.createHash('sha256');
     const digestStream = new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); hash.update(chunk); callback(null, chunk); } catch (error) { callback(error); } } });
     await pipeline(handle.createReadStream({ autoClose: false }), digestStream, fs.createWriteStream(null, { fd: targetHandle.fd, autoClose: false }), operation.signal ? { signal: operation.signal } : {});
@@ -146,10 +146,14 @@ const snapshotComponentArchive = async (sourcePath, targetPath, options = {}) =>
     if (!sameFileIdentity(identity, fileIdentity(await handle.stat()))) throw new Error('组件包在快照期间被修改');
     const afterPath = await fs.promises.lstat(resolvedSource);
     if (!afterPath.isFile() || afterPath.isSymbolicLink() || !sameFileIdentity(identity, fileIdentity(afterPath))) throw new Error('组件包在快照期间被替换或修改');
+    const sourceSha256 = hash.digest('hex');
     const snapshotIdentity = fileIdentity(await targetHandle.stat());
+    const outputHash = crypto.createHash('sha256');
+    await pipeline(targetHandle.createReadStream({ autoClose: false, start: 0, end: snapshotIdentity.size - 1 }), new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); outputHash.update(chunk); callback(); } catch (error) { callback(error); } } }), operation.signal ? { signal: operation.signal } : {});
+    if (!sameFileIdentity(snapshotIdentity, fileIdentity(await targetHandle.stat())) || outputHash.digest('hex') !== sourceSha256) throw new Error('组件包快照输出内容与源文件不一致');
     const targetPathStat = await fs.promises.lstat(targetPath);
     if (!targetPathStat.isFile() || targetPathStat.isSymbolicLink() || snapshotIdentity.size !== identity.size || !sameFileIdentity(snapshotIdentity, fileIdentity(targetPathStat))) throw new Error('组件包快照输出在写入期间被替换或截断');
-    return Object.freeze({ ...identity, bytes: identity.size, sha256: hash.digest('hex'), inspectionToken: Object.freeze({ [SNAPSHOT_TOKEN]: true, archivePath: path.resolve(targetPath), identity: snapshotIdentity }) });
+    return Object.freeze({ ...identity, bytes: identity.size, sha256: sourceSha256, inspectionToken: Object.freeze({ [SNAPSHOT_TOKEN]: true, archivePath: path.resolve(targetPath), identity: snapshotIdentity }) });
   } catch (error) {
     try {
       const outputIdentity = targetHandle ? fileIdentity(await targetHandle.stat()) : null;
@@ -441,9 +445,15 @@ const extractComponentArchive = async (inspection, targetRoot, options = {}) => 
         try { cleanupTreeIdentity = await captureComponentTreeIdentity(quarantine); await fs.promises.rm(quarantine, { recursive: true, force: false }); }
         catch (cleanupError) {
           error.message = `${error.message || String(error)}；失败暂存目录未通过安全清理检查，已保留：${cleanupError.message || String(cleanupError)}`;
-          error.recoveryPath = quarantine;
-          error.cleanupPendingPaths = [...new Set([...(Array.isArray(error.cleanupPendingPaths) ? error.cleanupPendingPaths : []), quarantine])];
-          if (cleanupTreeIdentity) error.cleanupPendingReceipts = [...(Array.isArray(error.cleanupPendingReceipts) ? error.cleanupPendingReceipts : []), { path: quarantine, kind: 'directory', nodeIdentity: rootIdentity, treeIdentity: cleanupTreeIdentity }];
+          const remaining = await fs.promises.lstat(quarantine).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError));
+          if (remaining) {
+            error.recoveryPath = quarantine;
+            error.cleanupPendingPaths = [...new Set([...(Array.isArray(error.cleanupPendingPaths) ? error.cleanupPendingPaths : []), quarantine])];
+            if (remaining.isDirectory() && !remaining.isSymbolicLink() && sameNodeIdentity(rootIdentity, nodeIdentity(remaining))) {
+              const remainingTreeIdentity = await captureComponentTreeIdentity(quarantine);
+              error.cleanupPendingReceipts = [...(Array.isArray(error.cleanupPendingReceipts) ? error.cleanupPendingReceipts : []), { path: quarantine, kind: 'directory', nodeIdentity: rootIdentity, treeDigest: componentTreeIdentityDigest(remainingTreeIdentity) }];
+            }
+          }
         }
       }
     }
@@ -536,13 +546,52 @@ const compareComponentTreeIdentity = (actual, expected, { includeNode = false } 
   const portable = entries => entries.map(entry => includeNode ? entry : (({ node: _node, ...value }) => value)(entry));
   return JSON.stringify(portable(actual)) === JSON.stringify(portable(expected));
 };
+const componentTreeIdentityDigest = (entries, { includeNode = true } = {}) => {
+  const normalized = includeNode ? entries : entries.map(({ node: _node, ...entry }) => entry);
+  return crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+};
 const componentTreeIdentityReceipt = entries => validateComponentTreeIdentityReceipt({ schemaVersion: COMPONENT_TREE_IDENTITY_SCHEMA_VERSION, entries });
-const verifyComponentTreeIdentity = async (root, expected, options = {}) => {
+const componentSubtreeIdentity = (entries, manifestEntry) => {
+  const manifestDirectory = path.posix.dirname(normalizeName(manifestEntry));
+  if (manifestDirectory === '.') return entries.map(entry => ({ ...entry }));
+  const prefix = `${manifestDirectory}/`;
+  const subtree = entries.filter(entry => entry.path.startsWith(prefix)).map(entry => ({ ...entry, path: entry.path.slice(prefix.length) }));
+  if (!subtree.length || !subtree.some(entry => entry.path === 'component.json' && entry.kind === 'file')) throw new Error('组件清单子树身份收据无效');
+  return subtree;
+};
+const captureVerifiedComponentTreeIdentity = async (root, expected, options = {}) => {
   let actual;
   try { actual = await captureComponentTreeIdentity(root, options); }
   catch (error) { throw new Error(`组件文件在确认或复制期间发生变化：${error.message || String(error)}`); }
   if (!compareComponentTreeIdentity(actual, expected, { includeNode: options.includeNode === true })) throw new Error('组件文件在确认或复制期间发生变化');
+  return actual;
+};
+const verifyComponentTreeIdentity = async (root, expected, options = {}) => {
+  await captureVerifiedComponentTreeIdentity(root, expected, options);
   return true;
+};
+const cleanupOwnedComponentPath = async receipt => {
+  if (!receipt || typeof receipt.path !== 'string' || !receipt.nodeIdentity || !['file', 'directory'].includes(receipt.kind)) throw new Error('拒绝清理缺少身份收据的组件路径');
+  const target = { ...receipt, path: path.resolve(receipt.path) };
+  const stat = await fs.promises.lstat(target.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  if (!stat) return { cleaned: true, alreadyMissing: true };
+  if (stat.isSymbolicLink() || !sameNodeIdentity(target.nodeIdentity, nodeIdentity(stat))) throw Object.assign(new Error('组件清理目标身份已变化'), { recoveryPath: target.path });
+  if (target.kind === 'file') { if (!stat.isFile()) throw new Error('组件清理文件收据无效'); await fs.promises.unlink(target.path); return { cleaned: true }; }
+  if (!stat.isDirectory() || !/^[a-f0-9]{64}$/.test(target.treeDigest || '') || componentTreeIdentityDigest(await captureComponentTreeIdentity(target.path)) !== target.treeDigest) throw Object.assign(new Error('组件清理目录收据与当前内容不一致'), { recoveryPath: target.path });
+  const isolatedPath = `${target.path}.cleanup-${crypto.randomUUID()}`;
+  await fs.promises.rename(target.path, isolatedPath);
+  try {
+    const isolated = await fs.promises.lstat(isolatedPath);
+    if (!isolated.isDirectory() || isolated.isSymbolicLink() || !sameNodeIdentity(target.nodeIdentity, nodeIdentity(isolated)) || componentTreeIdentityDigest(await captureComponentTreeIdentity(isolatedPath)) !== target.treeDigest) throw new Error('组件清理隔离目录身份无效');
+    await fs.promises.rm(isolatedPath, { recursive: true, force: false });
+    return { cleaned: true };
+  } catch (error) {
+    const remaining = await fs.promises.lstat(isolatedPath).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError));
+    if (!remaining) return { cleaned: true };
+    if (!remaining.isDirectory() || remaining.isSymbolicLink() || !sameNodeIdentity(target.nodeIdentity, nodeIdentity(remaining))) throw Object.assign(error, { recoveryPath: isolatedPath });
+    const updated = { ...target, path: isolatedPath, treeDigest: componentTreeIdentityDigest(await captureComponentTreeIdentity(isolatedPath)) };
+    throw Object.assign(error, { recoveryPath: isolatedPath, cleanupPendingPaths: [isolatedPath], cleanupPendingReceipts: [updated] });
+  }
 };
 
 module.exports = {
@@ -554,8 +603,12 @@ module.exports = {
   COMPONENT_TREE_IDENTITY_SCHEMA_VERSION,
   assertAvailableDiskSpace,
   captureComponentTreeIdentity,
+  captureVerifiedComponentTreeIdentity,
   compareComponentTreeIdentity,
+  cleanupOwnedComponentPath,
   componentTreeIdentityReceipt,
+  componentTreeIdentityDigest,
+  componentSubtreeIdentity,
   extractComponentArchive,
   inspectComponentArchive,
   reserveComponentInstallCapacity,
