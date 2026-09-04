@@ -204,6 +204,12 @@ const restoreManifestDirectory = () => {
 
     const isolatedStatus = await invoke('team.workflow.status.v1');
     assert.equal(isolatedStatus.reconciliation.pendingCount, 0, 'workflow status ignores an identically named task pending in another project');
+    const cleanupReceiptPath = path.join(dataRoot, 'output-cleanup', `${projectStorageKey}.json`); fs.mkdirSync(path.dirname(cleanupReceiptPath), { recursive: true });
+    const cleanupReceipt = JSON.stringify({ version: 1, projectId: 'project', pending: [{ relativePath: '团片协作/stale.png', commitId: 'old', artifactId: 'old-artifact', sha256: 'old-digest' }] }); fs.writeFileSync(cleanupReceiptPath, cleanupReceipt);
+    const outputCallsBeforeStatus = capabilityCounts.get('project.output') || 0;
+    await invoke('team.workflow.status.v1');
+    assert.equal(capabilityCounts.get('project.output') || 0, outputCallsBeforeStatus, 'workflow status is a pure read and never drains Host output');
+    assert.equal(fs.readFileSync(cleanupReceiptPath, 'utf8'), cleanupReceipt, 'workflow status never rewrites or drops cleanup receipts'); fs.rmSync(cleanupReceiptPath, { force: true });
     const isolatedWorkspace = await invoke('team.project.get.v1');
     assert.equal(isolatedWorkspace.success, true);
     assert.equal((await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 })).state, 'ready');
@@ -291,7 +297,8 @@ const restoreManifestDirectory = () => {
     missingAfterDb.prepare('UPDATE team_workflow_reconcile_pending SET next_attempt_at=0 WHERE task_id=?').run('task-1');
     missingAfterDb.close();
     fs.renameSync(missingManifestBackup, manifestPath);
-    assert.equal((await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 })).state, 'ready');
+    const restoredManifestDrain = await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
+    assert.equal(restoredManifestDrain.state, 'ready', JSON.stringify(restoredManifestDrain));
 
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
     await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });

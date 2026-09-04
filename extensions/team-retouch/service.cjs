@@ -14,6 +14,7 @@ const DB_BUSY_TIMEOUT_MS = 750;
 const RETURN_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp']);
 const pendingCapabilities = new Map();
 const activeAlgorithms = new Set();
+const unconfirmedAlgorithmTrees = new Set();
 const workflowJobs = new Map();
 const photoOperations = new Map();
 const reviewSessionOperations = new Map();
@@ -123,6 +124,7 @@ const assertDecodableImage = filePath => {
 // the short, synchronous rename/link/delete sequence is in flight. Expensive
 // copies always happen before this fence into request-unique staging paths.
 const withPersistentFileFence = (action, providedDb = null) => {
+  assertNotAborted(revisionRequestContext.getStore()?.signal);
   const requestId = String(revisionRequestContext.getStore()?.requestId || '');
   if (!requestId) return action();
   const state = projectRevisionLeaseStates.get(requestId);
@@ -234,6 +236,7 @@ const replaceJsonAtomic = async (filePath, value) => {
 };
 
 const callHost = async (parentId, method, payload = {}) => {
+  assertNotAborted(revisionRequestContext.getStore()?.signal);
   await assertCurrentRevisionLease();
   return new Promise((resolve, reject) => {
   const id = `cap-${nextCapabilityId++}`;
@@ -347,6 +350,7 @@ const outputOutboxFingerprint = ({ idempotencyKey, files }) => sha256(JSON.strin
   files: files.map(file => ({ outputRelativePath: String(file.outputRelativePath), digest: String(file.digest), replacement: file.replacement || null })),
 }));
 const readOutputOutbox = (db, projectId, fingerprint) => db.prepare('SELECT * FROM team_output_outbox WHERE project_id=? AND fingerprint=?').get(String(projectId), String(fingerprint));
+const readOutputOutboxByKey = (db, projectId, idempotencyKey) => db.prepare('SELECT * FROM team_output_outbox WHERE project_id=? AND idempotency_key=?').get(String(projectId), String(idempotencyKey));
 const updateOutputOutbox = (db, projectId, fingerprint, state, values = {}) => {
   db.prepare(`UPDATE team_output_outbox SET state=?,stage_id=COALESCE(?,stage_id),receipt_json=COALESCE(?,receipt_json),result_json=COALESCE(?,result_json),last_error=?,updated_at=? WHERE project_id=? AND fingerprint=?`)
     .run(state, values.stageId === undefined ? null : String(values.stageId), values.receipt === undefined ? null : JSON.stringify(values.receipt), values.result === undefined ? null : JSON.stringify(values.result), String(values.error || ''), Date.now(), String(projectId), String(fingerprint));
@@ -354,10 +358,19 @@ const updateOutputOutbox = (db, projectId, fingerprint, state, values = {}) => {
 const prepareOutputOutbox = async (parentId, files, idempotencyKey, kind = 'project-output') => {
   const storage = await hostStorage(parentId); const projectId = String(storage.projectId || activeProjectId());
   if (!projectId) throw new Error('Host component storage is missing the bound project id');
+  const db = ensureSchema(storage.databasePath);
+  const byKey = readOutputOutboxByKey(db, projectId, idempotencyKey);
+  if (byKey) {
+    const storedSources = parseJson(byKey.source_json, []); const storedTargets = parseJson(byKey.target_json, []);
+    db.close();
+    const described = storedTargets.map((target, index) => ({ sourcePath: storedSources[index]?.sourcePath || files[index]?.sourcePath || '', digest: storedSources[index]?.digest || '', outputRelativePath: target.outputRelativePath, replacement: target.replacement || null }));
+    const incomingTargets = files.map(file => ({ outputRelativePath: String(file.outputRelativePath), replacement: file.replacement || null }));
+    if (JSON.stringify(incomingTargets) !== JSON.stringify(storedTargets)) throw Object.assign(new Error('Host output idempotency key is already bound to another publication plan'), { code: 'COMPONENT_OUTPUT_IDEMPOTENCY_CONFLICT' });
+    return { storage, projectId, fingerprint: byKey.fingerprint, files: described, row: byKey };
+  }
   const described = [];
   for (const file of files) described.push({ ...file, digest: await fileSha256(file.sourcePath), replacement: file.replacement || null });
   const fingerprint = outputOutboxFingerprint({ idempotencyKey, files: described });
-  const db = ensureSchema(storage.databasePath);
   try {
     const existing = readOutputOutbox(db, projectId, fingerprint);
     if (!existing) db.prepare(`INSERT INTO team_output_outbox(project_id,id,kind,fingerprint,idempotency_key,state,stage_id,source_json,target_json,receipt_json,result_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,'planned','',?,?,'{}','{}','',?,?)`)
@@ -365,16 +378,26 @@ const prepareOutputOutbox = async (parentId, files, idempotencyKey, kind = 'proj
     return { storage, projectId, fingerprint, files: described, row: readOutputOutbox(db, projectId, fingerprint) };
   } finally { db.close(); }
 };
+const validateOutputReceipt = (record, receipt) => {
+  if (!receipt?.commitId || String(receipt.idempotencyKey || '') !== String(record.row.idempotency_key)) throw Object.assign(new Error('Host output receipt key or commit is invalid'), { code: 'COMPONENT_OUTPUT_RECEIPT_MISMATCH' });
+  const outputs = Array.isArray(receipt.outputs) ? receipt.outputs : [];
+  if (outputs.length !== record.files.length) throw Object.assign(new Error('Host output receipt item count does not match the plan'), { code: 'COMPONENT_OUTPUT_RECEIPT_MISMATCH' });
+  for (const file of record.files) {
+    const output = outputs.find(item => String(item.relativePath) === String(file.outputRelativePath));
+    if (!output?.artifactId || String(output.sha256 || '').toLowerCase() !== String(file.digest || '').toLowerCase()) throw Object.assign(new Error(`Host output receipt does not match ${file.outputRelativePath}`), { code: 'COMPONENT_OUTPUT_RECEIPT_MISMATCH' });
+  }
+  return receipt;
+};
 const outboxState = async (record, state, values = {}) => {
   const db = ensureSchema(record.storage.databasePath);
   try { updateOutputOutbox(db, record.projectId, record.fingerprint, state, values); record.row = readOutputOutbox(db, record.projectId, record.fingerprint); }
   finally { db.close(); }
 };
 
-const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null) => {
-  const record = await prepareOutputOutbox(parentId, [{ sourcePath, outputRelativePath, replacement }], idempotencyKey);
+const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null, kind = 'project-output') => {
+  const record = await prepareOutputOutbox(parentId, [{ sourcePath, outputRelativePath, replacement }], idempotencyKey, kind);
   const priorReceipt = parseJson(record.row.receipt_json, {});
-  if (record.row.state === 'completed' || Object.keys(priorReceipt).length) return attachOutputOutbox(priorReceipt, record);
+  if (record.row.state === 'completed' || Object.keys(priorReceipt).length) return attachOutputOutbox(validateOutputReceipt(record, priorReceipt), record);
   let stage = record.row.stage_id ? { stageId: record.row.stage_id, privatePath: parseJson(record.row.result_json, {}).stagePrivatePath } : null;
   try {
     if (!stage?.stageId) {
@@ -392,7 +415,7 @@ const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idem
     }
     await outboxState(record, 'commit_inflight');
     const receipt = await callHost(parentId, 'project.output', { action: 'commit', stageId: stage.stageId, idempotencyKey });
-    await outboxState(record, 'output_committed', { receipt });
+    validateOutputReceipt(record, receipt); await outboxState(record, 'output_committed', { receipt });
     return attachOutputOutbox(receipt, record);
   } catch (error) { await outboxState(record, record.row.state || 'planned', { error: error.message || String(error) }).catch(() => undefined); throw error; }
   finally { if (stage?.stageId && parseJson(record.row.receipt_json, {})?.commitId) void callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
@@ -400,7 +423,7 @@ const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idem
 const publishProjectFiles = async (parentId, files, idempotencyKey, replacements = new Map()) => {
   const record = await prepareOutputOutbox(parentId, files.map(file => ({ ...file, replacement: replacements.get(file.outputRelativePath) || null })), idempotencyKey, 'workflow-output');
   const priorReceipt = parseJson(record.row.receipt_json, {});
-  if (record.row.state === 'completed' || Object.keys(priorReceipt).length) return attachOutputOutbox(priorReceipt, record);
+  if (record.row.state === 'completed' || Object.keys(priorReceipt).length) return attachOutputOutbox(validateOutputReceipt(record, priorReceipt), record);
   let stage = record.row.stage_id ? { stageId: record.row.stage_id, privatePath: parseJson(record.row.result_json, {}).stagePrivatePath } : null;
   try {
     if (!stage?.stageId) { stage = await callHost(parentId, 'project.output', { action: 'stage' }); await outboxState(record, 'host_staging', { stageId: stage.stageId, result: { stagePrivatePath: stage.privatePath } }); }
@@ -417,7 +440,7 @@ const publishProjectFiles = async (parentId, files, idempotencyKey, replacements
     }
     await outboxState(record, 'commit_inflight');
     const receipt = await callHost(parentId, 'project.output', { action: 'commit', stageId: stage.stageId, idempotencyKey });
-    await outboxState(record, 'output_committed', { receipt }); return attachOutputOutbox(receipt, record);
+    validateOutputReceipt(record, receipt); await outboxState(record, 'output_committed', { receipt }); return attachOutputOutbox(receipt, record);
   } catch (error) { await outboxState(record, record.row.state || 'planned', { error: error.message || String(error) }).catch(() => undefined); throw error; }
   finally { if (stage?.stageId && parseJson(record.row.receipt_json, {})?.commitId) void callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
 };
@@ -425,36 +448,94 @@ const createVersionFromOutput = async (parentId, committed, payload) => {
   const record = committed?.[OUTPUT_OUTBOX];
   if (!record) return callHost(parentId, 'version.create', payload);
   const stored = parseJson(record.row.result_json, {});
+  if (stored.versionPayload && JSON.stringify(stored.versionPayload) !== JSON.stringify(payload)) throw Object.assign(new Error('Version idempotency tuple conflicts with the persisted output plan'), { code: 'COMPONENT_VERSION_IDEMPOTENCY_CONFLICT' });
   if (stored.versionResult?.versionId) return stored.versionResult;
   await outboxState(record, 'version_inflight', { result: { ...stored, versionPayload: payload } });
   const result = await callHost(parentId, 'version.create', payload);
-  await outboxState(record, 'version_committed', { result: { ...parseJson(record.row.result_json, {}), versionPayload: payload, versionResult: result } });
+  if (!result?.versionId || (result.result?.photo?.id && String(result.result.photo.id) !== String(payload.photoId))) throw Object.assign(new Error('Host version receipt does not match the planned photo tuple'), { code: 'COMPONENT_VERSION_RECEIPT_MISMATCH' });
+  await outboxState(record, 'domain_pending', { result: { ...parseJson(record.row.result_json, {}), versionPayload: payload, versionResult: result } });
   return result;
 };
 const completeOutputPublication = async committed => {
   const record = committed?.[OUTPUT_OUTBOX];
-  if (record) await outboxState(record, 'completed');
+  if (record) { await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); }
 };
-const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRelativePath, operationKey) => {
+const recoverProjectOutputOutbox = async (parentId, context, limit = 20) => {
+  const storage = await hostStorage(parentId); const db = ensureSchema(storage.databasePath); let rows;
+  try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY created_at LIMIT ?").all(String(context.projectId), Math.max(1, Number(limit) || 1)); }
+  finally { db.close(); }
+  let recovered = 0;
+  for (const row of rows) {
+    assertNotAborted(context.signal);
+    const sources = parseJson(row.source_json, []); const targets = parseJson(row.target_json, []);
+    const record = { storage, projectId: String(context.projectId), fingerprint: row.fingerprint, row, files: targets.map((target, index) => ({ ...target, sourcePath: sources[index]?.sourcePath || '', digest: sources[index]?.digest || '' })) };
+    let receipt = parseJson(row.receipt_json, {});
+    if (['host_staged','commit_inflight'].includes(row.state)) {
+      await outboxState(record, 'commit_inflight');
+      receipt = await callHost(parentId, 'project.output', { action: 'commit', stageId: row.stage_id, idempotencyKey: row.idempotency_key });
+      validateOutputReceipt(record, receipt); await outboxState(record, 'output_committed', { receipt });
+    }
+    if (row.kind === 'working-output' && receipt.commitId) {
+      const output = receipt.outputs?.[0]; let result = parseJson(record.row.result_json, {}); let materialized = result.materialized;
+      if (!materialized?.privatePath) {
+        materialized = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: receipt.commitId, artifactId: output.artifactId });
+        result = { ...result, materialized }; await outboxState(record, 'domain_pending', { result });
+      }
+      const outputRelativePath = targets[0]?.outputRelativePath; const ledgerPath = result.ledgerPath || path.join(storage.dataPath, 'output-ownership', sha256(String(storage.projectId)), 'working-images.json');
+      const ledger = await readJson(ledgerPath, {}); ledger[outputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+      await replaceJsonAtomic(ledgerPath, ledger); await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1; continue;
+    }
+    let result = parseJson(record.row.result_json, {});
+    if (row.kind === 'workflow-output' && result.workflow) {
+      const manifest = await readJson(result.workflow.manifestPath, null);
+      if (manifest && String(manifest.projectId) === String(context.projectId) && Number(manifest.generatedAt) === Number(result.workflow.generatedAt) && String(manifest.fingerprint) === String(result.workflow.fingerprint)) {
+        const domainDb = ensureSchema(storage.databasePath);
+        try { domainDb.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(manifest.generatedAt), String(manifest.fingerprint), Date.now()); }
+        finally { domainDb.close(); }
+        await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1; continue;
+      }
+    }
+    if (row.kind === 'merge-output' && result.versionPayload && !result.versionResult?.versionId) {
+      const versionResult = await callHost(parentId, 'version.create', result.versionPayload);
+      if (!versionResult?.versionId || (versionResult.result?.photo?.id && String(versionResult.result.photo.id) !== String(result.versionPayload.photoId))) throw Object.assign(new Error('Recovered Host version receipt mismatched the persisted tuple'), { code: 'COMPONENT_VERSION_RECEIPT_MISMATCH' });
+      result = { ...result, versionResult }; await outboxState(record, 'domain_pending', { result });
+    }
+    if (row.kind === 'merge-output' && result.versionResult?.versionId && result.versionPayload) {
+      const domainDb = ensureSchema(storage.databasePath);
+      try {
+        domainDb.exec('BEGIN IMMEDIATE');
+        domainDb.prepare("UPDATE team_patch_tasks SET status='merged',merged_version_id=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND is_deleted=0").run(String(result.versionResult.versionId), Date.now(), String(context.projectId), String(result.versionPayload.photoId), String(result.versionPayload.parentVersionId));
+        domainDb.exec('COMMIT');
+      } catch (error) { try { domainDb.exec('ROLLBACK'); } catch {} throw error; }
+      finally { domainDb.close(); }
+      await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1;
+    }
+  }
+  return { attempted: rows.length, recovered, pending: rows.length - recovered };
+};
+const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRelativePath) => {
   const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
   const outputRelativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(sourcePath)].filter(Boolean).join('/');
   const ledgerPath = path.join(storage.dataPath, 'output-ownership', sha256(String(storage.projectId)), 'working-images.json'); const ledger = await readJson(ledgerPath, {});
   const previous = ledger[outputRelativePath] || null;
-  const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(operationKey).slice(0, 24)}`, previous);
+  const sourceDigest = await fileSha256(sourcePath);
+  const stableBusinessKey = `${storage.projectId}\0${normalizedBase}\0${outputRelativePath}\0${sourceDigest}\0${JSON.stringify(previous || null)}`;
+  const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(stableBusinessKey).slice(0, 40)}`, previous, 'working-output');
   const output = committed.outputs[0]; const record = committed[OUTPUT_OUTBOX]; let imported = parseJson(record?.row?.result_json, {}).materialized;
   if (!imported?.privatePath) {
     if (record) await outboxState(record, 'materialize_inflight', { result: { ...parseJson(record.row.result_json, {}) } });
     imported = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: committed.commitId, artifactId: output.artifactId });
     if (record) await outboxState(record, 'materialized', { result: { ...parseJson(record.row.result_json, {}), materialized: imported } });
   }
+  if (record) await outboxState(record, 'domain_pending', { result: { ...parseJson(record.row.result_json, {}), materialized: imported, ledgerPath, outputRelativePath } });
   ledger[outputRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
   await replaceJsonAtomic(ledgerPath, ledger);
   await completeOutputPublication(committed);
   return { privatePath: imported.privatePath, outputRelativePath, ownership: ledger[outputRelativePath] };
 };
-const publishWorkingImage = (parentId, storage, sourcePath, baseRelativePath, operationKey) => withKeyedOperation(
+const publishWorkingImage = (parentId, storage, sourcePath, baseRelativePath) => withKeyedOperation(
   workingOwnershipOperations, String(storage.projectId),
-  () => publishWorkingImageUnlocked(parentId, storage, sourcePath, baseRelativePath, operationKey),
+  () => publishWorkingImageUnlocked(parentId, storage, sourcePath, baseRelativePath),
 );
 
 const ensureSchema = databasePath => {
@@ -618,6 +699,7 @@ const ensureSchema = databasePath => {
     CREATE UNIQUE INDEX IF NOT EXISTS team_confirmation_project_return ON team_workflow_review_confirmations(project_id,review_session_id,return_id);
     CREATE UNIQUE INDEX IF NOT EXISTS team_operation_project_id ON team_durable_operations(project_id,id);
     CREATE UNIQUE INDEX IF NOT EXISTS team_output_outbox_fingerprint ON team_output_outbox(project_id,fingerprint);
+    CREATE UNIQUE INDEX IF NOT EXISTS team_output_outbox_idempotency ON team_output_outbox(project_id,idempotency_key);
     CREATE INDEX IF NOT EXISTS team_cleanup_outbox_state ON team_cleanup_outbox(project_id,state,updated_at);
     INSERT INTO meta(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO NOTHING;
     COMMIT;
@@ -641,7 +723,7 @@ const ensureSchema = databasePath => {
     END;`);
   const expectedIndexes = {
     team_patch_photo: [0,['photo_id','base_version_id','is_deleted']], team_retouch_photo_project: [0,['project_id','updated_at']], team_stage_task_order: [0,['task_id','stage_order']], team_artifact_chain: [0,['task_id','created_at','is_deleted']], team_operation_project_state: [0,['project_id','state','updated_at']],
-    team_photo_project_id: [1,['project_id','photo_id']], team_identity_project_id: [1,['project_id','id']], team_task_project_id: [1,['project_id','id']], team_assignment_project_subject: [1,['project_id','photo_id','base_version_id','person_index']], team_exclusion_project_id: [1,['project_id','id']], team_stage_project_id: [1,['project_id','id']], team_stage_project_task_person: [1,['project_id','task_id','person_index']], team_artifact_project_id: [1,['project_id','id']], team_pending_project_task: [1,['project_id','task_id']], team_confirmation_project_return: [1,['project_id','review_session_id','return_id']], team_operation_project_id: [1,['project_id','id']], team_output_outbox_fingerprint: [1,['project_id','fingerprint']], team_cleanup_outbox_state: [0,['project_id','state','updated_at']],
+    team_photo_project_id: [1,['project_id','photo_id']], team_identity_project_id: [1,['project_id','id']], team_task_project_id: [1,['project_id','id']], team_assignment_project_subject: [1,['project_id','photo_id','base_version_id','person_index']], team_exclusion_project_id: [1,['project_id','id']], team_stage_project_id: [1,['project_id','id']], team_stage_project_task_person: [1,['project_id','task_id','person_index']], team_artifact_project_id: [1,['project_id','id']], team_pending_project_task: [1,['project_id','task_id']], team_confirmation_project_return: [1,['project_id','review_session_id','return_id']], team_operation_project_id: [1,['project_id','id']], team_output_outbox_fingerprint: [1,['project_id','fingerprint']], team_output_outbox_idempotency: [1,['project_id','idempotency_key']], team_cleanup_outbox_state: [0,['project_id','state','updated_at']],
   };
   for (const [name, [unique, names]] of Object.entries(expectedIndexes)) {
     const row = db.prepare("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?").get(name);
@@ -762,12 +844,23 @@ const waitForReadableDrain = stream => new Promise(resolve => {
   stream.once('error', finishDrain);
 });
 const terminateProcessTree = child => {
-  if (!child?.pid) return;
+  if (!child?.pid) return Promise.resolve(true);
   if (process.platform === 'win32') {
-    const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
-    killer.once('error', () => { try { child.kill(); } catch { /* process already exited */ } });
+    return new Promise(resolve => {
+      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+      killer.once('error', () => { try { child.kill(); } catch { /* process already exited */ } resolve(false); });
+      killer.once('exit', code => { if (code !== 0) { try { child.kill(); } catch { /* process already exited */ } } resolve(code === 0); });
+    });
   } else {
-    try { child.kill('SIGTERM'); } catch { /* process already exited */ }
+    try { process.kill(-child.pid, 'SIGTERM'); } catch { return Promise.resolve(true); }
+    return new Promise(resolve => {
+      const started = Date.now(); const poll = () => {
+        try { process.kill(-child.pid, 0); }
+        catch { resolve(true); return; }
+        if (Date.now() - started >= 2000) { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } resolve(false); return; }
+        setTimeout(poll, 25);
+      }; poll();
+    });
   }
 };
 
@@ -775,25 +868,26 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   let runtime;
   try { runtime = resolveAlgorithmRuntime(); } catch (error) { reject(error); return; }
   const child = spawn(runtime.command, [...runtime.argsPrefix, ...args.map(value => String(value))], {
-    cwd: __dirname, env: Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL'].filter(key => process.env[key]).map(key => [key, process.env[key]])),
-    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    cwd: __dirname, env: Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'PHOTOFLOW_TEST_GRANDCHILD_PID'].filter(key => process.env[key]).map(key => [key, process.env[key]])),
+    stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, detached: process.platform !== 'win32',
   });
   let stderr = '';
   let result;
   let progressReports = Promise.resolve();
   let cancelled = false;
   let timedOut = false;
+  let terminationPromise = null;
   let settled = false;
   const stdoutComplete = waitForReadableDrain(child.stdout);
   activeAlgorithms.add(child);
   const controls = algorithmControlsByParent.get(String(parentId)) || new Set();
-  const control = { cancel: () => { cancelled = true; terminateProcessTree(child); } };
+  const control = { cancel: () => { cancelled = true; terminationPromise ||= terminateProcessTree(child); } };
   controls.add(control); algorithmControlsByParent.set(String(parentId), controls);
   const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   // Keep the process registered as active until the entire spawned tree has
   // actually exited and stdout has closed. Restore and later mutations remain
   // blocked if termination cannot be confirmed.
-  const timer = setTimeout(() => { timedOut = true; terminateProcessTree(child); }, timeoutMs);
+  const timer = setTimeout(() => { timedOut = true; terminationPromise ||= terminateProcessTree(child); }, timeoutMs);
   const cleanup = () => {
     clearTimeout(timer); signal?.removeEventListener('abort', control.cancel); lines.close();
     activeAlgorithms.delete(child); controls.delete(control);
@@ -818,6 +912,10 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   child.once('exit', async code => {
     await stdoutComplete;
     await progressReports;
+    if (terminationPromise && !await terminationPromise) {
+      unconfirmedAlgorithmTrees.add(`${child.pid}:${Date.now()}`);
+      finish(reject, Object.assign(new Error('无法确认算法进程树已退出；为保护恢复与后续写入，必须重启组件服务'), { code: 'COMPONENT_RESTART_REQUIRED', retryable: false })); return;
+    }
     if (timedOut) finish(reject, Object.assign(new Error('团片组件算法运行超时，进程树已退出'), { code: 'COMPONENT_ALGORITHM_TIMEOUT', retryable: true }));
     else if (cancelled) finish(reject, Object.assign(new Error('团片组件算法已取消'), { code: CANCELLED_CODE }));
     else if (code !== 0) finish(reject, new Error(stderr.trim() || `团片组件算法退出（${code}）`));
@@ -855,7 +953,8 @@ const performAdvancedRuntimeStatus = async (parentId, { full = false } = {}) => 
     // CUDA/model load belongs to install verification and real detection, not
     // to rendering a settings page.
     const action = full ? 'probe-advanced-runtime' : 'probe-advanced-installation';
-    const probe = await runAlgorithm(parentId, [action], { timeoutMs: full ? 2 * 60 * 1000 : 30 * 1000 });
+    const configuredTimeout = Number(process.env.PHOTOFLOW_TEST_ALGORITHM_TIMEOUT_MS) || (full ? 2 * 60 * 1000 : 30 * 1000);
+    const probe = await runAlgorithm(parentId, [action], { timeoutMs: Math.max(50, configuredTimeout) });
     const advancedAvailable = full ? probe?.pairDetrReady === true && probe?.sam2Ready === true : probe?.advancedAvailable === true;
     if (!advancedAvailable && probe?.advancedError) {
       const value = advancedRuntimeFailureStatus(probe.advancedError);
@@ -932,8 +1031,10 @@ const drainCleanupOutbox = async (databasePath, projectId, limit = 50) => {
 const removeArtifacts = async paths => {
   const requestId = String(revisionRequestContext.getStore()?.requestId || ''); const state = projectRevisionLeaseStates.get(requestId);
   if (state?.databasePath) {
-    const db = ensureSchema(state.databasePath);
-    try { queueCleanupArtifacts(db, state.projectId, paths); } finally { db.close(); }
+    let db;
+    try { db = ensureSchema(state.databasePath); queueCleanupArtifacts(db, state.projectId, paths); }
+    catch { /* intent should already have been queued in the business transaction */ }
+    finally { try { db?.close(); } catch { /* best effort */ } }
     await drainCleanupOutbox(state.databasePath, state.projectId).catch(() => undefined);
     return;
   }
@@ -1019,6 +1120,8 @@ const detectPhoto = async (parentId, payload, context) => {
       replaced = replacePatches(db, context, payload.photoId, payload.baseVersionId, publishedTasks);
       registerPhoto(db, context, payload.photoId, payload.baseVersionId, { displayName: bundle.photo?.displayName || bundle.photo?.originalName, relativePath: metadataBase.relativePath, relativePathState: metadataBase.relativePathState, fileMissing: metadataBase.fileMissing });
       if (payload.restoreExcluded) db.prepare('DELETE FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').run(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
+      queueCleanupArtifacts(db, context.projectId, replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
+      queueCleanupArtifacts(db, context.projectId, published.map(item => item.backupPath));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'detect', state: 'committed' }).catch(() => undefined);
@@ -1076,6 +1179,7 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
     try {
       const generation = crop ? { ...parseJson(row.generation_json, {}), version: 2, strategy: 'manual', workWidth: crop.width, workHeight: crop.height, fileDigest: crypto.createHash('sha256').update(fs.readFileSync(row.patch_path)).digest('hex'), requiresManualCrop: false, reason: '人工调整工作图范围' } : null;
       db.prepare(`UPDATE team_patch_tasks SET person_name=COALESCE(?,person_name),assignee=COALESCE(?,assignee),crop_json=COALESCE(?,crop_json),generation_json=COALESCE(?,generation_json),needs_review=COALESCE(?,needs_review),review_reason=COALESCE(?,review_reason),updated_at=? WHERE project_id=? AND id=? AND is_deleted=0`).run(payload.personName === undefined ? null : String(payload.personName).trim().slice(0, 80) || '未命名人物', payload.assignee === undefined ? null : String(payload.assignee).trim().slice(0, 80), crop ? JSON.stringify(crop) : null, generation ? JSON.stringify(generation) : null, payload.needsReview === undefined ? null : payload.needsReview ? 1 : 0, payload.reviewReason === undefined ? null : String(payload.reviewReason).trim().slice(0, 300), Date.now(), String(context.projectId), row.id);
+      if (backupPath) queueCleanupArtifacts(db, context.projectId, [backupPath]);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     if (backupPath) await fs.promises.rm(backupPath, { force: true }).catch(() => undefined);
@@ -1100,6 +1204,7 @@ const deletePatch = (parentId, payload, context) => withDomain(parentId, async (
     db.prepare('UPDATE team_patch_tasks SET is_deleted=1,updated_at=? WHERE project_id=? AND id=?').run(Date.now(), String(context.projectId), row.id);
     db.prepare('DELETE FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index IN (SELECT CAST(value AS INTEGER) FROM json_each(?))').run(String(context.projectId), row.photo_id, row.base_version_id, JSON.stringify(strictRowMembers(row).map(item => item.personIndex)));
     db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE project_id=? AND task_id=?').run(String(context.projectId), row.id);
+    queueCleanupArtifacts(db, context.projectId, [row.patch_path, row.mask_path, row.edited_patch_path]);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-delete', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'patch-delete', state: 'committed' }).catch(() => undefined);
@@ -1117,6 +1222,7 @@ const cleanupPatches = (parentId, payload, context) => withDomain(parentId, asyn
     db.prepare('UPDATE team_patch_tasks SET is_deleted=1,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').run(Date.now(), String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
     db.prepare('DELETE FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=?').run(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
     db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE project_id=? AND task_id IN (SELECT id FROM team_patch_tasks WHERE project_id=? AND photo_id=? AND base_version_id=?)').run(String(context.projectId), String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
+    queueCleanupArtifacts(db, context.projectId, rows.flatMap(row => [row.patch_path, row.mask_path, row.edited_patch_path]));
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-cleanup', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'patch-cleanup', state: 'committed' }).catch(() => undefined);
@@ -1137,6 +1243,7 @@ const removeProjectPhoto = (parentId, payload, context) => withDomain(parentId, 
     db.prepare('DELETE FROM team_person_exclusions WHERE project_id=? AND photo_id=?').run(String(context.projectId), String(payload.photoId));
     db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE project_id=? AND photo_id=?').run(String(context.projectId), String(payload.photoId));
     db.prepare('DELETE FROM team_workflow_review_confirmations WHERE project_id=? AND photo_id=?').run(String(context.projectId), String(payload.photoId));
+    queueCleanupArtifacts(db, context.projectId, rows.flatMap(row => [row.patch_path, row.mask_path, row.edited_patch_path]));
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'project-remove-photo', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'project-remove-photo', state: 'committed' }).catch(() => undefined);
@@ -1207,6 +1314,7 @@ const removeUpload = (parentId, payload, context) => withDomain(parentId, async 
     const predecessor = currentTaskArtifact(db, row.id)?.artifact_path || null;
     db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status=?,merged_version_id=NULL,merge_metrics_json='{}',updated_at=? WHERE project_id=? AND id=?`).run(predecessor, predecessor ? 'uploaded' : 'exported', Date.now(), String(context.projectId), row.id);
     markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error('返图已撤销，等待后台更新接力任务'));
+    if (removedPath) queueCleanupArtifacts(db, context.projectId, [removedPath]);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'committed' }).catch(() => undefined);
@@ -1260,17 +1368,28 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   const bundle = media.items?.[0];
   const base = bundle?.versions?.find(item => String(item.id) === String(payload.baseVersionId));
   if (!base || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
+  const registeredPhoto = db.prepare('SELECT 1 ok FROM team_retouch_photos WHERE project_id=? AND photo_id=? AND base_version_id=?').get(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
+  if (!registeredPhoto) throw new Error('当前项目没有这张照片版本的精确登记');
   const photoTasks = listTasks(db, payload.photoId, payload.baseVersionId);
-  const tasks = photoTasks.filter(task => task.editedPatchPath && fs.existsSync(task.editedPatchPath));
-  const assignments = db.prepare(`SELECT person_index,completed,completion_kind,return_missing FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=?`).all(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
+  if (!photoTasks.length) throw new Error('这张照片没有可合成的当前任务');
+  const assignments = db.prepare(`SELECT * FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=?`).all(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
   const assignmentByPerson = new Map(assignments.map(item => [Number(item.person_index), item]));
-  const isCompletedNoRetouchTask = task => task.members.every(member => {
-    const assignment = assignmentByPerson.get(Number(member.personIndex));
-    return Boolean(assignment?.completed) && !Boolean(assignment?.return_missing) && assignment?.completion_kind === 'no-retouch';
-  });
-  const completedTaskIds = new Set(tasks.map(task => String(task.id)));
-  for (const task of photoTasks) if (isCompletedNoRetouchTask(task)) completedTaskIds.add(String(task.id));
-  if (completedTaskIds.size !== photoTasks.length) throw new Error('这张照片仍有未完成或返图缺失的任务');
+  const mergeTasks = [];
+  for (const task of photoTasks) {
+    const memberArtifacts = [];
+    for (const [memberOrder, member] of task.members.entries()) {
+      const personIndex = Number(member.personIndex); const assignment = assignmentByPerson.get(personIndex);
+      if (!assignment?.completed || assignment.return_missing) throw new Error(`任务 ${task.id} 的人物 ${personIndex} 未完成或返图缺失`);
+      const completionKind = String(assignment.completion_kind || '');
+      if (completionKind === 'no-retouch') { memberArtifacts.push({ personIndex, memberOrder, completionKind, noRetouch: true }); continue; }
+      if (!['returned','retouched'].includes(completionKind) || !assignment.artifact_id) throw new Error(`任务 ${task.id} 的人物 ${personIndex} 没有有效返图 artifact`);
+      const artifact = db.prepare('SELECT * FROM team_task_artifacts WHERE project_id=? AND id=? AND task_id=? AND person_index=? AND is_deleted=0').get(String(context.projectId), String(assignment.artifact_id), String(task.id), personIndex);
+      if (!artifact || String(assignment.task_id || '') !== String(task.id) || !artifact.artifact_path || !fs.existsSync(artifact.artifact_path)) throw new Error(`任务 ${task.id} 的人物 ${personIndex} artifact 已失效`);
+      memberArtifacts.push({ personIndex, memberOrder, completionKind, artifactId: artifact.id, artifactPath: artifact.artifact_path });
+    }
+    const latestArtifact = memberArtifacts.filter(item => item.artifactPath).sort((left, right) => right.memberOrder - left.memberOrder)[0];
+    if (latestArtifact) mergeTasks.push({ ...task, editedPatchPath: latestArtifact.artifactPath, memberArtifacts });
+  }
   await assertAuthorizedArtifacts(parentId, taskRows(db, payload.photoId, payload.baseVersionId));
   const progress = await callHost(parentId, 'project.progress', { action: 'list' });
   const outputProgress = (progress.progress || []).find(item => String(item.id) === String(payload.outputProgressId));
@@ -1278,13 +1397,14 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   if (!outputProgress || outputProgress.mediaKind !== 'image' || !relativeDirectory) throw new Error('合成结果的目标图片进度不存在或不在项目内容边界内');
   const output = await artifactGrantForHost(parentId, { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
   await fs.promises.mkdir(output.mergeDirectory, { recursive: true });
-  const orderedTasks = [...tasks].sort((left, right) => String(left.id).localeCompare(String(right.id)));
+  const orderedTasks = [...mergeTasks].sort((left, right) => String(left.id).localeCompare(String(right.id)));
   const fingerprintTasks = new Array(orderedTasks.length); let fingerprintCursor = 0;
   await Promise.all(Array.from({ length: Math.min(3, orderedTasks.length) }, async () => {
     while (fingerprintCursor < orderedTasks.length) {
       const index = fingerprintCursor++; const task = orderedTasks[index];
       fingerprintTasks[index] = {
         id: String(task.id),
+        memberArtifacts: await Promise.all(task.memberArtifacts.map(async item => ({ personIndex: item.personIndex, completionKind: item.completionKind, artifactId: item.artifactId || '', digest: item.artifactPath ? await fileSha256(item.artifactPath) : '' }))),
         editedSha256: await fileSha256(task.editedPatchPath),
         maskSha256: task.maskPath && fs.existsSync(task.maskPath) ? await fileSha256(task.maskPath) : '',
         crop: task.crop || {}, generation: task.generation || {},
@@ -1305,14 +1425,14 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   try {
     await fs.promises.mkdir(path.dirname(mergeStage), { recursive: true });
     await fs.promises.mkdir(mergeStage, { recursive: false });
-    await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: payload.photoId, baseVersionId: base.id, tasks }), 'utf8');
-    const merged = tasks.length
+    await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: payload.photoId, baseVersionId: base.id, tasks: mergeTasks }), 'utf8');
+    const merged = mergeTasks.length
       ? await runAlgorithm(parentId, ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', privateOutputPath], { signal: context.signal })
       : (await fs.promises.copyFile(base.filePath, privateOutputPath), { mergedCount: 0, conflictPixels: 0, seamScore: 1, metrics: [], noRetouch: true });
     if (!fs.existsSync(privateOutputPath)) throw new Error('合成算法没有生成输出文件');
     const threshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * .00005);
     const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > threshold;
-    const committed = await publishProjectFile(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`);
+    const committed = await publishProjectFile(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`, null, 'merge-output');
     const artifact = committed.outputs[0];
     const registered = await createVersionFromOutput(parentId, committed, { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: merged.noRetouch ? '所有人物均确认无需修图；已将原图作为零修改输出登记' : `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
     const versionId = registered.versionId;
@@ -1380,6 +1500,8 @@ const detectBatch = async (parentId, payload, context) => {
           try {
             replaced = replacePatches(db, context, item.bundle.photo.id, item.base.id, publishedTasks);
             registerPhoto(db, context, item.bundle.photo.id, item.base.id, { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName, relativePath: item.base.relativePath, relativePathState: item.base.relativePathState, fileMissing: item.base.fileMissing });
+            queueCleanupArtifacts(db, context.projectId, replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
+            queueCleanupArtifacts(db, context.projectId, published.map(item => item.backupPath));
             db.exec('COMMIT');
           }
           catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -1889,9 +2011,10 @@ const completeIdentity = (parentId, payload, context) => withDomain(parentId, as
       db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,completed=1,completion_kind=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, String(payload.completionKind || 'no-retouch'), Date.now(), Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
     }
     markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error(payload.completed === false ? '完成状态已撤销，等待后台更新接力任务' : '完成状态已保存，等待后台更新接力任务'));
+    if (removedPath) queueCleanupArtifacts(db, context.projectId, [removedPath]);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
-  if (removedPath) removePersistentPaths([removedPath]);
+  if (removedPath) await drainCleanupOutbox(storage.databasePath, context.projectId).catch(() => undefined);
   await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: payload.completed === false ? '完成状态已撤销，等待后台更新接力任务' : '完成状态已保存，等待后台更新接力任务' }).catch(() => undefined);
   return { success: true, completed: payload.completed !== false, taskId: row.id, personIndex, reconcilePending: true, relayState: 'preparing', warning: '状态已安全保存；接力任务正在后台更新' };
 });
@@ -2110,13 +2233,13 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
     let progressReports = Promise.resolve();
     await copyWorkflowPlan({
       files: plan.files, totalBytes: plan.totalBytes, copyFileAtomic, concurrency: 3,
-      isCancelled: () => job.cancelled,
+      isCancelled: () => job.cancelled || context.signal?.aborted,
       onProgress: update => {
         progressReports = progressReports.catch(() => undefined).then(() => publish({ ...update, message: update.phase === 'resuming' ? '正在复用已完成的工作图…' : update.phase === 'finalizing' ? '正在提交工作流程…' : '正在复制工作图…' }));
       },
     });
     await progressReports;
-    if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: CANCELLED_CODE });
+    if (job.cancelled || context.signal?.aborted) throw Object.assign(new Error('工作流程生成已取消'), { code: CANCELLED_CODE });
     const manifest = { version: 2, projectId: String(context.projectId), generatedAt: Date.now(), fingerprint, workflowSettings, groups: plan.manifestGroups };
     const workflowPublication = replacePersistentFromStage(stagingDirectory, scope.outputDirectory, crypto.randomUUID());
     backupDirectory = workflowPublication.backupPath;
@@ -2127,11 +2250,13 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
       const committed = await publishProjectFiles(parentId, outputFiles, `workflow-${sha256(fingerprint).slice(0, 24)}`, replacements);
       hostPublicationCommitted = true;
       manifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
+      if (committed[OUTPUT_OUTBOX]) await outboxState(committed[OUTPUT_OUTBOX], 'domain_pending', { result: { ...parseJson(committed[OUTPUT_OUTBOX].row.result_json, {}), workflow: { manifestPath: scope.manifestPath, generatedAt: manifest.generatedAt, fingerprint } } });
       await writeJsonAtomic(scope.manifestPath, manifest);
       await withDomain(parentId, db => {
         db.exec('BEGIN IMMEDIATE');
         try {
           db.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(manifest.generatedAt), fingerprint, Date.now());
+          if (backupDirectory) queueCleanupArtifacts(db, context.projectId, [backupDirectory]);
           db.exec('COMMIT');
         }
         catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -2149,7 +2274,7 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
       throw error;
     }
     checkpointReady = false;
-    if (backupDirectory) await fs.promises.rm(backupDirectory, { recursive: true, force: true }).catch(() => undefined);
+    if (backupDirectory) await drainCleanupOutbox(jobStorage.databasePath, context.projectId).catch(() => undefined);
     const retiredStages = (await fs.promises.readdir(projectDirectory, { withFileTypes: true }).catch(() => []))
       .filter(item => item.isDirectory() && item.name.startsWith(stagePrefix)).map(item => path.join(projectDirectory, item.name));
     if (retiredStages.length > 4) removePersistentPaths(retiredStages.slice(0, retiredStages.length - 4));
@@ -2174,9 +2299,6 @@ const generateWorkflow = (parentId, payload, context) => withProjectWorkflowOper
 const workflowStatus = async (parentId, _payload, context) => {
   const key = String(context.projectId);
   const job = workflowJobs.get(key) || null;
-  const statusStorage = await hostStorage(parentId);
-  await retryWorkflowOutputCleanup(parentId, statusStorage, context).catch(() => undefined);
-  await drainCleanupOutbox(statusStorage.databasePath, context.projectId, 20).catch(() => undefined);
   const reconciliation = await withDomain(parentId, db => {
     const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(pending.updated_at) oldestAt,MIN(CASE WHEN pending.next_attempt_at>0 THEN pending.next_attempt_at END) nextAttemptAt,MAX(pending.attempt_count) maxAttemptCount FROM team_workflow_reconcile_pending pending
       JOIN team_patch_tasks task ON task.project_id=pending.project_id AND task.id=pending.task_id
@@ -2186,10 +2308,12 @@ const workflowStatus = async (parentId, _payload, context) => {
       JOIN team_patch_tasks task ON task.project_id=pending.project_id AND task.id=pending.task_id
       JOIN team_retouch_photos registered ON registered.project_id=task.project_id AND registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
       WHERE pending.project_id=? ORDER BY pending.updated_at DESC LIMIT 1`).get(String(context.projectId));
-    return { state: Number(row?.pendingCount) ? 'preparing' : 'ready', pendingCount: Number(row?.pendingCount) || 0, oldestAt: Number(row?.oldestAt) || 0, nextAttemptAt: Number(row?.nextAttemptAt) || 0, maxAttemptCount: Number(row?.maxAttemptCount) || 0, lastError: String(latest?.last_error || '') };
+    const outputPendingCount = Number(db.prepare("SELECT COUNT(*) count FROM team_output_outbox WHERE project_id=? AND state<>'completed'").get(String(context.projectId))?.count) || 0;
+    const cleanupPendingCount = Number(db.prepare("SELECT COUNT(*) count FROM team_cleanup_outbox WHERE project_id=? AND state='pending'").get(String(context.projectId))?.count) || 0;
+    return { state: Number(row?.pendingCount) ? 'preparing' : 'ready', pendingCount: Number(row?.pendingCount) || 0, outputPendingCount, cleanupPendingCount, maintenanceRequired: outputPendingCount > 0 || cleanupPendingCount > 0, oldestAt: Number(row?.oldestAt) || 0, nextAttemptAt: Number(row?.nextAttemptAt) || 0, maxAttemptCount: Number(row?.maxAttemptCount) || 0, lastError: String(latest?.last_error || '') };
   });
   if (!job) {
-    const storage = statusStorage; const recovered = await readJson(path.join(storage.dataPath, 'workflow-jobs', `${sha256(key)}.json`), null);
+    const storage = await hostStorage(parentId); const recovered = await readJson(path.join(storage.dataPath, 'workflow-jobs', `${sha256(key)}.json`), null);
     return { success: true, job: recovered, reconciliation };
   }
   const host = await reportTask(parentId, job.operationId, 'status').catch(() => null);
@@ -2435,11 +2559,16 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
       active.available = true;
     }
     const ownership = { ...(scope.manifest.outputOwnership || {}) };
+    const committedPublications = [];
     const activeRelativePath = activeIndex >= 0 ? `团片协作/${stages[activeIndex].entry.item.relativePath}` : '';
     if (activeIndex >= 0) {
       const prior = priorOutputs.find(item => item.relativePath === activeRelativePath)?.ownership || ownership[activeRelativePath] || null;
-      const committed = await publishProjectFile(parentId, activeTarget, activeRelativePath, `relay-${sha256(`${task.id}\0${activeIndex}\0${await fileSha256(activeTarget)}`).slice(0, 24)}`, prior);
-      const output = committed.outputs[0]; ownership[activeRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+      const activeDigest = await fileSha256(activeTarget);
+      if (!prior || String(prior.sha256 || '').toLowerCase() !== activeDigest.toLowerCase()) {
+        const committed = await publishProjectFile(parentId, activeTarget, activeRelativePath, `relay-${sha256(`${task.id}\0${activeIndex}\0${activeDigest}\0${JSON.stringify(prior || null)}`).slice(0, 24)}`, prior);
+        committedPublications.push(committed);
+        const output = committed.outputs[0]; ownership[activeRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+      }
     }
     for (const previous of priorOutputs) if (previous.relativePath !== activeRelativePath && previous.ownership) {
       try {
@@ -2450,6 +2579,7 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
     }
     scope.manifest.outputOwnership = ownership;
     await writeJsonAtomic(scope.manifestPath, scope.manifest);
+    for (const committed of committedPublications) await completeOutputPublication(committed);
     return { reconciled: true, taskId: task.id, activePersonIndex: activeIndex >= 0 ? stages[activeIndex].personIndex : null, complete: activeIndex < 0 };
   };
   return existingDb ? reconcile(existingDb) : withDomain(parentId, reconcile);
@@ -2459,6 +2589,9 @@ const reconcileWorkflowTaskChain = (parentId, context, taskId, existingDb = null
 const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, (db, storage) => storeReturnedPatchInDomain(db, storage, sourcePath, payload, context));
 
 const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1, taskIds = []) => {
+  const maintenanceStorage = await hostStorage(parentId);
+  await retryWorkflowOutputCleanup(parentId, maintenanceStorage, context).catch(() => undefined);
+  await drainCleanupOutbox(maintenanceStorage.databasePath, context.projectId, 50).catch(() => undefined);
   const selectedTaskIds = uniqueText(Array.isArray(taskIds) ? taskIds : []).slice(0, 50);
   const taskFilter = selectedTaskIds.length ? ` AND pending.task_id IN (${selectedTaskIds.map(() => '?').join(',')})` : '';
   const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.* FROM team_workflow_reconcile_pending pending
@@ -2503,7 +2636,10 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
   try {
     await report('start', { kind: 'team-return-batch', title: '批量处理协作返图', ...progressUpdate('reading', 6, '正在读取协作任务') });
     const existing = workflowMode ? await readReview(parentId, context) : null;
-    if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
+    if (existing?.session) {
+      if (String(existing.session.operationId || '') === returnOperationId) return presentReview(existing.session);
+      throw new Error('还有一批返图等待确认，请先继续处理或放弃');
+    }
     const snapshot = await workspaceSnapshot(parentId, context);
     throwIfCancelled();
     await report('report', progressUpdate('reading', 14, '正在整理可匹配的协作任务'));
@@ -2520,14 +2656,22 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     if (!staged.items.length) throw new Error('未收到可处理的返图');
     throwIfCancelled();
     await report('report', progressUpdate('matching', 38, `已读取 ${staged.items.length} 张返图，正在准备内容匹配`));
-    const returned = staged.items.map((item, index) => ({ returnId: `${workflowMode ? 'workflow-' : ''}return-${index + 1}`, path: item.path, sourceName: item.name, inputName: path.basename(item.path) }));
+    let returnCheckpoint = {};
+    if (payload.operationId) returnCheckpoint = await withDomain(parentId, db => parseJson(db.prepare('SELECT checkpoint_json FROM team_durable_operations WHERE project_id=? AND id=?').get(String(context.projectId), returnOperationId)?.checkpoint_json, {}));
+    const returned = await Promise.all(staged.items.map(async (item, index) => ({ returnId: `${workflowMode ? 'workflow-' : ''}return-${index + 1}`, path: item.path, sourceName: item.name, inputName: path.basename(item.path), digest: await fileSha256(item.path) })));
+    const resumed = []; const pendingReturned = [];
+    for (const item of returned) {
+      const prior = Object.values(returnCheckpoint.completed || {}).find(value => value?.digest === item.digest);
+      if (prior) resumed.push({ ...prior, returnId: item.returnId, sourceName: item.sourceName, confidence: 'high', accepted: true, resumed: true });
+      else pendingReturned.push(item);
+    }
     const stagedSources = new Set(staged.items.map(item => path.resolve(item.path)));
     const returnedById = new Map(returned.map(item => [String(item.returnId), path.resolve(item.path)]));
     const candidateTuples = new Set(candidates.map(item => `${item.taskId}\0${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`));
-    const matched = await runMatcher(parentId, returned, candidates, message => {
+    const matched = pendingReturned.length ? await runMatcher(parentId, pendingReturned, candidates, message => {
       const matcherProgress = Math.max(0, Math.min(100, Number(message.progress) || 0));
       matcherProgressReports = matcherProgressReports.catch(() => undefined).then(() => report('report', progressUpdate('matching', 40 + matcherProgress * 0.42, String(message.message || '正在比对返图内容')))).catch(() => undefined);
-    }, context.signal);
+    }, context.signal) : { matches: [] };
     await matcherProgressReports;
     throwIfCancelled();
     for (const match of matched.matches || []) {
@@ -2536,31 +2680,26 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
       if (match.taskId && !candidateTuples.has(`${match.taskId}\0${match.photoId}\0${match.baseVersionId}\0${Number(match.personIndex)}`)) throw new Error('Matcher returned a candidate tuple outside the original candidate set');
     }
     await report('report', progressUpdate('matching', 82, '内容匹配完成，正在整理结果'));
-    const accepted = [];
+    const accepted = [...resumed];
     const high = (matched.matches || []).filter(item => item.confidence === 'high' && item.taskId);
-    let returnCheckpoint = {};
-    if (payload.operationId) returnCheckpoint = await withDomain(parentId, db => parseJson(db.prepare('SELECT checkpoint_json FROM team_durable_operations WHERE project_id=? AND id=?').get(String(context.projectId), returnOperationId)?.checkpoint_json, {}));
     for (const [index, match] of high.entries()) {
       throwIfCancelled();
       if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
-      const returnDigest = await fileSha256(match.path); const prior = returnCheckpoint.completed?.[String(match.returnId)];
-      if (prior?.digest === returnDigest && `${prior.taskId}\0${prior.photoId}\0${prior.baseVersionId}\0${Number(prior.personIndex)}` === `${match.taskId}\0${match.photoId}\0${match.baseVersionId}\0${Number(match.personIndex)}`) {
-        accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true, resumed: true });
-        continue;
-      }
+      const returnDigest = await fileSha256(match.path);
       const registered = await withPhotoOperation(projectOperationKey(context, match.photoId), () => storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, deferReconcile: true, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context));
       accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true, reconcilePending: Boolean(registered.reconcilePending), warning: registered.warning });
       if (payload.operationId) await withDomain(parentId, db => {
         const row = db.prepare('SELECT checkpoint_json FROM team_durable_operations WHERE project_id=? AND id=?').get(String(context.projectId), returnOperationId);
         const checkpoint = parseJson(row?.checkpoint_json, {}); const completed = { ...(checkpoint.completed || {}) };
-        completed[String(match.returnId)] = { digest: returnDigest, taskId: match.taskId, photoId: match.photoId, baseVersionId: match.baseVersionId, personIndex: Number(match.personIndex) };
+        const tuple = `${match.taskId}\0${match.photoId}\0${match.baseVersionId}\0${Number(match.personIndex)}`;
+        completed[`${returnDigest}\0${tuple}`] = { digest: returnDigest, taskId: match.taskId, photoId: match.photoId, baseVersionId: match.baseVersionId, personIndex: Number(match.personIndex) };
         returnCheckpoint = { ...checkpoint, completed };
         db.prepare('UPDATE team_durable_operations SET checkpoint_json=?,phase=?,progress=?,updated_at=? WHERE project_id=? AND id=?').run(JSON.stringify(returnCheckpoint), 'importing', 82 + 12 * (index + 1) / Math.max(1, high.length), Date.now(), String(context.projectId), returnOperationId);
       });
       await report('report', progressUpdate('importing', 82 + 12 * (index + 1) / Math.max(1, high.length), `正在归档返图 ${index + 1}/${high.length}`));
     }
     const acceptedById = new Map(accepted.map(item => [String(item.returnId), item]));
-    let matches = (matched.matches || []).map(item => acceptedById.get(String(item.returnId)) || { ...item, path: undefined, patchPath: undefined, accepted: false });
+    let matches = [...resumed, ...(matched.matches || []).map(item => acceptedById.get(String(item.returnId)) || { ...item, path: undefined, patchPath: undefined, accepted: false })];
     matches = matches.map(publicMatch);
     const reconcilePending = accepted.some(item => item.reconcilePending);
     const result = { success: true, matches, merges: [], returnedCount: returned.length, candidateCount: candidates.length, acceptedCount: accepted.length, reviewCount: matches.filter(item => !item.accepted).length, missingTaskCount: Math.max(0, candidates.length - accepted.length), mergedCount: 0, reconcilePending, warning: reconcilePending ? '部分返图已安全归档，工作流程目录将在下次加载时自动修复，无需重复上传' : undefined };
@@ -2579,13 +2718,13 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
           await fs.promises.copyFile(source, path.join(pending, storedName), fs.constants.COPYFILE_EXCL);
           return { ...match, path: path.join(target.directory, storedName), patchPath: undefined, accepted: Boolean(acceptedById.get(String(match.returnId))) };
         }));
-        const session = { version: 2, id: reviewId, projectId: String(context.projectId), createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
+        const session = { version: 2, id: reviewId, operationId: returnOperationId, projectId: String(context.projectId), createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
         await fs.promises.writeFile(path.join(pending, 'session.json'), JSON.stringify(session, null, 2), 'utf8');
         replacePersistentFromStage(pending, target.directory, reviewId);
         finalResult = presentReview(session);
       } catch (error) { await fs.promises.rm(pending, { recursive: true, force: true }).catch(() => undefined); throw error; }
     }
-    await report('complete', { state: 'completed', phase: 'complete', progress: 100, message: '返图处理完成' });
+    await report('complete', { state: 'completed', phase: 'complete', progress: 100, message: '返图处理完成' }).catch(() => undefined);
     return finalResult;
   } catch (error) {
     const cancelled = context.signal?.aborted || error?.code === CANCELLED_CODE;
@@ -2710,7 +2849,10 @@ const acceptDurableOperation = async (parentId, payload, context, kind, extra = 
   if (kind === 'return-batch' && Array.isArray(payload.returnedFiles)) durableOperationSecrets.set(projectOperationKey(context, operationId), { returnedFiles: [...payload.returnedFiles], expiresAt: acceptedAt + 30_000 });
   const accepted = await withDomain(parentId, db => {
     const existing = db.prepare('SELECT * FROM team_durable_operations WHERE id=? AND project_id=?').get(operationId, String(context.projectId));
-    if (existing) return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true, resumable: true, ...(kind === 'return-batch' ? { restartPolicy: 'reselect-to-resume', limitation: '返图选择凭据不跨进程保存；使用同一 operationId 重新选择后从持久 checkpoint 续跑' } : {}) };
+    if (existing) {
+      if (['completed','cancelled','failed'].includes(String(existing.state))) durableOperationSecrets.delete(projectOperationKey(context, operationId));
+      return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true, resumable: true, ...(kind === 'return-batch' ? { restartPolicy: 'reselect-to-resume', limitation: '返图选择凭据不跨进程保存；使用同一 operationId 重新选择后从持久 checkpoint 续跑' } : {}) };
+    }
     const now = acceptedAt;
     const persistablePayload = { ...payload }; delete persistablePayload.returnedFiles; delete persistablePayload.acceptOnly;
     const baseRevision = Number(domainRevision(db, String(context.projectId))) || 0;
@@ -2750,7 +2892,6 @@ const runDurableOperationUnlocked = async (parentId, payload, context) => {
   durableOperationParentIds.set(operationKey, String(parentId));
   try {
     await updateRevisionGuardExpected(parentId, context, request.expectedRevision);
-    if (row.kind === 'return-batch' && Date.now() - Number(row.created_at) > 30_000) throw Object.assign(new Error('返图选择授权已过期；为避免缓存越权输入，请重新选择返图后重试'), { code: 'COMPONENT_INPUT_RESELECTION_REQUIRED', retryable: true });
     let result;
     if (row.kind === 'workflow-generate') result = await generateWorkflow(parentId, request, context);
     else if (row.kind === 'return-batch') result = await returnBatch(parentId, request, context, request.workflowMode === true);
@@ -2958,6 +3099,7 @@ const restoreBusyReasons = () => {
   if (projectWorkflowOperations.size) reasons.push('workflow-operation');
   if (durableOperationRuns.size || durableOperationParentIds.size) reasons.push('durable-operation');
   if (activeAlgorithms.size) reasons.push('algorithm-process');
+  if (unconfirmedAlgorithmTrees.size) reasons.push('unconfirmed-algorithm-tree');
   // The restore request itself is present in this map. Any additional request
   // means the Host barrier was violated or a detached request is still live.
   if (activeRequestControls.size > 1) reasons.push('rpc-request');
@@ -3226,10 +3368,14 @@ input.on('line', line => {
     assertNotAborted(requestContext.signal);
     const guarded = guardedMutation;
     if (guarded && (restoreLeaseHeld || restoreHold)) throw Object.assign(new Error('团片恢复快照期间禁止普通写入，请稍后重试'), { code: 'COMPONENT_BUSY', retryable: true });
+    if (guarded && unconfirmedAlgorithmTrees.size) throw Object.assign(new Error('上一个算法进程树未能确认退出，必须重启组件服务后再写入'), { code: 'COMPONENT_RESTART_REQUIRED', retryable: false });
     if (guarded) await prepareRevisionGuard(id, frame.payload || {}, requestContext, revisionGuardId);
     try {
       assertNotAborted(requestContext.signal);
-      return await revisionRequestContext.run({ requestId: guarded ? revisionGuardId : '', projectId: String(requestContext.projectId || ''), signal: requestContext.signal }, () => handler(id, frame.payload || {}, requestContext));
+      return await revisionRequestContext.run({ requestId: guarded ? revisionGuardId : '', projectId: String(requestContext.projectId || ''), signal: requestContext.signal }, async () => {
+        if (guarded) await recoverProjectOutputOutbox(id, requestContext);
+        return handler(id, frame.payload || {}, requestContext);
+      });
     }
     catch (error) { throw normalizeRevisionError(error); }
     finally { if (guarded) finalRevision = await finishRevisionGuard(id, requestContext, revisionGuardId); }

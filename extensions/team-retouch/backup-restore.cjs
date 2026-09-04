@@ -296,7 +296,14 @@ const publishWorkspacePrivateFiles = ({ sources, destinationDataPath, payload, f
       const staged = path.join(stagingRoot, 'staged', String(index)); fs.mkdirSync(path.dirname(staged), { recursive: true });
       if (entry.child.toLowerCase().endsWith('.json')) {
         const original = fs.readFileSync(entry.source.path, 'utf8');
-        fs.writeFileSync(staged, rewriteProjectIdentityJson(rewriteJson(original, replacements), payload), 'utf8');
+        let rewritten = rewriteProjectIdentityJson(rewriteJson(original, replacements), payload);
+        if (payload.mode === 'project' || payload.project?.id) {
+          const normalizedChild = entry.child.replace(/\\/g, '/'); let parsed; try { parsed = JSON.parse(rewritten); } catch { parsed = null; }
+          if (parsed && normalizedChild.startsWith('workflows/')) rewritten = JSON.stringify({ ...parsed, outputOwnership: {}, recovery: { state: 'needs-republish', reason: 'project-restore-host-scope' } });
+          else if (parsed && normalizedChild.startsWith('output-ownership/')) rewritten = JSON.stringify({ recovery: { state: 'needs-republish', reason: 'project-restore-host-scope' } });
+          else if (parsed && normalizedChild.startsWith('output-cleanup/')) rewritten = JSON.stringify({ version: 1, projectId: String(payload.project?.id || ''), pending: [], recovery: { state: 'needs-republish', reason: 'project-restore-host-scope' } });
+        }
+        fs.writeFileSync(staged, rewritten, 'utf8');
       } else fs.copyFileSync(entry.source.path, staged);
       entry.staged = staged;
     }
@@ -398,7 +405,8 @@ const restoreProjectStorage = ({ sourcePath, destinationPath, payload, ensureSch
       db.prepare('DELETE FROM team_project_revision_leases WHERE project_id=?').run(targetProjectId);
       for (const table of DELETE_ORDER) db.prepare(`DELETE FROM ${quote(table)} WHERE project_id=?`).run(targetProjectId);
       if (fault === 'after-delete' || process.env.PHOTOFLOW_TEST_FAULT_COMPONENT_RESTORE === 'after-delete') throw new Error('injected team-retouch restore failure');
-      for (const table of INSERT_ORDER) imported[table] = importRows(db, table, sourceProjectId, targetProjectId, replacements);
+      for (const table of INSERT_ORDER) imported[table] = table === 'team_output_outbox' ? 0 : importRows(db, table, sourceProjectId, targetProjectId, replacements);
+      db.prepare('DELETE FROM team_workflow_state WHERE project_id=?').run(targetProjectId);
       const previousRevision = Number(db.prepare('SELECT revision FROM team_project_revisions WHERE project_id=?').get(targetProjectId)?.revision || 0);
       const sourceRevision = Number(db.prepare('SELECT revision FROM portable.team_project_revisions WHERE project_id=?').get(sourceProjectId)?.revision || 0);
       db.prepare('INSERT INTO team_project_revisions(project_id,revision) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision').run(targetProjectId, Math.max(previousRevision + 1, sourceRevision));

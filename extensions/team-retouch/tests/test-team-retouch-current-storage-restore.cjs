@@ -28,6 +28,7 @@ try {
   sourceDb.prepare('INSERT INTO team_project_revisions(project_id,revision) VALUES(?,?)').run(sourceId, 4);
   sourceDb.prepare(`INSERT INTO team_task_artifacts(project_id,id,task_id,stage_id,person_index,kind,artifact_path,digest,metadata_json,created_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
     .run(sourceId, 'artifact', 'task', null, 1, 'patch', oldArtifact, digest(oldArtifact), JSON.stringify({ path: oldArtifact }), 1, 0);
+  sourceDb.prepare(`INSERT INTO team_output_outbox(project_id,id,kind,fingerprint,idempotency_key,state,stage_id,source_json,target_json,receipt_json,result_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(sourceId, 'outbox-a', 'working-output', 'fingerprint-a', 'source-scope-key', 'completed', 'stage-a', '[]', '[]', JSON.stringify({ commitId: 'source-commit', outputs: [{ artifactId: 'source-artifact' }] }), '{}', '', 1, 1);
   sourceDb.close();
   const staged = path.join(sandbox, 'staged'); fs.mkdirSync(staged, { recursive: true });
   const make = (name, value) => { const file = path.join(staged, name); fs.writeFileSync(file, value); return file; };
@@ -35,11 +36,13 @@ try {
   const settings = make('settings.json', JSON.stringify({ projectId: sourceId, path: oldArtifact }));
   const similarities = make('similarities.json', JSON.stringify({ projectId: sourceId, similarities: [] }));
   const job = make('job.json', JSON.stringify({ projectId: sourceId, projectName: 'Old', state: 'completed' }));
+  const ownership = make('ownership.json', JSON.stringify({ 'output/file.png': { commitId: 'source-commit', artifactId: 'source-artifact', sha256: 'bad-scope' } }));
   const entries = [
     [`team-retouch/projects/${sourceHash}/media/photo/version/artifact.bin`, media],
     [`team-retouch/workflow-settings/${sourceHash}.json`, settings],
     [`team-retouch/identity-similarities/${sourceHash}.json`, similarities],
     [`team-retouch/workflow-jobs/${hash(sourceId)}.json`, job],
+    [`team-retouch/output-ownership/${sourceHash}/working-images.json`, ownership],
   ].map(([relativePath, file]) => ({ relativePath, path: file, size: fs.statSync(file).size, sha256: digest(file), format: 'component-private-v1' }));
   const payload = {
     operationId: 'restore-current-layout',
@@ -65,5 +68,7 @@ try {
   assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'workflow-settings', `${targetHash}.json`), 'utf8')).projectId, targetId);
   assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'identity-similarities', `${targetHash}.json`), 'utf8')).projectId, targetId);
   assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'workflow-jobs', `${hash(targetId)}.json`), 'utf8')).projectId, targetId);
+  const restoredCheck = new DatabaseSync(targetDatabase, { readOnly: true }); assert.equal(restoredCheck.prepare('SELECT COUNT(*) count FROM team_output_outbox WHERE project_id=?').get(targetId).count, 0, 'project restore never imports source-scope Host receipts'); restoredCheck.close();
+  assert.equal(JSON.parse(fs.readFileSync(path.join(targetComponentRoot, 'output-ownership', targetHash, 'working-images.json'), 'utf8')).recovery.state, 'needs-republish', 'restored ownership is explicitly marked for target-scope republish');
   console.log('Team-retouch current project-private storage restore passed');
 } finally { fs.rmSync(sandbox, { recursive: true, force: true }); }

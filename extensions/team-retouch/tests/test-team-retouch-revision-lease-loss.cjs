@@ -28,7 +28,7 @@ const waitForLease = async () => {
   for (let count = 0; count < 100; count += 1) { try { const rows = leaseRows(); if (rows.length) return rows[0]; } catch (error) { if (!/locked/.test(String(error.message))) throw error; } await sleep(10); }
   throw new Error('revision lease was not acquired');
 };
-const deleteLease = () => { const db = new DatabaseSync(databasePath); try { db.prepare('DELETE FROM team_project_revision_leases WHERE project_id=?').run(context.projectId); } finally { db.close(); } };
+const deleteLease = async () => { for (let attempt = 0; attempt < 50; attempt += 1) { const db = new DatabaseSync(databasePath); try { db.exec('PRAGMA busy_timeout=100'); db.prepare('DELETE FROM team_project_revision_leases WHERE project_id=?').run(context.projectId); return; } catch (error) { if (!/locked/.test(String(error.message)) || attempt === 49) throw error; } finally { db.close(); } await sleep(10); } };
 
 (async () => {
   try {
@@ -36,7 +36,7 @@ const deleteLease = () => { const db = new DatabaseSync(databasePath); try { db.
     assert.equal(renewed.success, true, 'normal long operation renews through multiple TTL windows');
 
     const zeroUpdate = first.request('team.test.revision-lease.v1', { delayMs: 350, boundary: 'host', marker: 'zero' });
-    await waitForLease(); deleteLease();
+    await waitForLease(); await deleteLease();
     await assert.rejects(zeroUpdate, /租约已失效/);
     assert.equal(lifecycleCalls, 0, 'zero-row renewal aborts before the Host side effect');
 
@@ -45,26 +45,26 @@ const deleteLease = () => { const db = new DatabaseSync(databasePath); try { db.
     assert.equal(lifecycleCalls, 0);
 
     const oldDb = first.request('team.test.revision-lease.v1', { delayMs: 1100, marker: 'old-db' });
-    await waitForLease(); deleteLease();
+    await waitForLease(); await deleteLease();
     const takeover = await second.request('team.test.revision-lease.v1', { marker: 'new-owner' });
     assert.equal(takeover.success, true, 'a second process can take over an abandoned lease');
     await assert.rejects(oldDb, /租约已失效/, 'the old process cannot write after takeover');
 
     const oldFile = first.request('team.test.revision-lease.v1', { delayMs: 1100, boundary: 'file', marker: 'old-file' });
-    await waitForLease(); deleteLease();
+    await waitForLease(); await deleteLease();
     await second.request('team.test.revision-lease.v1', { boundary: 'file', marker: 'new-owner-file' });
     await assert.rejects(oldFile, /租约已失效/, 'the old process cannot publish a persistent file after takeover');
     assert.equal(JSON.parse(fs.readFileSync(path.join(dataPath, 'lease-test.json'), 'utf8')).request, 'new-owner-file', 'stale rollback cannot delete or overwrite the successor file');
 
     const oldJournal = first.request('team.test.revision-lease.v1', { delayMs: 1100, boundary: 'journal', marker: 'old-journal' });
-    await waitForLease(); deleteLease();
+    await waitForLease(); await deleteLease();
     await second.request('team.test.revision-lease.v1', { boundary: 'journal', marker: 'new-journal' });
     await assert.rejects(oldJournal, /租约已失效/, 'stale owner cannot append a misleading committed journal record');
     const journal = fs.readFileSync(path.join(dataPath, 'command-log', 'operations.ndjson'), 'utf8');
     assert.match(journal, /new-journal/); assert.doesNotMatch(journal, /old-journal/);
 
     const oldWorkflow = first.request('team.test.revision-lease.v1', { delayMs: 1100, boundary: 'workflow-stage', marker: 'old-workflow' });
-    await waitForLease(); deleteLease();
+    await waitForLease(); await deleteLease();
     await second.request('team.test.revision-lease.v1', { boundary: 'workflow-stage', marker: 'new-workflow' });
     await assert.rejects(oldWorkflow, /租约已失效/, 'stale workflow owner cannot publish or roll back after takeover');
     assert.equal(fs.readFileSync(path.join(dataPath, 'lease-workflow-test', 'workflow', 'owner.txt'), 'utf8'), 'new-workflow');

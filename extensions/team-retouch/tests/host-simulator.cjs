@@ -1,8 +1,8 @@
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 
-const createHostSimulator = ({ service, context, capabilities = {}, env = {} }) => {
-  const child = spawn(process.execPath, [service], { env: { ...process.env, ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
+const createHostSimulator = ({ service, serviceArgs = [], context, capabilities = {}, env = {} }) => {
+  const child = spawn(process.execPath, [service, ...serviceArgs], { env: { ...process.env, ...env, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map(); let nextId = 1;
   const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
