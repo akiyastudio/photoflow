@@ -1,14 +1,70 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { confirmComponentPackageInstall, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
+
+const crc32 = buffer => {
+  let crc = 0xffffffff;
+  for (const byte of buffer) { crc ^= byte; for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0); }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+const writeZip = (target, entries) => {
+  const local = []; const central = []; let offset = 0;
+  for (const [name, raw, options = {}] of entries) {
+    const localName = Buffer.from(options.localName || name); const centralName = Buffer.from(name); const data = Buffer.from(raw);
+    const method = options.method === 8 ? 8 : 0; const localMethod = options.localMethod ?? method;
+    const compressed = method === 8 ? zlib.deflateRawSync(data) : data; const checksum = crc32(data);
+    const declaredSize = options.declaredSize ?? data.length; const declaredCompressedSize = options.declaredCompressedSize ?? compressed.length;
+    const header = Buffer.alloc(30); header.writeUInt32LE(0x04034b50); header.writeUInt16LE(20, 4); header.writeUInt16LE(localMethod, 8); header.writeUInt32LE(checksum, 14); header.writeUInt32LE(declaredCompressedSize, 18); header.writeUInt32LE(declaredSize, 22); header.writeUInt16LE(localName.length, 26);
+    local.push(header, localName, compressed);
+    const record = Buffer.alloc(46); record.writeUInt32LE(0x02014b50); record.writeUInt16LE(20, 4); record.writeUInt16LE(20, 6); record.writeUInt16LE(method, 10); record.writeUInt32LE(checksum, 16); record.writeUInt32LE(declaredCompressedSize, 20); record.writeUInt32LE(declaredSize, 24); record.writeUInt16LE(centralName.length, 28); record.writeUInt32LE(options.externalAttributes ?? 0, 38); record.writeUInt32LE(offset, 42);
+    central.push(record, centralName); offset += header.length + localName.length + compressed.length;
+  }
+  const directory = Buffer.concat(central); const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
+  fs.writeFileSync(target, Buffer.concat([...local, directory, end]));
+};
 
 assert.deepEqual(validateComponentInstallRequest({ componentId: 'third-party.tool' }), { componentId: 'third-party.tool' });
 assert.throws(() => validateComponentInstallRequest('third-party.tool'), /普通对象/);
 assert.throws(() => validateComponentInstallRequest({ componentId: 'ThirdParty.Tool' }), /组件 ID 无效/);
 assert.throws(() => validateComponentInstallRequest({ componentId: 'third-party.tool', ignoreSecurity: true }), /字段无效/);
+
+const acquireInstall = createComponentInstallAdmission();
+const releaseFirstInstall = acquireInstall('third-party.tool');
+assert.throws(() => acquireInstall('third-party.tool'), /正在安装/);
+const releaseOtherInstall = acquireInstall('other.tool');
+releaseFirstInstall(); releaseOtherInstall();
+assert.equal(typeof acquireInstall('third-party.tool'), 'function', 'the per-component admission is released after settle');
+
+const transitionEvents = [];
+const transitionBarrier = { drain: async () => transitionEvents.push('drain'), release: () => transitionEvents.push('release') };
+const enteredBarrier = await enterComponentInstallTransition({
+  componentId: 'third-party.tool',
+  componentCapabilityBroker: { blockComponent: () => (transitionEvents.push('block'), transitionBarrier) },
+  componentViewManager: { closeComponent: () => transitionEvents.push('close-view') },
+  processSupervisor: { stopWhere: async () => transitionEvents.push('stop-tree') },
+  componentServiceManager: { stop: async () => transitionEvents.push('stop-service') },
+  abortComponentNetworkRequests: () => transitionEvents.push('abort-network'),
+});
+assert.equal(enteredBarrier, transitionBarrier);
+assert.deepEqual(transitionEvents, ['block', 'close-view', 'stop-tree', 'stop-service', 'abort-network', 'drain']);
+enteredBarrier.release();
+let failedBarrierReleased = false;
+await assert.rejects(enterComponentInstallTransition({
+  componentId: 'third-party.tool',
+  componentCapabilityBroker: { blockComponent: () => ({ drain: async () => {}, release: () => { failedBarrierReleased = true; } }) },
+  componentViewManager: { closeComponent: () => {} },
+  processSupervisor: { stopWhere: async () => { throw new Error('old process still running'); } },
+  componentServiceManager: { stop: async () => {} },
+  abortComponentNetworkRequests: () => {},
+}), /old process still running/);
+assert.equal(failedBarrierReleased, true, 'a failed quiesce releases the capability barrier and aborts before installation');
 
 let dialogCalls = 0;
 const dialog = {
@@ -38,11 +94,64 @@ await assert.rejects(confirmation('invalid'), /完整性状态无效/);
 const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
 assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
-assert.match(mainSource, /resolvePackage\(componentId\)[\s\S]*copyFile\(archivePath, packageSnapshotPath\)[\s\S]*extractPreparedPackage\(packageSnapshotPath, packageStagePath\)/,
-  'main snapshots the package it just resolved and installs from that snapshot, so a same-ID source replacement cannot change the confirmed bytes');
-assert.match(mainSource, /extractPreparedPackage\(packageSnapshotPath, packageStagePath\)[\s\S]*JSON\.parse\(await fs\.promises\.readFile\(manifestPath, 'utf8'\)\)[\s\S]*verifyComponentDirectoryAsync[\s\S]*confirmComponentPackageInstall[\s\S]*ensureInstallRoot/,
-  'main reparses and verifies the snapshotted package, then confirms unsigned code before touching the install root');
+assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath\)[\s\S]*inspectComponentArchive\(packageSnapshotPath\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath\)/);
+assert.match(mainSource, /const confirmed = await confirmComponentPackageInstall[\s\S]*verifyComponentTreeIdentity\(componentRoot[\s\S]*enterComponentInstallTransition[\s\S]*ensureInstallRoot/);
+assert.match(mainSource, /fs\.promises\.cp[\s\S]*verifyComponentTreeIdentity\(stagingPath[\s\S]*rename\(stagingPath, destination\)[\s\S]*verifyComponentTreeIdentity\(destination/);
 assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
 assert.match(mainSource, /if \(packageSnapshotPath\) await fs\.promises\.rm\(packageSnapshotPath/);
+
+const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-install-trust-'));
+try {
+  const archive = path.join(temporaryRoot, 'component.zip');
+  const manifest = marker => JSON.stringify({ apiVersion: 1, id: 'third-party.tool', version: '1.0.0', marker, entrypoints: { default: 'worker.cjs' }, requiredFiles: ['worker.cjs'] });
+  writeZip(archive, [['old/component.json', manifest('old')], ['old/worker.cjs', 'old']]);
+  inspectComponentArchive(archive);
+  // Replace the same-ID source before the snapshot. Only snapshot metadata/content may drive installation.
+  writeZip(archive, [['new/component.json', manifest('new')], ['new/worker.cjs', 'new']]);
+  const snapshot = path.join(temporaryRoot, 'snapshot.zip'); await snapshotComponentArchive(archive, snapshot);
+  const inspected = inspectComponentArchive(snapshot);
+  assert.equal(inspected.manifestEntry, 'new/component.json');
+  const extracted = path.join(temporaryRoot, 'extracted');
+  const extractedPackage = await extractComponentArchive(inspected, extracted);
+  assert.equal(extractedPackage.manifest.marker, 'new');
+
+  const oversized = path.join(temporaryRoot, 'oversized.zip');
+  const oversizedHandle = fs.openSync(oversized, 'w'); fs.ftruncateSync(oversizedHandle, 2048); fs.closeSync(oversizedHandle);
+  const rejectedSnapshot = path.join(temporaryRoot, 'rejected-snapshot.zip');
+  await assert.rejects(snapshotComponentArchive(oversized, rejectedSnapshot, { maxArchiveBytes: 1024 }), /本体大小超过安全上限/);
+  assert.equal(fs.existsSync(rejectedSnapshot), false, 'an oversized source is rejected before a snapshot is created');
+
+  const componentRoot = path.join(extracted, 'new');
+  const identity = await captureComponentTreeIdentity(componentRoot);
+  fs.writeFileSync(path.join(componentRoot, 'worker.cjs'), 'changed while confirmation was open');
+  await assert.rejects(verifyComponentTreeIdentity(componentRoot, identity), /发生变化/);
+  fs.writeFileSync(path.join(componentRoot, 'worker.cjs'), 'new');
+  const restoredIdentity = await captureComponentTreeIdentity(componentRoot);
+  const copied = path.join(temporaryRoot, 'copied'); fs.cpSync(componentRoot, copied, { recursive: true });
+  fs.writeFileSync(path.join(copied, 'worker.cjs'), 'changed during copy');
+  await assert.rejects(verifyComponentTreeIdentity(copied, restoredIdentity), /发生变化/);
+
+  const tooMany = path.join(temporaryRoot, 'too-many.zip');
+  writeZip(tooMany, Array.from({ length: 10_001 }, (_, index) => [`files/${index}.txt`, '']));
+  assert.throws(() => inspectComponentArchive(tooMany), /中央目录|条目/);
+
+  const bomb = path.join(temporaryRoot, 'bomb.zip');
+  writeZip(bomb, Array.from({ length: 5 }, (_, index) => [`bomb/${index}.bin`, '', { declaredSize: 0xffffffff, declaredCompressedSize: 0 }]));
+  assert.throws(() => inspectComponentArchive(bomb), /展开大小超过安全上限/);
+
+  const mismatch = path.join(temporaryRoot, 'mismatch.zip');
+  writeZip(mismatch, [['component.json', manifest('mismatch'), { localMethod: 8 }], ['worker.cjs', 'ok']]);
+  assert.throws(() => inspectComponentArchive(mismatch), /本地条目与中央目录不一致/);
+
+  const symlink = path.join(temporaryRoot, 'symlink.zip');
+  writeZip(symlink, [['component.json', manifest('link')], ['worker.cjs', 'target', { externalAttributes: (0xa000 << 16) >>> 0 }]]);
+  assert.throws(() => inspectComponentArchive(symlink), /符号链接/);
+
+  const corrupt = path.join(temporaryRoot, 'corrupt.zip');
+  writeZip(corrupt, [['component.json', manifest('corrupt')], ['worker.cjs', 'payload']]);
+  const bytes = fs.readFileSync(corrupt); bytes[30 + Buffer.byteLength('component.json') + Buffer.byteLength(manifest('corrupt')) + 30 + Buffer.byteLength('worker.cjs')] ^= 0xff; fs.writeFileSync(corrupt, bytes);
+  const corruptInspection = inspectComponentArchive(corrupt);
+  await assert.rejects(extractComponentArchive(corruptInspection, path.join(temporaryRoot, 'corrupt-out')), /CRC-32/);
+} finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
 
 console.log('Component install trust-boundary tests passed');

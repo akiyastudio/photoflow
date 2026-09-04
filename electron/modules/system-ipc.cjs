@@ -4,6 +4,7 @@ const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('
 const { componentDataRoot, createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
+const { assertAvailableDiskSpace, captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -236,6 +237,30 @@ const confirmComponentPackageInstall = async ({ componentId, integrityStatus, di
     noLink: true,
   });
   return response.response === 1;
+};
+const createComponentInstallAdmission = () => {
+  const active = new Set();
+  return componentId => {
+    if (active.has(componentId)) throw new Error('此组件正在安装，请等待当前安装完成');
+    active.add(componentId);
+    let released = false;
+    return () => { if (!released) { released = true; active.delete(componentId); } };
+  };
+};
+const enterComponentInstallTransition = async ({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests }) => {
+  if (typeof componentCapabilityBroker?.blockComponent !== 'function' || typeof componentViewManager?.closeComponent !== 'function' || typeof componentServiceManager?.stop !== 'function' || typeof processSupervisor?.stopWhere !== 'function' || typeof abortComponentNetworkRequests !== 'function') throw new Error('组件安装 transition gate 不完整');
+  const barrier = componentCapabilityBroker.blockComponent(componentId);
+  try {
+    componentViewManager.closeComponent(componentId);
+    await processSupervisor.stopWhere(status => status.owner?.componentId === componentId, 'component-install');
+    await componentServiceManager.stop(componentId, 'component-install');
+    abortComponentNetworkRequests(componentId);
+    await barrier.drain({ timeoutMs: 7500 });
+    return barrier;
+  } catch (error) {
+    barrier.release();
+    throw error;
+  }
 };
 
 const savePrivacyConsentWithConfig = async ({ request, privacyService, configMutationService, telemetryService }) => {
@@ -545,36 +570,6 @@ const registerSystemIpc = context => {
     return resolvedArchive;
   };
 
-  const runPackageCommand = (command, args) => new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    child.stdout.on('data', chunk => { output = (output + chunk.toString('utf8')).slice(-64000); });
-    child.stderr.on('data', chunk => { output = (output + chunk.toString('utf8')).slice(-64000); });
-    child.once('error', reject);
-    child.once('exit', code => code === 0 ? resolve(output) : reject(new Error(output.trim() || `安装包读取失败（退出代码 ${code}）`)));
-  });
-  const extractPreparedPackage = async (archivePath, target) => {
-    const listing = await runPackageCommand('tar.exe', ['-tf', archivePath]);
-    const entries = String(listing).split(/\r?\n/).map(value => value.trim()).filter(Boolean);
-    if (!entries.length) throw new Error('安装包为空');
-    for (const entry of entries) {
-      const normalized = entry.replace(/\\/g, '/');
-      if (normalized.startsWith('/') || /^[a-z]:/i.test(normalized) || normalized.split('/').some(segment => segment === '..')) throw new Error(`安装包包含不安全路径：${entry}`);
-    }
-    await fs.promises.mkdir(target, { recursive: true });
-    await runPackageCommand('tar.exe', ['-xf', archivePath, '-C', target]);
-    const pending = [target];
-    while (pending.length) {
-      const directory = pending.pop();
-      for (const item of await fs.promises.readdir(directory, { withFileTypes: true })) {
-        const itemPath = path.join(directory, item.name);
-        const stat = await fs.promises.lstat(itemPath);
-        if (stat.isSymbolicLink()) throw new Error(`安装包解压后包含不安全的符号链接：${path.relative(target, itemPath)}`);
-        if (stat.isDirectory()) pending.push(itemPath);
-      }
-    }
-  };
-
   ipcMain.on('renderer-error-log', (_event, message, details) => {
     const text = String(message || '未知错误').slice(0, 500);
     const detailText = String(details || '').slice(0, 4000);
@@ -755,29 +750,33 @@ const registerSystemIpc = context => {
     }
   });
 
+  const acquireComponentInstall = createComponentInstallAdmission();
   ipcMain.handle('components-install', async (_event, request) => {
     let stagingPath = '';
     let backupPath = '';
     let packageStagePath = '';
     let packageSnapshotPath = '';
     let preserveBackupPath = false;
+    let componentId = '';
+    let releaseInstall = null;
+    let capabilityBarrier = null;
     try {
-      const { componentId } = validateComponentInstallRequest(request);
+      ({ componentId } = validateComponentInstallRequest(request));
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
+      releaseInstall = acquireComponentInstall(componentId);
       const discoveredPackage = pluginService.resolvePackage(componentId);
       const archivePath = discoveredPackage.packagePath;
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
       packageSnapshotPath = `${packageStagePath}.zip`;
-      await fs.promises.copyFile(archivePath, packageSnapshotPath);
-      const packageSizeBytes = (await fs.promises.stat(packageSnapshotPath)).size;
-      await extractPreparedPackage(packageSnapshotPath, packageStagePath);
-      const manifestDirectory = path.dirname(String(discoveredPackage.manifestEntry || 'component.json'));
+      const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath);
+      const packageSizeBytes = sourceIdentity.size;
+      const snapshotPackage = inspectComponentArchive(packageSnapshotPath);
+      const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath);
+      const manifestDirectory = path.dirname(extractedPackage.manifestEntry);
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
       const stagedRelative = path.relative(packageStagePath, componentRoot);
       if (stagedRelative.startsWith('..') || path.isAbsolute(stagedRelative)) throw new Error('组件清单路径越界');
-      const manifestPath = path.join(componentRoot, 'component.json');
-      if (!fs.existsSync(manifestPath)) throw new Error('所选文件夹中没有 component.json');
-      const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+      const manifest = extractedPackage.manifest;
       if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
       if (manifest.apiVersion !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
       const entrypoints = manifest.entrypoints || {};
@@ -795,25 +794,43 @@ const registerSystemIpc = context => {
         if (!(await fs.promises.stat(sourceFile).catch(() => null))?.isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
       }
       await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true);
-      const confirmed = await confirmComponentPackageInstall({ componentId, integrityStatus: discoveredPackage.integrityStatus, dialog, mainWindow });
+      const integrityToken = pluginService.componentIntegrityToken(componentId, componentRoot);
+      const snapshotIntegrityStatus = integrityToken.startsWith('integrity|') ? 'pinned-unverified' : integrityToken.startsWith('metadata|') ? 'unsigned' : 'invalid';
+      const componentTreeIdentity = await captureComponentTreeIdentity(componentRoot);
+      const confirmed = await confirmComponentPackageInstall({ componentId, integrityStatus: snapshotIntegrityStatus, dialog, mainWindow });
       if (!confirmed) return { success: false, cancelled: true };
+      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
+      const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
+      await assertAvailableDiskSpace(pluginService.installRoot, componentSizeBytes);
+
+      capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
+      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
 
       const installRoot = pluginService.ensureInstallRoot();
       const container = path.join(installRoot, String(componentId));
       await fs.promises.mkdir(container, { recursive: true });
       const destination = path.join(container, 'runtime');
-      stagingPath = path.join(installRoot, `.${componentId}-install-${process.pid}-${Date.now()}`);
+      stagingPath = path.join(installRoot, `.${componentId}-install-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
       await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
+      await verifyComponentTreeIdentity(stagingPath, componentTreeIdentity);
       if (fs.existsSync(destination)) {
-        backupPath = path.join(installRoot, `.${componentId}-backup-${process.pid}-${Date.now()}`);
+        backupPath = path.join(installRoot, `.${componentId}-backup-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
         await fs.promises.rename(destination, backupPath);
       }
       try {
         await fs.promises.rename(stagingPath, destination);
         stagingPath = '';
+        await verifyComponentTreeIdentity(destination, componentTreeIdentity);
+        await pluginService.verifyComponentDirectoryAsync(componentId, destination, true);
       } catch (error) {
-        if (backupPath && !fs.existsSync(destination)) await fs.promises.rename(backupPath, destination).catch(() => undefined);
-        backupPath = '';
+        try {
+          await fs.promises.rm(destination, { recursive: true, force: true });
+          if (backupPath && fs.existsSync(backupPath)) await fs.promises.rename(backupPath, destination);
+          backupPath = '';
+        } catch (rollbackError) {
+          preserveBackupPath = Boolean(backupPath);
+          error.message = `${error.message || String(error)}；组件运行时回滚失败：${rollbackError.message || String(rollbackError)}`;
+        }
         throw error;
       }
       try {
@@ -837,6 +854,8 @@ const registerSystemIpc = context => {
       if (backupPath && !preserveBackupPath) await fs.promises.rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
       if (packageStagePath) await fs.promises.rm(packageStagePath, { recursive: true, force: true }).catch(() => undefined);
       if (packageSnapshotPath) await fs.promises.rm(packageSnapshotPath, { force: true }).catch(() => undefined);
+      capabilityBarrier?.release?.();
+      releaseInstall?.();
     }
   });
 
@@ -1743,4 +1762,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { confirmComponentPackageInstall, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
