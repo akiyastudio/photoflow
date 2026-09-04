@@ -15,6 +15,9 @@ const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_INTEGRITY_BYTES = 4 * 1024 * 1024;
+const MAX_RECEIPT_BYTES = 64 * 1024;
+const RECEIPT_SCHEMA_VERSION = 1;
+const VERIFIER_VERSION = 1;
 const COMPONENT_ARCHIVE = /^PhotoFlow-(.+)-(win32|darwin|linux)-(x64|arm64|ia32)\.zip$/;
 const CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
   let crc = value;
@@ -89,6 +92,20 @@ const sameIdentity = (left, right) => left && right && Object.keys(left).every(k
 const assertSourceIdentity = (archivePath, expected) => {
   const current = fs.statSync(archivePath, { throwIfNoEntry: false });
   if (!current?.isFile() || !sameIdentity(expected, identityFor(current))) throw new Error(`组件包在验证期间被替换或修改：${archivePath}`);
+};
+const hashStableArtifact = async archivePath => {
+  const handle = await fs.promises.open(archivePath, 'r');
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size) || stat.size < 22 || stat.size > MAX_ARCHIVE_BYTES) throw new Error(`组件包本体大小超过安全上限：${archivePath}`);
+    const identity = identityFor(stat);
+    assertSourceIdentity(archivePath, identity);
+    const hash = crypto.createHash('sha256');
+    await pipeline(handle.createReadStream({ autoClose: false }), new Transform({ transform(chunk, encoding, callback) { hash.update(chunk); callback(); } }));
+    if (!sameIdentity(identity, identityFor(await handle.stat()))) throw new Error(`组件包在哈希期间被修改：${archivePath}`);
+    assertSourceIdentity(archivePath, identity);
+    return { size: stat.size, sha256: hash.digest('hex'), identity };
+  } finally { await handle.close(); }
 };
 const snapshotArchive = async (archivePath, target) => {
   const handle = await fs.promises.open(archivePath, 'r');
@@ -198,11 +215,67 @@ const verifyComponentPackage = async archivePath => {
   } finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
 };
 
+const receiptPathFor = archivePath => `${path.resolve(archivePath)}.verification.json`;
+const writeVerificationReceipt = (archivePath, result) => {
+  const receiptPath = receiptPathFor(archivePath);
+  const receipt = {
+    schemaVersion: RECEIPT_SCHEMA_VERSION,
+    verifierVersion: VERIFIER_VERSION,
+    command: 'npm run verify:component-packages',
+    status: 'passed',
+    verifiedAt: new Date().toISOString(),
+    archive: { fileName: result.fileName, size: result.size, sha256: result.sha256 },
+    component: { id: result.componentId, version: result.version, platform: result.platform, arch: result.arch },
+  };
+  const temporary = `${receiptPath}.${process.pid}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(temporary, 'wx');
+    fs.writeFileSync(fd, `${JSON.stringify(receipt, null, 2)}\n`, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd); fd = undefined;
+    fs.renameSync(temporary, receiptPath);
+  } finally { if (fd !== undefined) fs.closeSync(fd); fs.rmSync(temporary, { force: true }); }
+  return receiptPath;
+};
+const exactKeys = (value, keys, label) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).sort().join('\0') !== [...keys].sort().join('\0')) throw new Error(`组件验证回执 ${label} 结构无效`);
+};
+const verifyComponentPackageReceipt = async (archivePath, expected) => {
+  const absoluteArchive = path.resolve(archivePath);
+  const receiptPath = receiptPathFor(absoluteArchive);
+  let receiptFd;
+  try { receiptFd = fs.openSync(receiptPath, 'r'); }
+  catch (error) { if (error?.code === 'ENOENT') throw new Error(`组件验证回执缺失或过大：${path.basename(receiptPath)}`); throw error; }
+  let receiptIdentity;
+  let receipt;
+  try {
+    const receiptStat = fs.fstatSync(receiptFd);
+    if (!receiptStat.isFile() || receiptStat.size < 2 || receiptStat.size > MAX_RECEIPT_BYTES) throw new Error(`组件验证回执缺失或过大：${path.basename(receiptPath)}`);
+    receiptIdentity = identityFor(receiptStat);
+    assertSourceIdentity(receiptPath, receiptIdentity);
+    receipt = JSON.parse(fs.readFileSync(receiptFd, 'utf8'));
+    if (!sameIdentity(receiptIdentity, identityFor(fs.fstatSync(receiptFd)))) throw new Error(`组件验证回执在读取期间被修改：${path.basename(receiptPath)}`);
+    assertSourceIdentity(receiptPath, receiptIdentity);
+  } finally { fs.closeSync(receiptFd); }
+  exactKeys(receipt, ['schemaVersion', 'verifierVersion', 'command', 'status', 'verifiedAt', 'archive', 'component'], '根对象');
+  exactKeys(receipt.archive, ['fileName', 'size', 'sha256'], 'archive');
+  exactKeys(receipt.component, ['id', 'version', 'platform', 'arch'], 'component');
+  if (receipt.schemaVersion !== RECEIPT_SCHEMA_VERSION || receipt.verifierVersion !== VERIFIER_VERSION || receipt.command !== 'npm run verify:component-packages' || receipt.status !== 'passed' || !Number.isFinite(Date.parse(receipt.verifiedAt))) throw new Error('组件验证回执版本或执行证据无效，必须重新完整验证');
+  const expectedIdentity = { id: String(expected.id), version: String(expected.version), platform: String(expected.platform), arch: String(expected.arch) };
+  if (JSON.stringify(receipt.component) !== JSON.stringify(expectedIdentity)) throw new Error(`组件验证回执身份与当前发布集合不一致：${path.basename(absoluteArchive)}`);
+  if (receipt.archive.fileName !== path.basename(absoluteArchive) || !Number.isSafeInteger(receipt.archive.size) || !/^[a-f0-9]{64}$/.test(receipt.archive.sha256)) throw new Error('组件验证回执 archive 字段无效');
+  const actual = await hashStableArtifact(absoluteArchive);
+  if (actual.size !== receipt.archive.size || actual.sha256 !== receipt.archive.sha256) throw new Error(`组件 ZIP 与完整验证回执不一致，必须重新完整验证：${path.basename(absoluteArchive)}`);
+  return { fileName: receipt.archive.fileName, size: actual.size, sha256: actual.sha256, componentId: receipt.component.id, version: receipt.component.version, platform: receipt.component.platform, arch: receipt.component.arch, sourceIdentity: actual.identity, receiptPath, receiptIdentity, verificationReceipt: { schemaVersion: receipt.schemaVersion, verifierVersion: receipt.verifierVersion, command: receipt.command, status: receipt.status, verifiedAt: receipt.verifiedAt } };
+};
+
 const parseArguments = values => {
-  const result = { packageRoot: defaultPackageRoot, paths: [] };
+  const result = { packageRoot: defaultPackageRoot, paths: [], writeReceipts: false };
   for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
-    if (value === '--package-root') {
+    if (value === '--write-receipts') result.writeReceipts = true;
+    else if (value === '--package-root') {
       const directory = values[++index];
       if (!directory || directory.startsWith('--')) throw new Error('--package-root 需要目录参数');
       result.packageRoot = path.resolve(directory);
@@ -217,7 +290,7 @@ const parseArguments = values => {
 };
 
 const run = async () => {
-  const { packageRoot, paths } = parseArguments(process.argv.slice(2));
+  const { packageRoot, paths, writeReceipts } = parseArguments(process.argv.slice(2));
   const expected = paths.length ? [] : expectedComponentPackages(packageRoot);
   const packages = paths.length ? paths : expected.map(component => {
     if (!fs.statSync(component.path, { throwIfNoEntry: false })?.isFile()) throw new Error(`组件包缺失：${component.fileName}`);
@@ -228,10 +301,11 @@ const run = async () => {
     const verified = await verifyComponentPackage(packagePath);
     results.push(verified);
     console.log(`Verified component package: ${verified.fileName} (${verified.size} bytes, sha256 ${verified.sha256})`);
+    if (writeReceipts) console.log(`Verification receipt: ${writeVerificationReceipt(packagePath, verified)}`);
   }
   return results;
 };
 
 if (require.main === module) run().catch(error => { console.error(`Component package verification failed: ${error.message || error}`); process.exitCode = 1; });
 
-module.exports = { verifyComponentPackage, expectedComponentPackages, parseArguments };
+module.exports = { verifyComponentPackage, verifyComponentPackageReceipt, writeVerificationReceipt, expectedComponentPackages, parseArguments, receiptPathFor, hashStableArtifact, assertSourceIdentity };

@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { verifyComponentPackage } = require('./verify-component-packages.cjs');
+const { verifyComponentPackage, verifyComponentPackageReceipt, writeVerificationReceipt, receiptPathFor } = require('./verify-component-packages.cjs');
 const { writeZip } = require('./test-helpers/zip-fixture.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-verifier-test-'));
@@ -39,6 +39,18 @@ const verifierTemporaryDirectories = () => new Set(fs.readdirSync(os.tmpdir()).f
     zip(archive, goodEntries);
     const result = await verifyComponentPackage(archive);
     assert.equal(result.componentId, manifest.id);
+    const expectedReceiptIdentity = { id: manifest.id, version: manifest.version, platform: process.platform, arch: process.arch };
+    await assert.rejects(verifyComponentPackageReceipt(archive, expectedReceiptIdentity), /回执缺失/);
+    writeVerificationReceipt(archive, result);
+    const receiptVerified = await verifyComponentPackageReceipt(archive, expectedReceiptIdentity);
+    assert.deepEqual({ fileName: receiptVerified.fileName, size: receiptVerified.size, sha256: receiptVerified.sha256, componentId: receiptVerified.componentId, version: receiptVerified.version, platform: receiptVerified.platform, arch: receiptVerified.arch }, result);
+    assert.equal(receiptVerified.verificationReceipt.status, 'passed');
+    const receiptPath = receiptPathFor(archive);
+    const alteredReceipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    alteredReceipt.archive.sha256 = '0'.repeat(64);
+    fs.writeFileSync(receiptPath, JSON.stringify(alteredReceipt));
+    await assert.rejects(verifyComponentPackageReceipt(archive, expectedReceiptIdentity), /必须重新完整验证/);
+    fs.rmSync(receiptPath);
 
     const integrityManifest = { ...manifest, integrity: 'component-integrity.json' };
     const integrityText = JSON.stringify({

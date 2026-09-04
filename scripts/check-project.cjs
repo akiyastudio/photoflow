@@ -1,9 +1,16 @@
 const { spawnSync } = require('child_process');
+const path = require('node:path');
+const { writeQualityReceipt, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
+
+const repositoryRoot = path.resolve(__dirname, '..');
+const qualityStartedAt = new Date().toISOString();
 
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('npm_execpath is unavailable; run this check through npm.');
 const testsOnly = process.argv.includes('--tests-only');
 const releaseReady = process.argv.includes('--release-ready');
+const releaseQuality = process.argv.includes('--release-quality');
+const componentRelease = releaseReady || releaseQuality;
 
 const steps = [
   ['Python environment', ['run', 'check:python']],
@@ -13,12 +20,12 @@ const steps = [
   ] : []),
   ['privacy consent and telemetry', ['run', 'test:privacy']],
   ['法律证据结构', ['run', 'test:legal-release-evidence']],
-  ...(releaseReady ? [['component release gate', ['run', 'check:components:release']]] : []),
+  ...(componentRelease ? [['component release gate', ['run', 'check:components:release']]] : []),
   ...(releaseReady ? [['法律发布批准严格门禁', ['run', 'check:legal-release-ready']]] : []),
-  ...(!releaseReady ? [['architecture', ['run', 'test:architecture']]] : []),
+  ...(!componentRelease ? [['architecture', ['run', 'test:architecture']]] : []),
   ['domain contracts', ['run', 'test:domain-contracts']],
   ['operations storage', ['run', 'test:operations-storage']],
-  ...(!releaseReady ? [
+  ...(!componentRelease ? [
     ['component service and migrations', ['run', 'test:component-service']],
     ['component host contracts and leases', ['run', 'test:component-host-api']],
     ['component host views', ['run', 'test:component-host']],
@@ -48,7 +55,7 @@ const steps = [
   ['project virtual paths', ['run', 'test:project-virtual-path']],
   ['media rating outbox', ['run', 'test:media-rating']],
   ['background tasks', ['run', 'test:background-tasks']],
-  ...(!releaseReady ? [['process supervisor', ['run', 'test:process-supervisor']]] : []),
+  ...(!componentRelease ? [['process supervisor', ['run', 'test:process-supervisor']]] : []),
   ['database migrations', ['run', 'test:database-migrations']],
 ];
 
@@ -59,6 +66,16 @@ for (const [label, args] of steps) {
   if (result.status !== 0) process.exit(result.status || 1);
 }
 
+if (releaseQuality) {
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  if (commit.error || commit.status !== 0) throw new Error('无法读取发布质量门禁对应的 Git HEAD');
+  assertCleanGitWorktree(repositoryRoot);
+  const receipt = writeQualityReceipt({ repositoryRoot, gitCommit: commit.stdout.trim(), startedAt: qualityStartedAt, finishedAt: new Date().toISOString() });
+  console.log(`Release quality receipt recorded for ${receipt.gitCommit}; this is test evidence, not a signature or legal approval.`);
+}
+
 process.stdout.write(releaseReady
   ? '\nProject checks and the strict legal release approval gate passed.\n'
-  : '\nProject checks passed. Legal evidence structure was checked; this does not mean the release is approved or publishable.\n');
+  : releaseQuality
+    ? '\nRelease quality checks passed. Final installer approval was intentionally not evaluated before the build.\n'
+    : '\nProject checks passed. Legal evidence structure was checked; this does not mean the release is approved or publishable.\n');
