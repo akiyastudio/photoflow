@@ -49,6 +49,7 @@ const { createDomainHealthService } = require('./services/domain-health-service.
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
 const { ComponentLifecycleCoordinator } = require('./services/component-lifecycle-coordinator.cjs');
+const { runApplicationQuit } = require('./services/application-quit-coordinator.cjs');
 const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
@@ -242,6 +243,7 @@ let thumbnailPipeline = null;
 let thumbnailService = null;
 let fileRootWatcherService = null;
 let mediaService = null;
+let videoPlaybackService = null;
 const mediaRuntimeState = {
   activeMediaCacheConfig: { maxSizeGB: 50, directory: '' },
 };
@@ -1385,7 +1387,7 @@ app.whenReady().then(async () => {
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
-  registerVideoPlaybackIpc({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog });
+  videoPlaybackService = registerVideoPlaybackIpc({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
   const recoveryClients = [
     workspaceDatabase,
@@ -1457,32 +1459,24 @@ app.whenReady().then(async () => {
 registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, beforeDrain: () => {
   if (!componentLifecycleCoordinator.beginApplicationQuit()) throw Object.assign(new Error('组件变更仍在进行，请稍后重试退出'), { code: 'APP_QUIT_BUSY' });
 }, onQuit: async () => {
-  const background = processSupervisor.list().filter(status => status.owner?.componentId && !['idle', 'stopped', 'exited'].includes(status.state));
-  if (background.length) {
-    const options = { type: 'warning', title: '插件仍在后台运行', message: `仍有 ${new Set(background.map(item => item.owner.componentId)).size} 个插件在后台运行。`, detail: '退出应用需要先关闭这些插件的全部后台进程。', buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true };
-    const response = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
-    if (response.response !== 0) { componentLifecycleCoordinator.cancelApplicationQuit(); const error = new Error('用户取消退出'); error.code = 'APP_QUIT_CANCELLED'; throw error; }
-  }
   const componentIds = [...new Set(componentHostRegistry.list().map(item => item.componentId))];
-  const barriers = componentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
-  try {
-    await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
-    await componentServiceManager?.stopAll('application-quit');
-    await componentViewManager?.closeAllAndWait();
-    componentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
-    await Promise.all(barriers.map(barrier => barrier.drain({ timeoutMs: 7500 })));
-    await componentLifecycleCoordinator.waitForAllWork({ timeoutMs: 7500 });
-    await processSupervisor.stopAll('application-quit');
-  } catch (error) { barriers.forEach(barrier => barrier.release()); componentLifecycleCoordinator.cancelApplicationQuit(); throw error; }
-  componentLifecycleCoordinator.commitApplicationQuit();
-  const teardown = [
-    () => componentServiceManager?.destroy(), () => componentViewManager?.destroy(), () => exiftool.end(), () => destroyToastViewManager(), () => telemetryService?.stop(), () => pluginService?.stop?.(),
-    () => stopWorkspaceWatcher(true), () => stopFileRootWatchers(), () => stopShellThumbnailProcess(), () => imageThumbnailRuntime.stop(),
-    () => thumbnailService?.stop(), () => backgroundTasks.stop(), () => domainCommandJournal.stop(), () => eventBus.clear(),
-    () => workspaceDatabase.stop(), () => operationsDatabase.stop(), () => workspaceMaintenanceDatabase.stop(), () => mediaDatabase.stop(),
-    () => mediaInteractionDatabase.stop(), () => versionReadDatabase.stop(), () => versionLocationDatabase.stop(), () => mediaScanDatabase.stop(), () => trackingScanDatabase.stop(),
-  ];
-  for (const operation of teardown) try { await operation(); } catch (error) { writeLog('warn', 'Post-commit application teardown warning', { error: error.message || String(error) }); }
+  await runApplicationQuit({
+    componentIds, processSupervisor, componentServiceManager, componentViewManager, componentLifecycleCoordinator,
+    componentCapabilityBroker, abortComponentNetworkRequests, writeLog,
+    confirmBackgroundProcesses: async background => {
+      const options = { type: 'warning', title: '插件仍在后台运行', message: `仍有 ${new Set(background.map(item => item.owner.componentId)).size} 个插件在后台运行。`, detail: '退出应用需要先关闭这些插件的全部后台进程。', buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true };
+      const response = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
+      return response.response === 0;
+    },
+    teardown: [
+      () => videoPlaybackService?.dispose(), () => componentServiceManager?.destroy(), () => componentViewManager?.destroy(), () => exiftool.end(),
+      () => destroyToastViewManager(), () => telemetryService?.stop(), () => pluginService?.stop?.(), () => stopWorkspaceWatcher(true),
+      () => stopFileRootWatchers(), () => stopShellThumbnailProcess(), () => imageThumbnailRuntime.stop(), () => thumbnailService?.stop(),
+      () => backgroundTasks.stop(), () => domainCommandJournal.stop(), () => eventBus.clear(), () => workspaceDatabase.stop(),
+      () => operationsDatabase.stop(), () => workspaceMaintenanceDatabase.stop(), () => mediaDatabase.stop(), () => mediaInteractionDatabase.stop(),
+      () => versionReadDatabase.stop(), () => versionLocationDatabase.stop(), () => mediaScanDatabase.stop(), () => trackingScanDatabase.stop(),
+    ],
+  });
 }, onQuitFailed: async error => {
   componentLifecycleCoordinator.cancelApplicationQuit();
   if (BrowserWindow.getAllWindows().length === 0) { createWindow(); loadMainWindowRenderer(); }

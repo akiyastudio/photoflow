@@ -219,6 +219,7 @@ class ManagedProcess extends EventEmitter {
       startedAt: this.startedAt,
       lastHealthyAt: this.lastHealthyAt,
       restartCount: this.restartTimes.length,
+      terminationFailed: this.lifecycle?.terminationFailed === true,
       lastExit: this.lastExit,
     };
   }
@@ -523,6 +524,11 @@ class ProcessSupervisor {
     const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
     if (errors.length) { this.stopping = false; throw new AggregateError(errors, 'Unable to stop every managed process'); }
     this.processes.clear();
+  }
+
+  hasComponentOwnerProcesses(componentId) {
+    const id = String(componentId || '');
+    return this.hasWhere(status => status.owner?.componentId === id) || this.hasUnconfirmedOwner(id);
   }
 }
 

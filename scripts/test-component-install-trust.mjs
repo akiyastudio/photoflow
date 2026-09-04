@@ -99,9 +99,9 @@ const promptDialog = { showMessageBox: async (_window, options) => {
   assert.deepEqual(options.buttons, ['关闭后台进程并继续禁用', '取消']);
   return { response: 1 };
 } };
-const inactiveSupervisor = { hasWhere: () => false };
-assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: inactiveSupervisor, dialog: promptDialog, mainWindow: {} }), true);
-assert.equal(backgroundPrompts, 0, 'no process means no prompt');
+const inactiveSupervisor = { hasWhere: () => false, hasUnconfirmedOwner: () => false };
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: inactiveSupervisor, lifecycleCoordinator: { hasWork: () => true }, dialog: promptDialog, mainWindow: {} }), true);
+assert.equal(backgroundPrompts, 0, 'ordinary lifecycle work without a child process means no prompt');
 const activeSupervisor = { hasWhere: () => true };
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'disable', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), false);
 assert.equal(backgroundPrompts, 1);
@@ -115,6 +115,7 @@ promptDialog.showMessageBox = async (_window, options) => {
   return { response: 0 };
 };
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: { hasWhere: () => false, hasUnconfirmedOwner: () => true }, dialog: promptDialog, mainWindow: {} }), true);
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-install-trust-'));
 try {

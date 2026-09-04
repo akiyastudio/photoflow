@@ -251,9 +251,10 @@ const confirmComponentPackageInstall = async ({ componentId, componentVersion, i
   });
   return response.response === 1;
 };
-const confirmComponentBackgroundStop = async ({ componentId, componentName = componentId, action, processSupervisor, lifecycleCoordinator, dialog, mainWindow }) => {
-  const active = processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId) === true
-    || lifecycleCoordinator?.hasWork?.(componentId) === true;
+const confirmComponentBackgroundStop = async ({ componentId, componentName = componentId, action, processSupervisor, dialog, mainWindow }) => {
+  const active = processSupervisor?.hasComponentOwnerProcesses?.(componentId) === true
+    || processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId) === true
+    || processSupervisor?.hasUnconfirmedOwner?.(componentId) === true;
   if (!active) return true;
   const messages = {
     disable: { title: '插件仍在后台运行', message: '禁用此插件需要先关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续禁用' },

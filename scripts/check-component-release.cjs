@@ -18,6 +18,7 @@ const steps = [
   ['component install trust boundary', process.execPath, ['scripts/test-component-install-trust.mjs']],
   ['component durable transactions', process.execPath, ['scripts/test-component-transactions.cjs']],
   ['component lifecycle coordination', process.execPath, ['scripts/test-component-lifecycle-coordinator.cjs']],
+  ['application quit commit point', process.execPath, ['scripts/test-application-quit-coordinator.cjs']],
   ['component runtime compatibility', process.execPath, ['scripts/test-plugin-service-runtime-capability.cjs']],
   ['component status policy', process.execPath, ['scripts/test-component-status-refresh-policy.cjs']],
   ['architecture', process.execPath, [npmCli, 'run', 'test:architecture']],

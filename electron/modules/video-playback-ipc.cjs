@@ -122,7 +122,6 @@ const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
   });
   ipcMain.handle('video-player-stop', (event, sessionId) => ({ success: service.stop(sessionId, event.sender.id) }));
   ipcMain.handle('advanced-video-stop', (event, sessionId) => ({ success: service.stop(sessionId, event.sender.id) }));
-  app.once('before-quit', () => service.dispose());
   return service;
 };
 
