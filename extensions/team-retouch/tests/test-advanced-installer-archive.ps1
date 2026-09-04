@@ -65,6 +65,21 @@ try {
         if ($renamed -or -not (Test-Path -LiteralPath $entityPath)) { throw 'entity identity lock allowed concurrent rename' }
     } finally { $entityLock.Dispose() }
 
+    $script:mockRegistrations = @{}
+    function Get-DistroRegistration([string]$Name) { if ($script:mockRegistrations[$Name]) { return @{ Name=$Name } }; return $null }
+    function Unregister-OwnedDistro([string]$Name, [string]$ExpectedRoot) {
+        Remove-Item -LiteralPath (Join-Path $ExpectedRoot 'ext4.vhdx') -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $ExpectedRoot -Recurse -Force -ErrorAction Stop
+        $script:mockRegistrations[$Name] = $false
+    }
+    foreach ($phase in @('candidate','repair','final-fault')) {
+        $transactionRoot=Join-Path $root ("transaction-$phase"); New-Item -ItemType Directory -Path $transactionRoot|Out-Null
+        $transactionVhd=Join-Path $transactionRoot 'ext4.vhdx'; [IO.File]::WriteAllText($transactionVhd,'vhd')
+        $directoryLock=Open-StagingDirectoryLock $transactionRoot; $vhdLock=Open-EntityIdentityLock $transactionVhd; $script:mockRegistrations[$phase]=$true
+        Unregister-ReleasingLocks $phase $transactionRoot ([ref]$vhdLock) ([ref]$directoryLock)
+        if ($vhdLock -or $directoryLock -or (Test-Path -LiteralPath $transactionRoot) -or (Get-DistroRegistration $phase)) { throw "unregister lock-release transaction failed: $phase" }
+    }
+
     $linkAttributes = -1577123840 # signed Int32 representation of Unix symlink mode 0120777
     $cases = @(
         @{Name='traversal'; Entries=@(@{Name='../evil';Data='owned';Attributes=$null}, $regular[0])},

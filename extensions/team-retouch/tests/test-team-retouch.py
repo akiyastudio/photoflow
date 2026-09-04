@@ -11,7 +11,7 @@ import advanced_bridge
 import identity_engine, team_retouch, image_safety
 from advanced_geometry import normalized_cxcywh_to_original_xyxy
 from checkpoint_lock import read_checkpoint_lock
-from team_retouch import bounded_planning_box, emit_progress, identify_people, match_returned_batch, maximize_assignment, plan_work_tiles, spatially_order_people
+from team_retouch import bounded_planning_box, emit_progress, identify_people, match_returned_batch, maximize_assignment, plan_work_tiles, restore_patches, spatially_order_people
 from patch_merge import align_patch, constrain_person_boundary, edit_weight_and_delta, fuse_patch_delta, merge
 
 def main():
@@ -56,6 +56,15 @@ def main():
         Image.fromarray(portrait_return,'L').save(returned); Image.fromarray(portrait,'L').save(candidate)
         with redirect_stdout(io.StringIO()): portrait_match=match_returned_batch(str(manifest))['matches'][0]
         assert portrait_match['informationGate']=={'returned':True,'candidate':True}, portrait_match
+        high_key=(247-((np.indices((256,192))[0]+np.indices((256,192))[1])%8)).astype(np.uint8)
+        hy,hx=np.indices(high_key.shape); high_key[((hx-96)/25)**2+((hy-72)/32)**2<1]=190; high_key[104:256,55:137]=92
+        high_key[((hx-87)**2+(hy-67)**2)<9]=35; high_key[((hx-105)**2+(hy-67)**2)<9]=35; high_key[86:90,86:107]=110
+        high_path=root/'high-key.png'; Image.fromarray(high_key,'L').save(high_path)
+        high_descriptor=team_retouch.describe_match_image(high_path)
+        assert team_retouch.match_information_sufficient(high_descriptor), {key:high_descriptor[key] for key in ('grayStd','entropy','edgeFraction','edgeCellCount','keypointCount','keypointCoverage')}
+        high_edit=high_key.copy(); high_edit[72:78,112:118]=205; Image.fromarray(high_key,'L').save(candidate); Image.fromarray(high_edit,'L').save(returned)
+        with redirect_stdout(io.StringIO()): high_match=match_returned_batch(str(manifest))['matches'][0]
+        assert high_match['informationGate']=={'returned':True,'candidate':True}, high_match
     with mock.patch.object(advanced_bridge, 'script_path', side_effect=lambda name: ROOT/'advanced'/name), \
          mock.patch.object(advanced_bridge, 'wsl_path', side_effect=lambda path: f"/mnt/c/{Path(path).name}"), \
          mock.patch.object(advanced_bridge, 'run_shell', side_effect=[subprocess.TimeoutExpired(['wsl.exe'], 12), '']) as run_shell:
@@ -238,14 +247,24 @@ def main():
             try: image_safety.validate_dimensions(*dimensions,role=role)
             except ValueError: pass
             else: raise AssertionError(f'unsafe dimensions accepted: {dimensions} {role}')
+    with mock.patch.dict('os.environ',{'PHOTOFLOW_TEST_PHYSICAL_MEMORY_BYTES':str(64*1024**3),'PHOTOFLOW_TEST_AVAILABLE_MEMORY_BYTES':str(1024**3)}):
+        try: image_safety.validate_dimensions(10_000,10_000)
+        except ValueError as error: assert '峰值内存' in str(error)
+        else: raise AssertionError('large total memory must not hide low currently available memory')
     with tempfile.TemporaryDirectory() as temporary:
         oriented=Path(temporary)/'oriented.jpg'; exif=Image.Exif(); exif[274]=6; Image.new('RGB',(30,20),'gray').save(oriented,exif=exif)
         assert image_safety.inspect_oriented_dimensions(oriented)==(20,30)
+        oriented_width,oriented_height=image_safety.inspect_oriented_dimensions(oriented)
+        assert normalized_cxcywh_to_original_xyxy([.5,.5,.5,.5],oriented_width,oriented_height)==[5,7.5,15,22.5], 'EXIF-oriented PairDETR boxes must use displayed dimensions'
     with tempfile.TemporaryDirectory() as temporary, mock.patch.object(team_retouch,'MAX_WORK_PIXELS',100):
         root=Path(temporary); delivery=root/'delivery'; delivery.mkdir(); rgb=np.zeros((20,20,3),np.uint8)
         person={'box':[0,0,20,20],'planningBox':[0,0,20,20],'mask':np.ones((20,20),bool),'score':1,'source':'rtmdet','reviewReason':''}
         _people,tasks=team_retouch.generate_work_tasks(rgb,[person],root,delivery,'photo','test',oversize_crop_mode='expand')
         assert Image.open(tasks[0]['patchPath']).width*Image.open(tasks[0]['patchPath']).height<=100
+        source=root/'source.png'; Image.fromarray(rgb,'RGB').save(source); restored_path=root/'restored.png'; restore_manifest=root/'restore.json'
+        restore_manifest.write_text(json.dumps({'tasks':[{'id':'restore','patchPath':str(restored_path),'crop':{'x':0,'y':0,'width':20,'height':20}}]}),encoding='utf-8')
+        restored=restore_patches(source,restore_manifest)
+        assert restored['outputs'][0]['width']*restored['outputs'][0]['height']<=100 and Image.open(restored_path).size==(restored['outputs'][0]['width'],restored['outputs'][0]['height'])
     # Supplied face boxes on constant pixels must not become high-quality evidence.
     runtime=identity_engine.IdentityRuntime.__new__(identity_engine.IdentityRuntime)
     runtime._detect_faces=lambda *_: []

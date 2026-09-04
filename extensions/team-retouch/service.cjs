@@ -1343,6 +1343,7 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
   const operationId = crypto.randomUUID();
   let backupPath = '';
   let stagedPath = '';
+  let restoredWork = null;
   try {
     if (crop) {
       const materialized = await materializeMediaForOperation(parentId, [{ photoId: row.photo_id, versionId: row.base_version_id }]);
@@ -1355,7 +1356,7 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
       stagedPath = path.join(authorized.dataDirectory, `recrop-${operationId}.png`);
       await fs.promises.writeFile(manifestPath, JSON.stringify({ tasks: [{ ...serializeTask(row), crop, patchPath: stagedPath }] }), 'utf8');
       await appendCommand(storage, { operationId, type: 'recrop', state: 'prepared', taskId: row.id });
-      try { await runAlgorithm(parentId, ['restore', '--input', base.filePath, '--manifest', manifestPath], { timeoutMs: 10 * 60 * 1000 }); }
+      try { const restored = await runAlgorithm(parentId, ['restore', '--input', base.filePath, '--manifest', manifestPath], { timeoutMs: 10 * 60 * 1000 }); restoredWork = (restored.outputs || []).find(item => String(item.id) === String(row.id)) || null; }
       finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); await materialized.cleanup(); }
       if (!fs.existsSync(stagedPath)) throw new Error('重新裁切没有生成工作图');
       const publication = replacePersistentFromStage(stagedPath, row.patch_path, operationId);
@@ -1363,7 +1364,8 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
     }
     db.exec('BEGIN IMMEDIATE');
     try {
-      const generation = crop ? { ...parseJson(row.generation_json, {}), version: 2, strategy: 'manual', workWidth: crop.width, workHeight: crop.height, fileDigest: crypto.createHash('sha256').update(fs.readFileSync(row.patch_path)).digest('hex'), requiresManualCrop: false, reason: '人工调整工作图范围' } : null;
+      const generation = crop ? { ...parseJson(row.generation_json, {}), version: 2, strategy: 'manual', workWidth: Number(restoredWork?.width), workHeight: Number(restoredWork?.height), sourceCropWidth: crop.width, sourceCropHeight: crop.height, fileDigest: String(restoredWork?.digest || ''), requiresManualCrop: false, reason: '人工调整工作图范围' } : null;
+      if (crop && (!Number.isInteger(generation.workWidth) || !Number.isInteger(generation.workHeight) || generation.workWidth * generation.workHeight > 40_000_000 || !/^[a-f0-9]{64}$/.test(generation.fileDigest))) throw new Error('重新裁切工作图返回了无效尺寸或摘要');
       db.prepare(`UPDATE team_patch_tasks SET person_name=COALESCE(?,person_name),assignee=COALESCE(?,assignee),crop_json=COALESCE(?,crop_json),generation_json=COALESCE(?,generation_json),needs_review=COALESCE(?,needs_review),review_reason=COALESCE(?,review_reason),updated_at=? WHERE project_id=? AND id=? AND is_deleted=0`).run(payload.personName === undefined ? null : String(payload.personName).trim().slice(0, 80) || '未命名人物', payload.assignee === undefined ? null : String(payload.assignee).trim().slice(0, 80), crop ? JSON.stringify(crop) : null, generation ? JSON.stringify(generation) : null, payload.needsReview === undefined ? null : payload.needsReview ? 1 : 0, payload.reviewReason === undefined ? null : String(payload.reviewReason).trim().slice(0, 300), Date.now(), String(context.projectId), row.id);
       if (backupPath) queueCleanupArtifacts(db, context.projectId, [backupPath]);
       db.exec('COMMIT');

@@ -3,6 +3,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
+const pythonSetup = require('../scripts/setup-python.cjs');
+assert.notEqual(pythonSetup.interpreterPath(true), pythonSetup.interpreterPath(false));
+assert.match(pythonSetup.interpreterPath(false), /\.venv-release[\\/]Scripts[\\/]python\.exe$/);
+const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
+assert.match(packageScript, /developmentPackage \? '\.venv' : '\.venv-release'/);
+const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+assert.match(packageJson.scripts['prepare:dev'], /setup-python\.cjs --dev/);
 
 const setupWsl = fs.readFileSync(path.join(root, 'scripts', 'setup-advanced-wsl.sh'), 'utf8');
 const samDownload = setupWsl.indexOf('sam2.1_hiera_large.pt"');

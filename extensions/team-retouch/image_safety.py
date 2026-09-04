@@ -15,8 +15,8 @@ DEFAULT_PEAK_BYTES_PER_PIXEL = 20
 Image.MAX_IMAGE_PIXELS = MAX_ORIGINAL_PIXELS
 
 
-def physical_memory_bytes():
-    override = os.environ.get("PHOTOFLOW_TEST_PHYSICAL_MEMORY_BYTES", "").strip()
+def available_memory_bytes():
+    override = os.environ.get("PHOTOFLOW_TEST_AVAILABLE_MEMORY_BYTES", os.environ.get("PHOTOFLOW_TEST_PHYSICAL_MEMORY_BYTES", "")).strip()
     if override:
         return max(1, int(override))
     if os.name == "nt":
@@ -29,9 +29,10 @@ def physical_memory_bytes():
                         ("avail_extended", ctypes.c_ulonglong)]
         status = MemoryStatus(); status.length = ctypes.sizeof(status)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return int(status.total_phys)
+            return int(status.avail_phys)
     try:
-        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+        page_key = "SC_AVPHYS_PAGES" if "SC_AVPHYS_PAGES" in os.sysconf_names else "SC_PHYS_PAGES"
+        return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf(page_key))
     except (AttributeError, ValueError, OSError):
         return 8 * 1024**3
 
@@ -44,7 +45,7 @@ def validate_dimensions(width, height, *, role="original", peak_bytes_per_pixel=
     pixel_limit = MAX_WORK_PIXELS if role == "work" else MAX_ORIGINAL_PIXELS
     if pixels > pixel_limit:
         raise ValueError(f"{role} 图像像素超出安全上限：{pixels} > {pixel_limit}")
-    memory_limit = min(MAX_PROCESS_BYTES, int(physical_memory_bytes() * MEMORY_FRACTION))
+    memory_limit = min(MAX_PROCESS_BYTES, int(available_memory_bytes() * MEMORY_FRACTION))
     estimate = pixels * max(1, int(peak_bytes_per_pixel))
     if estimate > memory_limit:
         raise ValueError(f"图像估算峰值内存超限：{estimate} > {memory_limit} 字节")

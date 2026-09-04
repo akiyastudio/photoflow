@@ -29,7 +29,7 @@
     }
   },
   "scripts": {
-    "prepare:dev": "node scripts/setup-python.cjs && vite build --config renderer/vite.config.ts",
+    "prepare:dev": "node scripts/setup-python.cjs --dev && vite build --config renderer/vite.config.ts",
     "build": "vite build --config renderer/vite.config.ts",
     "typecheck": "tsc -p renderer/tsconfig.json --pretty false",
     "lint": "eslint renderer/src service.cjs workflow-*.cjs backup-restore.cjs --report-unused-disable-directives --max-warnings 0",

@@ -43,6 +43,15 @@ PROGRESS_CONTEXT = {}
 SESSION_FALLBACK_REASONS = {}
 
 
+def bounded_work_size(width, height, pixel_limit=None):
+    pixel_limit = MAX_WORK_PIXELS if pixel_limit is None else int(pixel_limit)
+    scale = min(1.0, math.sqrt(pixel_limit / max(1, int(width) * int(height))))
+    result = [max(1, int(math.floor(width * scale))), max(1, int(math.floor(height * scale)))]
+    while result[0] * result[1] > pixel_limit:
+        result[1 if result[1] >= result[0] else 0] -= 1
+    return result
+
+
 def emit(result):
     print(json.dumps(result, ensure_ascii=False), flush=True)
 
@@ -799,10 +808,7 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                 # dangerous than a small edge sliver. The retoucher must never
                 # mistake them for members whose edits will be merged back.
                 bystander_cost = sum(bystander_crop_penalty(coverage) for coverage in bystander_coverages)
-                output_scale = min(1.0, math.sqrt(MAX_WORK_PIXELS / max(1, crop[2] * crop[3])))
-                output_size = [max(1, int(math.floor(crop[2] * output_scale))), max(1, int(math.floor(crop[3] * output_scale)))]
-                while output_size[0] * output_size[1] > MAX_WORK_PIXELS:
-                    output_size[1 if output_size[1] >= output_size[0] else 0] -= 1
+                output_size = bounded_work_size(crop[2], crop[3])
                 candidate_cache[key] = {
                     "indices": list(key), "box": box, "crop": crop,
                     "outputSize": output_size,
@@ -1153,11 +1159,14 @@ def restore_patches(input_path, manifest_path):
             raise ValueError(f"人物 {task.get('id') or ''} 的切图范围超出原图")
         patch_path = Path(task["patchPath"])
         patch_path.parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(rgb[y:y + crop_height, x:x + crop_width], "RGB").save(
-            patch_path, format="PNG", compress_level=3
-        )
-        restored.append(str(patch_path))
-    return {"success": True, "restoredCount": len(restored), "paths": restored}
+        output_width, output_height = bounded_work_size(crop_width, crop_height)
+        patch = Image.fromarray(rgb[y:y + crop_height, x:x + crop_width], "RGB")
+        if patch.size != (output_width, output_height):
+            patch = patch.resize((output_width, output_height), Image.Resampling.LANCZOS, reducing_gap=3.0)
+        patch.save(patch_path, format="PNG", compress_level=3)
+        pixels = np.asarray(patch)
+        restored.append({"id": str(task.get("id") or ""), "path": str(patch_path), "width": output_width, "height": output_height, "digest": hashlib.sha256(pixels.tobytes()).hexdigest()})
+    return {"success": True, "restoredCount": len(restored), "paths": [item["path"] for item in restored], "outputs": restored}
 
 
 

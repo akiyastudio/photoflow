@@ -12,7 +12,7 @@ const skipChecks = process.argv.includes('--skip-checks');
 const developmentPackage = process.argv.includes('--dev');
 if (withAdvanced && (skipChecks || developmentPackage)) throw new Error('Formal advanced packaging cannot skip checks or use development dependencies.');
 if (!developmentPackage && !fs.existsSync(path.join(root, 'requirements-build.lock'))) throw new Error('Formal packaging requires requirements-build.lock with hashes.');
-const python = process.platform === 'win32' ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');
+const python = process.platform === 'win32' ? path.join(root, developmentPackage ? '.venv' : '.venv-release', 'Scripts', 'python.exe') : path.join(root, developmentPackage ? '.venv' : '.venv-release', 'bin', 'python');
 const models = [
   ['rtmdet-ins_m_640x640.onnx',104857600,'6041dded9177d5bd0bca9e3aa264ceb99ec1ff7b0d53320d2433587704840fca'],
   ['face_detection_yunet_2023mar.onnx',204800,'8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4'],
@@ -30,9 +30,12 @@ const sha256File = file => {
 };
 const viteBin = path.join(path.dirname(require.resolve('vite/package.json', { paths: [root] })), 'bin', 'vite.js');
 if (!fs.existsSync(python)) throw new Error('Plugin Python environment missing; run npm run setup:python');
+if (!developmentPackage) require('./setup-python.cjs').verifyLockedEnvironment(python, fs.readFileSync(path.join(root, 'requirements-build.lock'), 'utf8'));
 for (const [name,minimum,expectedSha256] of models) { const file=path.join(root,'models',name); if(!fs.existsSync(file)||fs.statSync(file).size<minimum) throw new Error(`Required model is missing or incomplete: models/${name}`); const handle=fs.openSync(file,'r'); const prefix=Buffer.alloc(256); const count=fs.readSync(handle,prefix,0,prefix.length,0); fs.closeSync(handle); if(prefix.subarray(0,count).toString('utf8').startsWith('version https://git-lfs.github.com/spec/v1')) throw new Error(`Required model is missing or incomplete: models/${name}`); const actual=sha256File(file); if(actual!==expectedSha256) throw new Error(`Required model checksum mismatch: models/${name}`); }
 if (!skipChecks) {
-  for (const script of ['typecheck','lint','test:node','test:python']) run(process.platform === 'win32' ? 'npm.cmd' : 'npm',['run',script]);
+  for (const script of ['typecheck','lint','test:node']) run(process.platform === 'win32' ? 'npm.cmd' : 'npm',['run',script]);
+  if (developmentPackage) run(process.platform === 'win32' ? 'npm.cmd' : 'npm',['run','test:python']);
+  else { run(python,[path.join(root,'tests','test-team-retouch.py')]); run(python,[path.join(root,'tests','test-team-retouch-progress-folder-policy.py')]); }
 }
 run(process.execPath,[viteBin,'build','--config',path.join(root,'renderer','vite.config.ts')]);
 fs.rmSync(packageRoot,{recursive:true,force:true}); fs.mkdirSync(path.dirname(packageRoot),{recursive:true});

@@ -47,6 +47,7 @@ if (require.main === module) {
   const { outputDirectory } = parseArguments(process.argv.slice(2));
   const lock = validateReleaseLock();
   const { digest } = validateReleaseInputs(lock);
+  run(process.execPath, [path.join(__dirname, 'setup-python.cjs')]);
   run(process.execPath, componentArguments(outputDirectory));
   validateBundle(digest);
   console.log(`Host bundle verified with trusted advanced package ${packageName} (${digest})`);

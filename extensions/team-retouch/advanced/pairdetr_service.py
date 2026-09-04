@@ -15,7 +15,7 @@ import torch
 import numpy as np
 from advanced_geometry import normalized_cxcywh_to_original_xyxy
 from checkpoint_lock import verify_checkpoint
-from image_safety import inspect_dimensions, open_validated
+from image_safety import inspect_oriented_dimensions, open_validated
 from torchvision.ops import nms
 
 from transformers import AutoImageProcessor, DeformableDetrConfig
@@ -75,7 +75,7 @@ def load_runtime(args: argparse.Namespace):
 
 def infer_image(runtime, image_path: Path, args: argparse.Namespace):
     model, processor, device, incompatible, forward = runtime
-    original_width, original_height = inspect_dimensions(image_path, role="original")
+    original_width, original_height = inspect_oriented_dimensions(image_path, role="original")
     with open_validated(image_path, role="original", mode="RGB", max_edge=args.longest_edge) as opened:
         image = opened.copy()
     inputs = processor(images=image, return_tensors="pt")

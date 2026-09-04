@@ -85,6 +85,36 @@ function Open-EntityIdentityLock([string]$PathValue) {
     Assert-SafeLocalPath $PathValue | Out-Null
     [IO.FileStream]::new([IO.Path]::GetFullPath($PathValue), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
 }
+function Get-FileSha256([string]$PathValue) {
+    $stream = [IO.FileStream]::new($PathValue, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 8MB, [IO.FileOptions]::SequentialScan)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose(); $stream.Dispose() }
+}
+function Copy-VerifiedFile([string]$Source, [string]$Destination) {
+    $input = [IO.FileStream]::new($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 8MB, [IO.FileOptions]::SequentialScan)
+    $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 8MB, [IO.FileOptions]::SequentialScan)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $buffer=[byte[]]::new(8MB); while(($count=$input.Read($buffer,0,$buffer.Length)) -gt 0){ $sha.TransformBlock($buffer,0,$count,$null,0)|Out-Null; $output.Write($buffer,0,$count) }
+        $sha.TransformFinalBlock($buffer,0,0)|Out-Null; $output.Flush($true)
+        return ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose(); $output.Dispose(); $input.Dispose() }
+}
+function Assert-DistroAbsent([string]$Name) { if (Get-DistroRegistration $Name) { throw "WSL distribution remained registered after unregister: $Name" } }
+function Close-VhdTransactionLocks([ref]$EntityLock, [ref]$DirectoryLock) {
+    if ($EntityLock.Value) { $EntityLock.Value.Dispose(); $EntityLock.Value=$null }
+    if ($DirectoryLock.Value) { Close-StagingDirectoryLock $DirectoryLock.Value; $DirectoryLock.Value=$null }
+}
+function Unregister-ReleasingLocks([string]$Name, [string]$Root, [ref]$EntityLock, [ref]$DirectoryLock) {
+    Close-VhdTransactionLocks $EntityLock $DirectoryLock
+    Unregister-OwnedDistro $Name $Root
+    Assert-DistroAbsent $Name
+}
+function Remove-RegistrationReleasingLocks([string]$Name, [string]$Root, [ref]$EntityLock, [ref]$DirectoryLock) {
+    Close-VhdTransactionLocks $EntityLock $DirectoryLock
+    Remove-OwnedRegistrationIfPresent $Name $Root | Out-Null
+    Assert-DistroAbsent $Name
+}
 
 function Get-DistroRegistration([string]$Name) {
     Get-ChildItem -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue | Where-Object {
@@ -364,7 +394,6 @@ if ($registration) {
     $Repair = $false
 }
 
-if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) { throw 'Windows tar.exe is required.' }
 $candidateRoot = Join-Path $stateRoot ('.candidate-' + [Guid]::NewGuid().ToString('N'))
 $candidateName = "$DistroName-candidate-$([Guid]::NewGuid().ToString('N'))"
 $backupVhd = Join-Path $stateRoot ('.rollback-' + [Guid]::NewGuid().ToString('N') + '.vhdx')
@@ -394,25 +423,33 @@ try {
     Test-Distro $candidateName $LinuxUser
     if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during self-test.' }
     Invoke-TestFault 'candidate-probe'
-    Unregister-OwnedDistro $candidateName $candidateRoot
-    if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during unregister.' }
+    & wsl.exe --terminate $candidateName 2>$null
+    Assert-SafeStagingPath $candidateRoot $candidateVhd
+    if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed before unregister.' }
+    $candidatePostProbeDigest = Get-FileSha256 $candidateVhd
+    if ($candidatePostProbeDigest -notmatch '^[a-f0-9]{64}$') { throw 'Candidate VHD digest could not be verified before unregister.' }
+    Unregister-ReleasingLocks $candidateName $candidateRoot ([ref]$candidateVhdLock) ([ref]$candidateLock)
     $candidateRegistered = $false
-    $candidateVhdLock.Dispose(); $candidateVhdLock = $null
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
-    $installLock = Open-StagingDirectoryLock $InstallRoot
     if ($registration) {
+        & wsl.exe --terminate $DistroName 2>$null
+        Assert-RegistrationBasePath $DistroName $InstallRoot | Out-Null
+        $installLock = Open-StagingDirectoryLock $InstallRoot
         $oldFileId = Get-TrustedFileIdentity $stableVhd
         $oldVhdLock = Open-EntityIdentityLock $stableVhd
-        & wsl.exe --terminate $DistroName 2>$null
-        Copy-Item -LiteralPath $stableVhd -Destination $backupVhd
+        $oldDigest = Get-FileSha256 $stableVhd
+        $backupDigest = Copy-VerifiedFile $stableVhd $backupVhd
+        if ($backupDigest -ne $oldDigest -or $oldFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Rollback VHD copy did not preserve the owned environment.' }
         Invoke-TestFault 'backup'
+        Close-VhdTransactionLocks ([ref]$oldVhdLock) ([ref]$installLock)
         Unregister-OwnedDistro $DistroName $InstallRoot
-        if ($oldFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Owned VHD identity changed during unregister.' }
-        $oldVhdLock.Dispose(); $oldVhdLock = $null
         $oldUnregistered = $true
+        Assert-DistroAbsent $DistroName
         Invoke-TestFault 'old-unregister'
+        New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
     }
-    if (Test-Path -LiteralPath $stableVhd) { Remove-Item -LiteralPath $stableVhd -Force }
+    $installLock = Open-StagingDirectoryLock $InstallRoot
+    if (Test-Path -LiteralPath $stableVhd) { throw 'Unregister left an unexpected stable VHD behind.' }
     $finalVhdHash = Copy-ValidatedVhdEntry $validatedPackage $stableVhd
     Invoke-TestFault 'final-copy'
     Assert-SafeLocalPath $stableVhd | Out-Null
@@ -443,11 +480,18 @@ try {
     Write-Host "PhotoFlow advanced offline environment is ready in $InstallRoot"
 } catch {
     $originalFailure = $_
-    try { Remove-OwnedRegistrationIfPresent $candidateName $candidateRoot | Out-Null } catch { Write-Warning $_ }
-    if ($finalImportAttempted) { try { Remove-OwnedRegistrationIfPresent $DistroName $InstallRoot | Out-Null } catch { Write-Warning $_ } }
-    if ($oldUnregistered -and (Test-Path -LiteralPath $backupVhd -PathType Leaf)) {
+    try { Remove-RegistrationReleasingLocks $candidateName $candidateRoot ([ref]$candidateVhdLock) ([ref]$candidateLock) } catch { Write-Warning $_ }
+    if (-not (Get-DistroRegistration $candidateName)) { $candidateRegistered=$false }
+    if ($finalImportAttempted) { try { Remove-RegistrationReleasingLocks $DistroName $InstallRoot ([ref]$finalVhdLock) ([ref]$installLock) } catch { Write-Warning $_ } }
+    else { Close-VhdTransactionLocks ([ref]$finalVhdLock) ([ref]$installLock) }
+    Close-VhdTransactionLocks ([ref]$oldVhdLock) ([ref]$installLock)
+    if ($finalImportAttempted -and (Get-DistroRegistration $DistroName)) { $preserveBackup=$true }
+    if ($oldUnregistered -and -not $preserveBackup -and (Test-Path -LiteralPath $backupVhd -PathType Leaf)) {
         try {
-            Copy-Item -LiteralPath $backupVhd -Destination $stableVhd -Force
+            New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+            if (Test-Path -LiteralPath $stableVhd -PathType Leaf) { Remove-Item -LiteralPath $stableVhd -Force }
+            $restoredDigest = Copy-VerifiedFile $backupVhd $stableVhd
+            if ($restoredDigest -ne $backupDigest) { throw 'Rollback VHD digest changed before restore.' }
             & wsl.exe --import-in-place $DistroName $stableVhd
             if ($LASTEXITCODE -ne 0) { throw 'Unable to re-register the previous advanced environment.' }
             Test-Distro $DistroName $LinuxUser
@@ -469,7 +513,7 @@ try {
     foreach ($entityLock in @($candidateVhdLock,$oldVhdLock,$finalVhdLock)) { if ($entityLock) { $entityLock.Dispose() } }
     if ($installLock) { Close-StagingDirectoryLock $installLock }
     if ($candidateLock) { Close-StagingDirectoryLock $candidateLock }
-    foreach ($target in @($candidateRoot)) { if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force } }
+    if (-not $candidateRegistered -and (Test-Path -LiteralPath $candidateRoot)) { Remove-Item -LiteralPath $candidateRoot -Recurse -Force }
     if (-not $installCompleted -and -not $registration -and -not $preserveBackup) { foreach ($partial in @($statePath,$markerPath,$stableVhd)) { if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue } } }
     if (-not $registration -and -not $preserveBackup -and (Test-Path -LiteralPath $InstallRoot) -and (Get-Item -LiteralPath $InstallRoot -Force).PSIsContainer -and -not @(Get-ChildItem -LiteralPath $InstallRoot -Force).Count) { Remove-Item -LiteralPath $InstallRoot -Force -ErrorAction SilentlyContinue }
     if (-not $preserveBackup -and (Test-Path -LiteralPath $backupVhd -PathType Leaf)) { Remove-Item -LiteralPath $backupVhd -Force }
