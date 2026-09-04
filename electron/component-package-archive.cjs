@@ -597,7 +597,7 @@ const preserveFixedSidecar = async (sourcePath, value) => {
   if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('组件清理 sidecar 不是安全的普通文件');
   const preserved = `${sourcePath}.invalid`;
   try { await fs.promises.rename(sourcePath, preserved); }
-  catch (error) { const existing = await readBoundedSidecar(preserved, { missing: null }).catch(() => null); if (existing !== value) throw error; await fs.promises.unlink(sourcePath); }
+  catch (error) { const existing = await readBoundedSidecar(preserved, { missing: null }).catch(() => null); if (existing !== value) throw error; throw cleanupBoundaryError('COMPONENT_CLEANUP_SIDECAR_ATTENTION', '组件清理固定诊断槽已存在，保留源 sidecar 等待 prepared cleanup'); }
 };
 const persistComponentCleanupIntent = async receipt => {
   if (!receipt || typeof receipt.path !== 'string' || !receipt.nodeIdentity || !['file', 'directory'].includes(receipt.kind)) throw new Error('拒绝持久化缺少身份收据的组件清理意图');
@@ -616,7 +616,7 @@ const persistComponentCleanupIntent = async receipt => {
     try { await handle.writeFile(serialized, 'utf8'); await handle.sync(); } finally { await closeOwnedHandle(handle); }
   }
   try { await fs.promises.rename(temporary, payload.intentPath); }
-  catch (error) { const raced = await readBoundedSidecar(payload.intentPath).catch(() => ''); if (raced !== serialized) throw error; await fs.promises.unlink(temporary).catch(() => undefined); }
+  catch (error) { const raced = await readBoundedSidecar(payload.intentPath).catch(() => ''); if (raced !== serialized) throw error; }
   const intentHandle = await fs.promises.open(payload.intentPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
   try { await intentHandle.sync(); } finally { await closeOwnedHandle(intentHandle); }
   if (await readBoundedSidecar(payload.intentPath) !== serialized) throw new Error('组件清理意图持久化复核失败');
@@ -638,7 +638,7 @@ const persistComponentCleanupVerified = async (receipt, paths, proofBinding, { a
     try { await handle.writeFile(content, 'utf8'); await handle.sync(); } finally { await closeOwnedHandle(handle); }
   }
   try { await fs.promises.rename(temporary, paths.verifiedPath); }
-  catch (error) { const raced = await readBoundedSidecar(paths.verifiedPath).catch(() => ''); if (raced !== content) throw error; await fs.promises.unlink(temporary).catch(() => undefined); }
+  catch (error) { const raced = await readBoundedSidecar(paths.verifiedPath).catch(() => ''); if (raced !== content) throw error; }
   const markerHandle = await fs.promises.open(paths.verifiedPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
   try { await markerHandle.sync(); } finally { await closeOwnedHandle(markerHandle); }
   if (await readBoundedSidecar(paths.verifiedPath) !== content) throw new Error('组件清理 verified marker 持久化复核失败');
@@ -662,7 +662,7 @@ const persistComponentCleanupProof = async (receipt, paths, captureNativeProof) 
   if (pending && pending !== serialized) await preserveFixedSidecar(temporary, pending);
   if (!pending || pending !== serialized) { const handle = await fs.promises.open(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600); try { await handle.writeFile(serialized); await handle.sync(); } finally { await closeOwnedHandle(handle); } }
   try { await fs.promises.rename(temporary, paths.proofPath); }
-  catch (error) { const raced = await readBoundedSidecar(paths.proofPath, { maxBytes: MAX_CLEANUP_PROOF_BYTES }); if (raced !== serialized) throw error; await fs.promises.unlink(temporary).catch(() => undefined); }
+  catch (error) { const raced = await readBoundedSidecar(paths.proofPath, { maxBytes: MAX_CLEANUP_PROOF_BYTES }); if (raced !== serialized) throw error; }
   if (await readBoundedSidecar(paths.proofPath, { maxBytes: MAX_CLEANUP_PROOF_BYTES }) !== serialized) throw new Error('组件清理完整证明持久化复核失败');
   return { proof, text: serialized, binding };
 };
@@ -734,28 +734,30 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
   await verifyRemainingCleanupSubset(receipt, paths, cleanupProof);
   const expectedSidecarContents = new Map([[paths.intentPath, { role: 'intent', value: Buffer.from(expectedIntent) }], [paths.proofPath, { role: 'proof', value: Buffer.from(reboundProof.text) }], [paths.verifiedPath, { role: 'verified', value: Buffer.from(cleanupVerifiedContent(receipt, reboundProof.binding)) }]]);
   for (const candidate of [`${paths.verifiedPath}.tmp`, `${paths.verifiedPath}.invalid`, `${paths.verifiedPath}.tmp.invalid`, `${paths.intentPath}.tmp`, `${paths.intentPath}.invalid`, `${paths.intentPath}.tmp.invalid`, `${paths.proofPath}.tmp`, `${paths.proofPath}.tmp.invalid`]) { const value = await readBoundedSidecarBuffer(candidate, { maxBytes: candidate.includes('.proof.') ? MAX_CLEANUP_PROOF_BYTES : MAX_CLEANUP_SIDECAR_BYTES }); if (value !== null) expectedSidecarContents.set(candidate, { role: 'diagnostic', value }); }
-  if (!Array.isArray(receipt.sidecarReceipts)) {
+  let preparedSidecars = receipt.sidecarReceipts;
+  if (!Array.isArray(preparedSidecars)) {
     if (typeof prepareSidecars !== 'function') throw Object.assign(new Error('组件清理 sidecar identity 尚未持久化'), { recoveryPath: paths.isolatedPath, cleanupPendingReceipts: [receipt] });
-    receipt.sidecarReceipts = await prepareSidecars([...expectedSidecarContents].map(([sidecarPath, item]) => ({ path: sidecarPath, role: item.role, expectedContent: item.value })));
-    if (typeof persistPrepared !== 'function' || await persistPrepared(receipt) !== true) throw Object.assign(new Error('组件清理 prepared receipt 未持久化'), { recoveryPath: paths.isolatedPath, cleanupPendingReceipts: [receipt] });
+    preparedSidecars = await prepareSidecars([...expectedSidecarContents].map(([sidecarPath, item]) => ({ path: sidecarPath, role: item.role, expectedContent: item.value })));
   }
-  if (receipt.sidecarReceipts.length !== expectedSidecarContents.size || receipt.sidecarReceipts.some(item => { const expected = expectedSidecarContents.get(item.path); return !expected || item.role !== expected.role || item.size !== expected.value.length || item.sha256 !== crypto.createHash('sha256').update(expected.value).digest('hex') || !item.nativeIdentity; })) throw cleanupBoundaryError('COMPONENT_CLEANUP_SIDECAR_PROOF_MISMATCH', '组件清理 sidecar receipt 与 prepared 状态不一致');
+  if (preparedSidecars.length !== expectedSidecarContents.size || preparedSidecars.some(item => { const expected = expectedSidecarContents.get(item.path); return !expected || item.role !== expected.role || item.size !== expected.value.length || item.sha256 !== crypto.createHash('sha256').update(expected.value).digest('hex') || !item.nativeIdentity; })) throw cleanupBoundaryError('COMPONENT_CLEANUP_SIDECAR_PROOF_MISMATCH', '组件清理 sidecar receipt 与 prepared 状态不一致');
+  const preparedReceipt = { ...receipt, sidecarReceipts: preparedSidecars.map(item => ({ ...item })), cleanupPhase: 'prepared' };
+  if (typeof persistPrepared !== 'function' || await persistPrepared(preparedReceipt) !== true) throw Object.assign(new Error('组件清理 prepared receipt 未持久化'), { recoveryPath: paths.isolatedPath, preparedPersisted: false, cleanupPendingReceipts: [preparedReceipt] });
   if (typeof deleteOwned !== 'function') throw Object.assign(new Error('组件清理需要对象身份绑定的删除服务'), { recoveryPath: paths.isolatedPath, cleanupPendingPaths: [paths.isolatedPath], cleanupPendingReceipts: [receipt] });
   try {
-    await deleteOwned({ receipt, isolatedPath: paths.isolatedPath, proof: cleanupProof });
+    await deleteOwned({ receipt: preparedReceipt, isolatedPath: paths.isolatedPath, proof: cleanupProof });
     const remainingAfterDelete = await fs.promises.lstat(paths.isolatedPath).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError));
     if (remainingAfterDelete) throw new Error('对象身份绑定删除未移除隔离目标');
   }
   catch (error) {
     const remaining = await fs.promises.lstat(paths.isolatedPath).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError));
-    if (!remaining) return { cleaned: true, intentPath: paths.intentPath };
+    if (!remaining) return { cleaned: true, intentPath: paths.intentPath, preparedReceipt };
     const remainingTypeValid = receipt.kind === 'directory' ? remaining.isDirectory() : remaining.isFile();
     if (!remainingTypeValid || remaining.isSymbolicLink() || !sameNodeIdentity(receipt.nodeIdentity, nodeIdentity(remaining))) throw cleanupBoundaryError('COMPONENT_CLEANUP_REPLACEMENT_CONFLICT', '组件清理最终删除路径被 replacement 占用', { cause: error, recoveryPath: paths.isolatedPath });
     await verifyRemainingCleanupSubset(receipt, paths, cleanupProof);
-    const updated = { ...receipt, path: paths.originalPath };
+    const updated = { ...preparedReceipt, path: paths.originalPath };
     throw Object.assign(error, { recoveryPath: paths.isolatedPath, cleanupPendingPaths: [paths.isolatedPath], cleanupPendingReceipts: [updated] });
   }
-  return { cleaned: true, intentPath: paths.intentPath };
+  return { cleaned: true, intentPath: paths.intentPath, preparedReceipt };
 };
 const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersisted = false, deleteSidecar } = {}) => {
   const paths = componentCleanupIntentPaths(receipt);
@@ -797,7 +799,7 @@ const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersi
 const createComponentCleanupOrchestrator = ({ deleteOwned, deleteSidecar, captureNativeProof, prepareSidecars, persistPrepared, persistPhase = async () => true } = {}) => ({
   async run(receipt) {
     if (await persistPhase('pending', receipt) !== true) return { status: 'pending', outcomeUnknown: false, receipt, error: 'cleanup phase persistence failed' };
-    try { const result = await cleanupOwnedComponentPath(receipt, { deleteOwned, captureNativeProof, prepareSidecars, persistPrepared }); if (await persistPhase('data-complete', receipt, result) !== true) return { status: 'pending', outcomeUnknown: false, receipt, result, error: 'cleanup completion phase persistence failed' }; return { status: 'complete', outcomeUnknown: false, receipt, result }; }
+    try { const result = await cleanupOwnedComponentPath(receipt, { deleteOwned, captureNativeProof, prepareSidecars, persistPrepared }); const appliedReceipt = result.preparedReceipt || receipt; if (await persistPhase('data-complete', appliedReceipt, result) !== true) return { status: 'pending', outcomeUnknown: false, receipt: appliedReceipt, result, error: 'cleanup completion phase persistence failed' }; return { status: 'complete', outcomeUnknown: false, receipt: appliedReceipt, result }; }
     catch (error) { return { status: 'pending', outcomeUnknown: Boolean(error?.outcomeUnknown), receipt: error?.cleanupPendingReceipts?.[0] || receipt, recoveryPath: error?.recoveryPath, error: error?.message || String(error) }; }
   },
   async finalize(receipt, { completionFlushed = false } = {}) { if (!completionFlushed) return { status: 'pending', outcomeUnknown: false, receipt, error: 'durable task completion not confirmed' }; await finalizeComponentCleanupProof(receipt, { dataCleanupCompletePersisted: true, deleteSidecar }); return { status: 'complete', outcomeUnknown: false, receipt }; },

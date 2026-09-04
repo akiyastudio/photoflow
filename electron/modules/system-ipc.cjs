@@ -694,7 +694,7 @@ const registerSystemIpc = context => {
       const failures = [];
       const dataCleanupComplete = sourceTask?.metadata?.dataCleanupComplete === true;
       if (!dataCleanupComplete) {
-        for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared: async () => { task?.report(20, '组件清理 prepared receipt 已生成', { targets, cleanupPrepared: true }); return backgroundTasks?.flush?.() === true; } }); }
+        for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared: async preparedReceipt => { Object.assign(target, preparedReceipt); task?.report(20, '组件清理 prepared receipt 已生成', { targets, cleanupPrepared: true }); return backgroundTasks?.flush?.() === true; } }); }
         catch (error) { const updated = error.cleanupPendingReceipts?.[0]; if (updated) Object.assign(target, updated); task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets }); failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
         if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
         task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
