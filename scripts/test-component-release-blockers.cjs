@@ -40,7 +40,7 @@ const cleanupWindowsFixture = async (parent, descendantPid) => {
 (async () => {
   const owned = child(4242); const taskkillCalls = [];
   const result = await terminateAndWait(owned, Date.now() + 500, { platform: 'win32', rollbackSettleMs: 0, execFileImpl: (command, args, options, callback) => {
-    taskkillCalls.push({ command, args, options }); owned.exitCode = 1; owned.emit('exit', 1, null); callback(null);
+    taskkillCalls.push({ command, args, options }); owned.exitCode = 1; owned.emit('exit', 1, null); owned.emit('close', 1, null); callback(null);
   } });
   assert.deepEqual(result, { exited: true, forced: true });
   assert.deepEqual(taskkillCalls[0].args, ['/pid', '4242', '/t', '/f']);
@@ -50,9 +50,9 @@ const cleanupWindowsFixture = async (parent, descendantPid) => {
   const execFileImpl = (_command, args, _options, callback) => {
     assert.equal(args[1], '4343', 'tree termination never targets an unrelated PID');
     if (++attempt === 1) callback(new Error('taskkill failed'));
-    else { retryable.exitCode = 1; retryable.emit('exit', 1, null); callback(null); }
+    else { retryable.exitCode = 1; retryable.emit('exit', 1, null); retryable.emit('close', 1, null); callback(null); }
   };
-  await assert.rejects(terminateAndWait(retryable, Date.now() + 500, { platform: 'win32', rollbackSettleMs: 0, execFileImpl }), error => error.code === 'PROCESS_TREE_TERMINATION_FAILED');
+  await assert.rejects(terminateAndWait(retryable, Date.now() + 500, { platform: 'win32', rollbackSettleMs: 0, execFileImpl }), error => error.code === 'PROCESS_TERMINATION_FAILED');
   assert.equal(retryable.exitCode, null, 'failed tree termination preserves a live process for a safe retry');
   await terminateAndWait(retryable, Date.now() + 500, { platform: 'win32', rollbackSettleMs: 0, execFileImpl });
   assert.equal(attempt, 2);
@@ -104,7 +104,7 @@ const cleanupWindowsFixture = async (parent, descendantPid) => {
   assert.equal(normalizeComponentNotificationRendererEvent({ ...notification, apiVersion: 7 }), null);
   assert.equal(normalizeComponentNotificationRendererEvent({ type: 'purge', componentId: 'fixture', apiVersion: 7 }), null);
   const uninstallSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
-  assert(uninstallSource.includes('await componentViewManager?.clearComponentPartitionStorage?.(componentId)') && uninstallSource.includes("cleanupWarnings.push(`组件浏览器分区"), 'uninstall awaits partition cleanup and reports failures');
-  assert(uninstallSource.includes('componentDataRoot(app, componentId, process.env)') && uninstallSource.includes("error?.code !== 'ENOENT'"), 'clear-user-data covers lifecycle data and records non-missing probe failures');
+  assert(uninstallSource.includes("if (await componentViewManager?.clearComponentPartitionStorage?.(componentId) !== true) throw new Error('组件浏览器分区未执行清理')"), 'uninstall awaits partition cleanup and fails closed');
+  assert(uninstallSource.includes('componentDataRoot(app, componentId, process.env)') && uninstallSource.includes("if (error?.code === 'ENOENT') return; throw error"), 'clear-user-data covers lifecycle data and fails on non-missing probe errors');
   console.log('Component release-blocker regression tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

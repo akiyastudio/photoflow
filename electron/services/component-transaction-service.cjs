@@ -34,6 +34,9 @@ const validPath = value => typeof value === 'string' && value.length <= 32767 &&
 const validTree = value => { try { componentTreeIdentityReceipt(value); return true; } catch { return false; } };
 const validCleanup = value => Array.isArray(value) && value.length <= 10000
   && value.every(step => exact(step, ['name', 'state']) && TOKEN.test(step.name) && CLEANUP_STATES.has(step.state));
+const validPreparationCleanup = value => Array.isArray(value) && value.length <= 2 && value.every(receipt => plain(receipt) && validPath(receipt.path) && validNode(receipt.nodeIdentity) && receipt.nodeIdentity !== null && (receipt.kind === 'directory'
+  ? exact(receipt, ['path', 'kind', 'nodeIdentity', 'treeDigest']) && /^[a-f0-9]{64}$/.test(receipt.treeDigest || '')
+  : receipt.kind === 'file' && exact(receipt, ['path', 'kind', 'nodeIdentity', 'size', 'sha256', 'mode']) && Number.isSafeInteger(receipt.size) && receipt.size >= 0 && /^[a-f0-9]{64}$/.test(receipt.sha256 || '') && Number.isInteger(receipt.mode) && receipt.mode >= 0 && receipt.mode <= 0o777));
 const validCleanupReceipt = (value, phase) => {
   if (!plain(value) || typeof value.path !== 'string' || value.kind !== 'directory' || !validNode(value.nodeIdentity) || !/^[a-f0-9]{64}$/.test(value.treeDigest || '')) return false;
   const baseKeys = ['path', 'kind', 'nodeIdentity', 'treeDigest'];
@@ -51,7 +54,8 @@ const validateCleanupBindings = value => {
   const expectedDestination = pathApi.join(expectedContainer, 'runtime');
   const legacyUninstall = value.kind === 'uninstall' && value.container === expectedContainer && value.destination === expectedContainer && value.sourcePath === expectedContainer;
   const runtimeLayout = value.container === expectedContainer && value.destination === expectedDestination;
-  if (value.kind === 'install' ? !runtimeLayout : !(legacyUninstall || runtimeLayout && [expectedDestination, expectedContainer].includes(value.sourcePath))) throw new Error('组件事务路径结构无效');
+  const runtimeUninstall = runtimeLayout && value.sourcePath === (value.clearUserData ? expectedContainer : expectedDestination);
+  if (value.kind === 'install' ? !runtimeLayout : !(legacyUninstall || runtimeUninstall)) throw new Error('组件事务路径结构无效');
   const directChild = candidate => pathApi.dirname(candidate) === value.installRoot;
   if (value.kind === 'install') {
     if (!directChild(value.sourcePath) || !pathApi.basename(value.sourcePath).startsWith(`.${value.componentId}-install-`) || value.quarantinePath !== pathApi.join(value.installRoot, `.${value.componentId}-quarantine-${value.operationId}`)) throw new Error('组件安装事务暂存路径结构无效');
@@ -68,14 +72,14 @@ const validateCleanupBindings = value => {
 };
 
 const validateJournal = value => {
-  const keys = ['schemaVersion', 'kind', 'operationId', 'generation', 'componentId', 'phase', 'installRoot', 'installRootIdentity', 'container', 'destination', 'sourcePath', 'quarantinePath', 'destinationIdentity', 'sourceIdentity', 'quarantineIdentity', 'destinationTreeIdentity', 'sourceTreeIdentity', 'quarantineTreeIdentity', 'previousInstalled', 'previousEnabled', 'desiredEnabled', 'clearUserData', 'cleanupSteps', 'cleanupItems', 'lastError', 'updatedAt'];
+  const keys = ['schemaVersion', 'kind', 'operationId', 'generation', 'componentId', 'phase', 'installRoot', 'installRootIdentity', 'container', 'destination', 'sourcePath', 'quarantinePath', 'destinationIdentity', 'sourceIdentity', 'quarantineIdentity', 'destinationTreeIdentity', 'sourceTreeIdentity', 'quarantineTreeIdentity', 'previousInstalled', 'previousEnabled', 'desiredEnabled', 'clearUserData', 'cleanupSteps', 'cleanupItems', 'preparationCleanup', 'lastError', 'updatedAt'];
   if (!exact(value, keys) || value.schemaVersion !== SCHEMA_VERSION || !['install', 'uninstall'].includes(value.kind) || !TOKEN.test(value.operationId)
     || !Number.isSafeInteger(value.generation) || value.generation < 1 || !COMPONENT_ID.test(value.componentId)
     || !['installRoot', 'container', 'destination', 'sourcePath', 'quarantinePath'].every(key => validPath(value[key]))
     || !validNode(value.installRootIdentity) || value.installRootIdentity === null || !validNode(value.destinationIdentity) || !validNode(value.sourceIdentity) || !validNode(value.quarantineIdentity)
     || !validTree(value.destinationTreeIdentity) || !validTree(value.sourceTreeIdentity) || !validTree(value.quarantineTreeIdentity)
     || typeof value.previousInstalled !== 'boolean' || typeof value.previousEnabled !== 'boolean' || typeof value.desiredEnabled !== 'boolean' || typeof value.clearUserData !== 'boolean'
-    || !validCleanup(value.cleanupSteps) || !validTransactionCleanup(value.cleanupItems) || typeof value.lastError !== 'string' || value.lastError.length > 4000 || !Number.isFinite(value.updatedAt)) throw new Error('组件事务日志 schema 无效');
+    || !validCleanup(value.cleanupSteps) || !validTransactionCleanup(value.cleanupItems) || !validPreparationCleanup(value.preparationCleanup) || typeof value.lastError !== 'string' || value.lastError.length > 4000 || !Number.isFinite(value.updatedAt)) throw new Error('组件事务日志 schema 无效');
   if (value.kind === 'install' ? !INSTALL_PHASES.has(value.phase) : !UNINSTALL_PHASES.has(value.phase)) throw new Error('组件事务日志阶段无效');
   if (value.kind === 'install' && (value.clearUserData || value.cleanupSteps.length)) throw new Error('组件安装事务不得包含卸载 cleanup plan');
   validateCleanupBindings(value);
@@ -98,28 +102,33 @@ const syncDirectory = async (fs, directory) => {
     await handle?.close().catch(() => undefined);
   }
 };
-const atomicJson = async ({ fs, path, crypto, filePath, value, deleteOwnedFile }) => {
+const atomicJson = async ({ fs, path, crypto, filePath, value, deleteOwnedFile, assertCurrent = async () => undefined }) => {
   const directory = path.dirname(filePath);
   await fs.promises.mkdir(directory, { recursive: true });
   const temporary = path.join(directory, `.${path.basename(filePath)}.${crypto.randomUUID()}.tmp`);
   const serialized = `${JSON.stringify(value)}\n`;
-  if (Buffer.byteLength(serialized) > MAX_TRANSACTION_JOURNAL_BYTES) throw new Error('组件事务日志超过安全上限');
+  const expectedBytes = Buffer.from(serialized, 'utf8');
+  if (expectedBytes.length > MAX_TRANSACTION_JOURNAL_BYTES) throw new Error('组件事务日志超过安全上限');
   let handle;
   let temporaryReceipt = null;
   try {
     handle = await fs.promises.open(temporary, 'wx', 0o600);
     await handle.writeFile(serialized, 'utf8');
     await handle.sync();
-    temporaryReceipt = { path: temporary, nodeIdentity: nodeIdentity(await handle.stat()), size: Buffer.byteLength(serialized), sha256: require('node:crypto').createHash('sha256').update(serialized).digest('hex') };
+    const temporaryStat = await handle.stat();
+    temporaryReceipt = { path: temporary, nodeIdentity: nodeIdentity(temporaryStat), size: expectedBytes.length, mtimeMs: temporaryStat.mtimeMs, ctimeMs: temporaryStat.ctimeMs, sha256: require('node:crypto').createHash('sha256').update(expectedBytes).digest('hex') };
     await handle.close();
     handle = null;
+    await assertCurrent();
     await fs.promises.rename(temporary, filePath);
     const published = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     let receipt;
     try {
-      const before = await published.stat(); const first = await readExact(published, before.size); const second = await readExact(published, before.size);
+      const before = await published.stat();
+      if (!before.isFile() || before.size !== expectedBytes.length || before.size > MAX_TRANSACTION_JOURNAL_BYTES) throw new Error('组件事务日志发布后大小无效');
+      const first = await readExact(published, before.size); const second = await readExact(published, before.size);
       const after = await published.stat(); const linked = await fs.promises.lstat(filePath);
-      if (!before.isFile() || linked.isSymbolicLink() || !first.equals(second) || !first.equals(Buffer.from(serialized, 'utf8')) || !sameNode(nodeIdentity(before), nodeIdentity(after)) || !sameNode(nodeIdentity(after), nodeIdentity(linked)) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || after.mtimeMs !== linked.mtimeMs || after.ctimeMs !== linked.ctimeMs) throw new Error('组件事务日志发布后复核失败');
+      if (linked.isSymbolicLink() || !first.equals(second) || !first.equals(expectedBytes) || !sameNode(nodeIdentity(before), nodeIdentity(after)) || !sameNode(nodeIdentity(after), nodeIdentity(linked)) || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs || after.mtimeMs !== linked.mtimeMs || after.ctimeMs !== linked.ctimeMs) throw new Error('组件事务日志发布后复核失败');
       receipt = { path: filePath, nodeIdentity: nodeIdentity(after), size: after.size, mtimeMs: after.mtimeMs, ctimeMs: after.ctimeMs, sha256: require('node:crypto').createHash('sha256').update(first).digest('hex') };
     } finally { await published.close().catch(() => undefined); }
     await syncDirectory(fs, directory);
@@ -159,7 +168,7 @@ const assertManagedPath = async ({ fs, path, root, target, allowMissing = false,
   return { root: resolvedRoot, target: resolvedTarget, rootIdentity: nodeIdentity(rootStat) };
 };
 
-const createComponentTransactionService = ({ fs, path, crypto, installRoot, captureTreeIdentity, verifyTreeIdentity, cleanupOwnedPath, finalizeOwnedPath, deleteOwnedFile, getComponentEnabled = () => true, setComponentEnabled = () => undefined, clearComponentEnabledState = () => undefined, recoverInstallHostState = async () => undefined, cleanupProvider = () => [], onBlocked = () => undefined, onUnblocked = () => undefined, onCorrupt = () => undefined, now = Date.now, fault = async () => undefined }) => {
+const createComponentTransactionService = ({ fs, path, crypto, installRoot, captureTreeIdentity, verifyTreeIdentity, cleanupOwnedPath, finalizeOwnedPath, deleteOwnedFile, recoverPreparation = async () => undefined, getComponentEnabled = () => true, setComponentEnabled = () => undefined, clearComponentEnabledState = () => undefined, recoverInstallHostState = async () => undefined, cleanupProvider = () => [], onBlocked = () => undefined, onUnblocked = () => undefined, onCorrupt = () => undefined, now = Date.now, fault = async () => undefined }) => {
   const root = path.resolve(installRoot);
   const journalRoot = path.join(root, '.transactions');
   const active = new Map();
@@ -215,15 +224,17 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
     await fault(`journal:${next.kind}:${next.phase}`, next);
     const journalPath = fileFor(next.componentId);
     const currentReceipt = journalReceipts.get(next.componentId);
-    const linked = await existing(fs, journalPath);
-    if (record.generation === 0) {
-      if (linked || currentReceipt) throw new Error('组件事务首次 journal 发布检测到已有对象');
-    } else {
+    const assertCurrent = async () => {
+      const linked = await existing(fs, journalPath);
+      if (record.generation === 0) {
+        if (linked || currentReceipt) throw new Error('组件事务首次 journal 发布检测到已有对象');
+        return;
+      }
       if (!linked || !currentReceipt || currentReceipt.operationId !== record.operationId || currentReceipt.generation !== record.generation) throw new Error('组件事务 journal generation CAS 前置条件不满足');
       const current = await readJournal(journalPath); const parsed = validateJournal(JSON.parse(current.text));
       if (parsed.operationId !== record.operationId || parsed.generation !== record.generation || !sameNode(current.receipt.nodeIdentity, currentReceipt.nodeIdentity) || current.receipt.size !== currentReceipt.size || current.receipt.sha256 !== currentReceipt.sha256) throw new Error('组件事务 journal 在 generation CAS 前已变化');
-    }
-    const receipt = await atomicJson({ fs, path, crypto, filePath: journalPath, value: next, deleteOwnedFile });
+    };
+    const receipt = await atomicJson({ fs, path, crypto, filePath: journalPath, value: next, deleteOwnedFile, assertCurrent });
     journalReceipts.set(next.componentId, { ...receipt, operationId: next.operationId, generation: next.generation });
     return next;
   };
@@ -290,16 +301,25 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
       throw error;
     }
   };
-  const base = ({ kind, operationId = crypto.randomUUID(), componentId, container, destination, sourcePath = '', quarantinePath = '', destinationIdentity = null, sourceIdentity = null, quarantineIdentity = null, destinationTreeIdentity = [], sourceTreeIdentity = [], quarantineTreeIdentity = [], previousInstalled = true, previousEnabled, desiredEnabled, clearUserData = false, cleanupSteps = [] }) => validateJournal({
-    schemaVersion: SCHEMA_VERSION, kind, operationId, generation: 1, componentId, phase: 'prepared', installRoot: root, installRootIdentity, container: path.resolve(container), destination: path.resolve(destination), sourcePath: sourcePath ? path.resolve(sourcePath) : '', quarantinePath: quarantinePath ? path.resolve(quarantinePath) : '', destinationIdentity, sourceIdentity, quarantineIdentity, destinationTreeIdentity, sourceTreeIdentity, quarantineTreeIdentity, previousInstalled, previousEnabled, desiredEnabled, clearUserData, cleanupSteps, cleanupItems: [], lastError: '', updatedAt: now(),
+  const base = ({ kind, operationId = crypto.randomUUID(), componentId, container, destination, sourcePath = '', quarantinePath = '', destinationIdentity = null, sourceIdentity = null, quarantineIdentity = null, destinationTreeIdentity = [], sourceTreeIdentity = [], quarantineTreeIdentity = [], previousInstalled = true, previousEnabled, desiredEnabled, clearUserData = false, cleanupSteps = [], preparationCleanup = [] }) => validateJournal({
+    schemaVersion: SCHEMA_VERSION, kind, operationId, generation: 1, componentId, phase: 'prepared', installRoot: root, installRootIdentity, container: path.resolve(container), destination: path.resolve(destination), sourcePath: sourcePath ? path.resolve(sourcePath) : '', quarantinePath: quarantinePath ? path.resolve(quarantinePath) : '', destinationIdentity, sourceIdentity, quarantineIdentity, destinationTreeIdentity, sourceTreeIdentity, quarantineTreeIdentity, previousInstalled, previousEnabled, desiredEnabled, clearUserData, cleanupSteps, cleanupItems: [], preparationCleanup, lastError: '', updatedAt: now(),
   });
   const block = async (record, error, phase = 'blocked') => {
     onBlocked(record.componentId, error);
     try {
       return await persist({ ...record, phase, lastError: String(error?.message || error).slice(0, 4000) });
     } catch (journalError) {
-      throw new AggregateError([error, journalError], '组件事务失败且阻断状态无法持久化');
+      const failure = new AggregateError([error, journalError], '组件事务失败且阻断状态无法持久化');
+      failure.code = 'COMPONENT_TRANSACTION_BLOCKED'; failure.outcomeUnknown = true; failure.transactionRecord = record; failure.cleanupPending = true;
+      throw failure;
     }
+  };
+  const completePreparationCleanup = async original => {
+    if (!original.preparationCleanup.length) return original;
+    try {
+      await recoverPreparation(original.preparationCleanup, original);
+      return await persist({ ...original, preparationCleanup: [] });
+    } catch (error) { error.transactionRecord = error.transactionRecord || original; error.cleanupPending = true; throw error; }
   };
   const validateCleanupPlan = record => {
     const expected = cleanupProvider(record.componentId, record.clearUserData, record).map(step => step.name);
@@ -316,6 +336,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
   const restoreInstall = async original => {
     let record = original;
     try {
+      record = await completePreparationCleanup(record);
       const sourceStat = record.sourcePath ? await existing(fs, record.sourcePath) : null;
       const destinationStat = await existing(fs, record.destination);
       const backupStat = record.quarantinePath ? await existing(fs, record.quarantinePath) : null;
@@ -371,11 +392,10 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
       throw error;
     }
   };
-  const install = async ({ componentId, container, destination, stagingPath, stagingIdentity, stagingTreeIdentity, previousInstalled = true, previousEnabled = getComponentEnabled(componentId), desiredEnabled = true, validatePublished, commitHostState, onAdmitted = () => undefined }) => {
+  const install = async ({ componentId, container, destination, stagingPath, stagingIdentity, stagingTreeIdentity, preparationCleanup = [], previousInstalled = true, previousEnabled = getComponentEnabled(componentId), desiredEnabled = true, validatePublished, commitHostState, onAdmitted = () => undefined }) => {
     if (!COMPONENT_ID.test(componentId)) throw new Error('组件 ID 无效');
     const activeOperation = beginActiveOperation(componentId, 'install');
     let record;
-    let publicationStarted = false;
     let hostCommitted = false;
     try {
       await ensureRoots();
@@ -400,16 +420,16 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
           kind: 'install', operationId, componentId, container, destination, sourcePath: stagingPath, quarantinePath,
           sourceIdentity: stagingIdentity, sourceTreeIdentity: stagingTreeIdentity,
           quarantineIdentity: oldIdentity, quarantineTreeIdentity: oldTree,
-          previousInstalled, previousEnabled, desiredEnabled,
+          previousInstalled, previousEnabled, desiredEnabled, preparationCleanup,
         }),
         generation: 0,
       });
       onAdmitted(record.operationId);
+      record = await completePreparationCleanup(record);
 
       // prepared is durable before the old runtime is moved out of its executable path.
       if (old) {
         await fault('install:rename-backup', record);
-        publicationStarted = true;
         await fs.promises.rename(destination, quarantinePath);
         await assertReceipt(quarantinePath, oldIdentity, '旧组件 quarantine');
         await verifyTreeIdentity(quarantinePath, oldTree);
@@ -417,7 +437,6 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
       }
 
       await fault('install:publish', record);
-      publicationStarted = true;
       await fs.promises.rename(stagingPath, destination);
       const publishedIdentity = nodeIdentity(await fs.promises.lstat(destination));
       record = await persist({
@@ -455,16 +474,12 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
           throw forwardError;
         }
       }
-      if (record && (publicationStarted || record.phase !== 'prepared' || !(await existing(fs, stagingPath)))) await restoreInstall(record);
-      else if (record) {
-        try { await removeJournal(record); }
-        catch (journalError) {
-          const failure = new AggregateError([error, journalError], '组件安装失败且事务日志清理未确认');
-          failure.code = 'COMPONENT_TRANSACTION_BLOCKED';
-          failure.journal = await block(record, failure);
-          throw failure;
-        }
+      if (record?.preparationCleanup?.length) {
+        error.code ||= 'COMPONENT_TRANSACTION_CLEANUP_PENDING';
+        error.journal = await block(error.transactionRecord || record, error);
+        throw error;
       }
+      if (record) await restoreInstall(error.transactionRecord || record);
       throw error;
     }
     finally {

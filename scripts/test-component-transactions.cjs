@@ -137,11 +137,11 @@ const uninstallRecovery = async () => {
     const state = await fixture();
     try {
       await writeTree(state.destination, 'installed');
-      const targetIdentity = nodeIdentity(await fs.promises.lstat(state.destination));
-      const targetTreeIdentity = await captureComponentTreeIdentity(state.destination);
+      const targetIdentity = nodeIdentity(await fs.promises.lstat(state.container));
+      const targetTreeIdentity = await captureComponentTreeIdentity(state.container);
       let fired = false;
       const service = state.makeService({ fault: async current => { if (!fired && current === point) { fired = true; throw crash(point); } } });
-      await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.destination, targetIdentity, targetTreeIdentity, clearUserData: true, previousEnabled: true }), error => error.simulateCrash === true);
+      await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.container, targetIdentity, targetTreeIdentity, clearUserData: true, previousEnabled: true }), error => error.simulateCrash === true);
       await state.makeService().recover();
       assert.equal(await fs.promises.lstat(state.destination).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error)), null);
       assert.equal(state.enabled.has(state.componentId), false, point);
@@ -204,7 +204,7 @@ const journalFaultMatrix = async () => {
         const service = state.makeService({ fault: async point => {
           if (!fired && point === `journal:uninstall:${phase}`) { fired = true; throw Object.assign(new Error(`${code}:${phase}`), { code }); }
         } });
-        await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)), targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: true, previousEnabled: true }));
+        await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.container, targetIdentity: nodeIdentity(await fs.promises.lstat(state.container)), targetTreeIdentity: await captureComponentTreeIdentity(state.container), clearUserData: true, previousEnabled: true }));
         await state.makeService().recover();
         const remaining = await fs.promises.lstat(state.destination).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
         assert.equal(Boolean(remaining), phase === 'prepared', `${code} uninstall ${phase}`);

@@ -95,7 +95,7 @@ const main = async () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8'); assert.match(mainSource, /windowsJobOptions:\s*\{\s*packaged:\s*app\.isPackaged,\s*resourcesPath:\s*process\.resourcesPath\s*\}/, 'packaged hosts must resolve the helper from resources, not the asar source tree');
   for (const [relative, pattern] of [
     ['electron/services/component-service-manager.cjs', /kind:\s*'component-service'[\s\S]*?windowsJob:\s*true/],
-    ['electron/modules/system-ipc.cjs', /kind:\s*'component-lifecycle'[\s\S]*?windowsJob:\s*true/],
+    ['electron/services/component-lifecycle-service.cjs', /kind:\s*'component-lifecycle'[\s\S]*?windowsJob:\s*true/],
     ['electron/services/bundled-python-runtime.cjs', /supervision\?\.componentId[\s\S]*?windowsJob:\s*true/],
     ['electron/services/video-playback-process-service.cjs', /kind:\s*'media-playback-backend'[\s\S]*?windowsJob:\s*true/],
   ]) assert.match(fs.readFileSync(path.join(__dirname, '..', relative), 'utf8'), pattern, `${relative} must opt component-owned processes into Job supervision`);

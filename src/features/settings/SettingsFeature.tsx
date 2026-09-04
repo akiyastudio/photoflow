@@ -313,7 +313,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     try {
       const result = await window.electronAPI.uninstallComponent(component.id, { clearUserData });
       if (result.cancelled) { onNotice('已取消卸载', 2500); return; }
-      if (!result.success) { onNotice(`卸载“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
+      if (!result.success) { onNotice(`卸载“${component.name}”失败：${result.error || '未知错误'}；请重试`, 6000); return; }
       if (clearUserData) await onComponentDataCleared(component.id);
       const cleanupWarning = result.cleanupWarnings?.filter(Boolean).join('；');
       onNotice(cleanupWarning
@@ -334,7 +334,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     try {
       const result = await setComponentEnabled(component.id, enabled);
       if (result.cancelled) { onNotice(enabled ? '已取消启用' : '已取消禁用', 2500); return; }
-      if (!result.success) { onNotice(`${enabled ? '启用' : '禁用'}“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
+      if (!result.success) { onNotice(`${enabled ? '启用' : '禁用'}“${component.name}”失败：${result.error || '未知错误'}；请重试`, 6000); return; }
       onNotice(enabled ? `已启用“${component.name}”` : `已禁用“${component.name}”；组件文件和用户数据均已保留`);
       await onComponentsChanged();
     } catch (error) {
@@ -342,7 +342,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
       const requiresRestart = /No handler registered|components-set-enabled|is not a function/i.test(message);
       onNotice(requiresRestart
         ? '组件管理接口已更新，请完全退出并重新启动应用后再试'
-        : `${enabled ? '启用' : '禁用'}“${component.name}”失败：${message}`, requiresRestart ? 6000 : 5000);
+        : `${enabled ? '启用' : '禁用'}“${component.name}”失败：${message}；请重试`, 6000);
     } finally { setBusyId(''); setBusyAction(''); }
   };
   return <SettingsPageGroup title="组件安装与卸载">

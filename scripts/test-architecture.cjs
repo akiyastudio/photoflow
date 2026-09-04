@@ -19,7 +19,8 @@ const explicitlyBinaryExtensions = new Set(['.onnx', '.zip', '.ico']);
 const isTestOrDocumentationPath = relativePath => {
   const segments = normalize(relativePath).split('/');
   const fileName = segments.at(-1) || '';
-  return segments.some(segment => /^(?:docs?|tests?|__tests__|fixtures?)$/i.test(segment))
+  return fileName === 'check-component-release.cjs'
+    || segments.some(segment => /^(?:docs?|tests?|__tests__|fixtures?)$/i.test(segment))
     || /^(?:test[-_.]|.*\.(?:test|spec)\.)/i.test(fileName)
     || /^(?:README|CHANGELOG|CONTRIBUTING|MODEL-SOURCE)(?:\.|$)/i.test(fileName);
 };

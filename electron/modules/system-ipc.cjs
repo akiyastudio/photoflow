@@ -678,7 +678,7 @@ const registerSystemIpc = context => {
       writeLog('warn', 'Persistent background task service unavailable; component cleanup retained for manual recovery', { targets: targets.map(target => target.path) });
       return { admitted: false, reason: 'persistence-unavailable', targets };
     }
-    const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
+    const dedupeKey = `system-filesystem-cleanup:${crypto.createHash('sha256').update(JSON.stringify(targets.map(target => ({ path: target.path, kind: target.kind, nodeIdentity: target.nodeIdentity })))).digest('hex').slice(0, 24)}`;
     let retryFactory;
     const admit = (sourceTask = restartTask, { reuseId = false } = {}) => {
       const taskMetadata = { targets, title, ...(sourceTask?.metadata?.dataCleanupComplete === true ? { dataCleanupComplete: true } : {}) };
@@ -753,6 +753,12 @@ const registerSystemIpc = context => {
     cleanupOwnedPath: (receipt, { persistPrepared }) => cleanupOwnedComponentPath(receipt, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared }),
     finalizeOwnedPath: receipt => finalizeComponentCleanupProof(receipt, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar, verifySidecar: verifyComponentCleanupSidecar }),
     deleteOwnedFile: deleteBoundComponentFile,
+    recoverPreparation: async receipts => {
+      const admission = await queueSystemFilesystemCleanup(receipts, '恢复组件安装临时文件');
+      if (admission?.admitted !== true) throw Object.assign(new Error('组件安装临时文件未获得持久 cleanup admission'), { cleanupPendingReceipts: receipts });
+      try { await admission.completion; }
+      catch (error) { error.cleanupPendingReceipts ||= receipts; error.cleanupPending = true; throw error; }
+    },
     getComponentEnabled: componentId => pluginService.list().find(item => item.id === componentId)?.enabled !== false,
     setComponentEnabled: (componentId, enabled) => pluginService.setComponentEnabled(componentId, enabled),
     clearComponentEnabledState: componentId => pluginService.clearComponentEnabledState(componentId),
@@ -1006,7 +1012,10 @@ const registerSystemIpc = context => {
     try {
       await componentTransactionReady;
       ({ componentId } = validateComponentInstallRequest(request));
-      const recoveredTransactions = await componentTransactions.recover(componentId);
+      const recoveryTransition = lifecycleCoordinator?.acquireRecovery?.(componentId);
+      let recoveredTransactions;
+      try { recoveredTransactions = await componentTransactions.recover(componentId); }
+      finally { recoveryTransition?.release?.(); }
       const recoveredInstall = recoveredTransactions.find(result => result.kind === 'install' && result.status === 'committed');
       if (recoveredInstall) return { success: true, recovered: true, operationId: recoveredInstall.operationId };
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
@@ -1084,20 +1093,14 @@ const registerSystemIpc = context => {
         packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
         packageSnapshotReceipt,
       ].filter(Boolean);
-      packageCleanupAttempted = true;
-      const packageCleanupAdmission = await queueSystemFilesystemCleanup(packageCleanupPaths, `清理“${componentId}”组件安装临时文件`);
-      if (packageCleanupAdmission?.admitted !== true) throw Object.assign(new Error('组件安装临时文件未获得持久 cleanup admission'), { cleanupPendingReceipts: packageCleanupPaths });
-      packageStagePath = '';
-      packageSnapshotPath = '';
-      await packageCleanupAdmission.completion;
       const previous = pluginService.list().find(item => item.id === componentId);
       const transactionStagingPath = stagingPath; const transactionStagingIdentity = stagingNodeIdentity;
       const transactionResult = await componentTransactions.install({
         componentId, container, destination, stagingPath: transactionStagingPath, stagingIdentity: transactionStagingIdentity,
-        stagingTreeIdentity: componentTreeIdentity, previousInstalled: Boolean(previous?.installed), previousEnabled: previous ? previous.enabled !== false : false, desiredEnabled: true,
+        stagingTreeIdentity: componentTreeIdentity, preparationCleanup: packageCleanupPaths, previousInstalled: Boolean(previous?.installed), previousEnabled: previous ? previous.enabled !== false : false, desiredEnabled: true,
         validatePublished: target => pluginService.verifyComponentDirectoryAsync(componentId, target, true),
         commitHostState: async () => { await componentServiceManager?.stop?.(componentId, 'component-upgrade'); await configMutationService.adoptLegacySettings(); },
-        onAdmitted: () => { stagingPath = ''; stagingNodeIdentity = null; },
+        onAdmitted: () => { stagingPath = ''; stagingNodeIdentity = null; packageCleanupAttempted = true; packageStagePath = ''; packageSnapshotPath = ''; },
       });
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
@@ -1105,7 +1108,7 @@ const registerSystemIpc = context => {
     } catch (error) {
       const pendingCleanup = Array.isArray(error?.cleanupPendingReceipts) && error.cleanupPendingReceipts.length ? error.cleanupPendingReceipts : error?.cleanupPendingPaths;
       if (!packageCleanupAttempted && Array.isArray(pendingCleanup) && pendingCleanup.length) await queueSystemFilesystemCleanup(pendingCleanup, `清理“${componentId || '未知'}”组件失败暂存文件`).catch(cleanupError => { error.message = `${error.message || String(error)}；${cleanupError.message || String(cleanupError)}`; });
-      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal) || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
+      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId || error?.transactionRecord?.operationId, cleanupPending: Boolean(error?.journal) || error?.cleanupPending === true || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
     } finally {
       const deferredCleanup = [
         stagingPath && stagingNodeIdentity && componentTreeIdentity ? { path: stagingPath, kind: 'directory', nodeIdentity: stagingNodeIdentity, treeDigest: componentTreeIdentityDigest(componentTreeIdentity) } : null,
@@ -1151,7 +1154,11 @@ const registerSystemIpc = context => {
     let transitionLease;
     try {
       await componentTransactionReady;
-      const recoveredTransactions = await componentTransactions.recover(String(componentId || ''));
+      const recoveryComponentId = String(componentId || '');
+      const recoveryTransition = lifecycleCoordinator?.acquireRecovery?.(recoveryComponentId);
+      let recoveredTransactions;
+      try { recoveredTransactions = await componentTransactions.recover(recoveryComponentId); }
+      finally { recoveryTransition?.release?.(); }
       const recoveredUninstall = recoveredTransactions.find(result => result.kind === 'uninstall' && result.status === 'committed');
       if (recoveredUninstall) return { success: true, recovered: true, dataCleared: recoveredUninstall.clearUserData, cleanupWarnings: [], operationId: recoveredUninstall.operationId };
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
@@ -1188,7 +1195,7 @@ const registerSystemIpc = context => {
       return { success: true, dataCleared: clearUserData, cleanupWarnings: [], operationId: result.operationId };
       } finally { capabilityBarrier.release(); }
     } catch (error) {
-      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal), outcomeUnknown: Boolean(error?.outcomeUnknown) };
+      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId || error?.transactionRecord?.operationId, cleanupPending: Boolean(error?.journal) || error?.cleanupPending === true, outcomeUnknown: Boolean(error?.outcomeUnknown) };
     } finally { transitionLease?.release?.(); }
   });
 
