@@ -6,7 +6,7 @@ import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 
 const crc32 = buffer => {
@@ -80,7 +80,7 @@ const dialog = {
     return { response: 0 };
   },
 };
-const confirmation = integrityStatus => confirmComponentPackageInstall({ componentId: 'third-party.tool', integrityStatus, dialog, mainWindow: {} });
+const confirmation = integrityStatus => confirmComponentPackageInstall({ componentId: 'third-party.tool', componentVersion: '1.0.0', integrityStatus, dialog, mainWindow: {} });
 
 assert.equal(await confirmation('verified'), true);
 assert.equal(await confirmation('pinned-unverified'), true);
@@ -94,8 +94,8 @@ await assert.rejects(confirmation('invalid'), /完整性状态无效/);
 const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
 assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
-assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath\)[\s\S]*inspectComponentArchive\(packageSnapshotPath\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath\)/);
-assert.match(mainSource, /const confirmed = await confirmComponentPackageInstall[\s\S]*verifyComponentTreeIdentity\(componentRoot[\s\S]*enterComponentInstallTransition[\s\S]*ensureInstallRoot/);
+assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath\)[\s\S]*inspectComponentArchive\(packageSnapshotPath\)[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath\)/);
+assert.match(mainSource, /captureComponentTreeIdentity[\s\S]*verifyComponentTreeIdentity\(componentRoot[\s\S]*enterComponentInstallTransition[\s\S]*ensureInstallRoot/);
 assert.match(mainSource, /fs\.promises\.cp[\s\S]*verifyComponentTreeIdentity\(stagingPath[\s\S]*rename\(stagingPath, destination\)[\s\S]*verifyComponentTreeIdentity\(destination/);
 assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
 assert.match(mainSource, /if \(packageSnapshotPath\) await fs\.promises\.rm\(packageSnapshotPath/);
@@ -111,6 +111,11 @@ try {
   const snapshot = path.join(temporaryRoot, 'snapshot.zip'); await snapshotComponentArchive(archive, snapshot);
   const inspected = inspectComponentArchive(snapshot);
   assert.equal(inspected.manifestEntry, 'new/component.json');
+  assert.equal(inspected.manifest.marker, 'new');
+  const cancelledExpansion = path.join(temporaryRoot, 'cancelled-expansion');
+  const snapshotTrust = snapshotComponentTrust('third-party.tool', inspected.manifest);
+  assert.equal(await confirmComponentPackageInstall({ ...snapshotTrust, dialog: { showMessageBox: async () => ({ response: 0 }) }, mainWindow: {} }), false);
+  assert.equal(fs.existsSync(cancelledExpansion), false, 'cancelling an unsigned snapshot does not create or write an expansion directory');
   const extracted = path.join(temporaryRoot, 'extracted');
   const extractedPackage = await extractComponentArchive(inspected, extracted);
   assert.equal(extractedPackage.manifest.marker, 'new');

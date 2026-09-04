@@ -5,6 +5,7 @@ const { componentDataRoot, createComponentLifecycleService } = require('../servi
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
 const { assertAvailableDiskSpace, captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
+const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -223,20 +224,29 @@ const validateComponentInstallRequest = request => {
   if (typeof request.componentId !== 'string' || !COMPONENT_INSTALL_ID.test(request.componentId)) throw new TypeError('组件 ID 无效');
   return { componentId: request.componentId };
 };
-const confirmComponentPackageInstall = async ({ componentId, integrityStatus, dialog, mainWindow }) => {
+const confirmComponentPackageInstall = async ({ componentId, componentVersion, integrityStatus, dialog, mainWindow }) => {
   if (integrityStatus === 'verified' || integrityStatus === 'pinned-unverified') return true;
   if (integrityStatus !== 'unsigned') throw new Error('组件包完整性状态无效，请刷新组件状态后重试');
   const response = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     title: `安装未验证来源的组件“${componentId}”？`,
     message: '这个组件包没有可由 PhotoFlow 验证的来源签名。',
-    detail: '安装后，它的服务、生命周期脚本或可执行程序将以你的当前用户权限运行，可能读取或修改你有权访问的文件、连接网络或启动其他进程。仅在你信任安装包来源时继续。此确认只适用于本次安装的这个组件包。',
+    detail: `组件 ID：${componentId}\n版本：${componentVersion}\n\n安装后，它的服务、生命周期脚本或可执行程序将以你的当前用户权限运行，可能读取或修改你有权访问的文件、连接网络或启动其他进程。仅在你信任安装包来源时继续。此确认只适用于本次安装的这个组件包。`,
     buttons: ['取消安装', '我信任来源，继续安装'],
     defaultId: 0,
     cancelId: 0,
     noLink: true,
   });
   return response.response === 1;
+};
+const snapshotComponentTrust = (componentId, manifest) => {
+  if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('组件快照清单无效');
+  if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
+  if (manifest.apiVersion !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
+  if (typeof manifest.version !== 'string' || !manifest.version.trim() || manifest.version.length > 128) throw new Error('组件版本无效');
+  const pinned = PLUGIN_DEFINITIONS[componentId]?.integrityManifest;
+  if (pinned && String(PLUGIN_DEFINITIONS[componentId].version) !== manifest.version) throw new Error(`组件版本不兼容：需要 ${PLUGIN_DEFINITIONS[componentId].version}，安装包为 ${manifest.version}`);
+  return { componentId, componentVersion: manifest.version, integrityStatus: pinned ? 'pinned-unverified' : 'unsigned' };
 };
 const createComponentInstallAdmission = () => {
   const active = new Set();
@@ -771,14 +781,16 @@ const registerSystemIpc = context => {
       const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath);
       const packageSizeBytes = sourceIdentity.size;
       const snapshotPackage = inspectComponentArchive(packageSnapshotPath);
+      const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
+      const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, dialog, mainWindow });
+      if (!confirmed) return { success: false, cancelled: true };
       const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath);
       const manifestDirectory = path.dirname(extractedPackage.manifestEntry);
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
       const stagedRelative = path.relative(packageStagePath, componentRoot);
       if (stagedRelative.startsWith('..') || path.isAbsolute(stagedRelative)) throw new Error('组件清单路径越界');
       const manifest = extractedPackage.manifest;
-      if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
-      if (manifest.apiVersion !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
+      snapshotComponentTrust(componentId, manifest);
       const entrypoints = manifest.entrypoints || {};
       const relativeEntry = entrypoints[`${process.platform}-${process.arch}`] || entrypoints[process.platform] || entrypoints.default;
       if (typeof relativeEntry !== 'string' || !relativeEntry.trim()) throw new Error('组件没有适用于当前系统的入口文件');
@@ -795,10 +807,9 @@ const registerSystemIpc = context => {
       }
       await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true);
       const integrityToken = pluginService.componentIntegrityToken(componentId, componentRoot);
-      const snapshotIntegrityStatus = integrityToken.startsWith('integrity|') ? 'pinned-unverified' : integrityToken.startsWith('metadata|') ? 'unsigned' : 'invalid';
+      const extractedIntegrityStatus = integrityToken.startsWith('integrity|') ? 'pinned-unverified' : integrityToken.startsWith('metadata|') ? 'unsigned' : 'invalid';
+      if (extractedIntegrityStatus !== snapshotTrust.integrityStatus) throw new Error('组件快照完整性状态在解压后发生变化');
       const componentTreeIdentity = await captureComponentTreeIdentity(componentRoot);
-      const confirmed = await confirmComponentPackageInstall({ componentId, integrityStatus: snapshotIntegrityStatus, dialog, mainWindow });
-      if (!confirmed) return { success: false, cancelled: true };
       await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
       const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
       await assertAvailableDiskSpace(pluginService.installRoot, componentSizeBytes);
@@ -1762,4 +1773,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

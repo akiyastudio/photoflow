@@ -71,6 +71,18 @@ const validArchivePath = value => {
     && !segments.some(segment => segment === '..' || segment === '.' || segment === '' || /[. ]$/.test(segment)
       || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment)));
 };
+const crc32 = buffer => {
+  let crc = 0xffffffff;
+  for (const byte of buffer) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+};
+const readSmallEntry = (fd, entry, maxBytes) => {
+  if (entry.uncompressedSize > maxBytes || entry.compressedSize > maxBytes + 64 * 1024) throw new Error('component.json 过大');
+  const compressed = readExact(fd, entry.compressedSize, entry.dataStart);
+  const value = entry.method === 0 ? compressed : entry.method === 8 ? zlib.inflateRawSync(compressed, { maxOutputLength: maxBytes }) : null;
+  if (!value || value.length !== entry.uncompressedSize || crc32(value) !== entry.expectedCrc) throw new Error('component.json 校验失败，安装包可能已损坏');
+  return value;
+};
 
 const localDataRange = (fd, archive, entry) => {
   const local = readExact(fd, 30, entry.localOffset);
@@ -178,7 +190,12 @@ const inspectComponentArchive = archivePath => {
     for (let index = 1; index < ranges.length; index += 1) if (ranges[index].start < ranges[index - 1].dataEnd) throw new Error(`ZIP 条目数据区域重叠：${ranges[index].entry.name}`);
     const manifests = ranges.filter(item => /(^|\/)component\.json$/i.test(item.entry.name));
     if (manifests.length !== 1) throw new Error(manifests.length ? '安装包包含多个 component.json' : '安装包中没有 component.json');
-    return Object.freeze({ archive, entries: ranges.map(item => Object.freeze({ ...item.entry, dataStart: item.dataStart })), manifestEntry: manifests[0].entry.name, totalUncompressedBytes: total });
+    const entriesWithOffsets = ranges.map(item => Object.freeze({ ...item.entry, dataStart: item.dataStart }));
+    const manifestEntry = entriesWithOffsets.find(entry => entry.name === manifests[0].entry.name);
+    let manifest;
+    try { manifest = JSON.parse(readSmallEntry(fd, manifestEntry, MAX_MANIFEST_BYTES).toString('utf8')); }
+    catch (error) { throw new Error(`component.json 无效：${error.message || String(error)}`); }
+    return Object.freeze({ archive, entries: entriesWithOffsets, manifest, manifestEntry: manifestEntry.name, totalUncompressedBytes: total });
   } finally { fs.closeSync(fd); }
 };
 
