@@ -400,6 +400,16 @@ const outboxState = async (record, state, values = {}) => {
   }
   finally { db.close(); }
 };
+const deleteUncommittedOutputOutbox = async (record, expectedState) => {
+  await assertCurrentRevisionLease(); const db = ensureSchema(record.storage.databasePath);
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    const removed = db.prepare('DELETE FROM team_output_outbox WHERE project_id=? AND id=? AND fingerprint=? AND state=? AND receipt_json=?').run(record.projectId, record.row.id, record.fingerprint, expectedState, '{}').changes;
+    if (removed !== 1) throw recoveryRequiredError(`outbox ${record.row.id} 未提交状态在终结时发生变化`);
+    db.exec('COMMIT');
+  } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+  finally { db.close(); }
+};
 
 const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null, kind = 'project-output', continuationPlan = null) => {
   const record = await prepareOutputOutbox(parentId, [{ sourcePath, outputRelativePath, replacement }], idempotencyKey, kind, continuationPlan);
@@ -475,17 +485,35 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
     try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY created_at,id LIMIT ?").all(String(context.projectId), Math.max(1, Number(batchSize) || 1)); }
     finally { db.close(); }
     if (!rows.length) return { attempted, recovered, pending: 0 };
+    const plannedRows = rows.filter(row => row.state === 'planned');
+    if (plannedRows.length) {
+      for (const row of plannedRows) {
+        const plan = parseJson(row.result_json, {}).continuationPlan;
+        if (!plan || Number(plan.version) !== 1 || String(plan.projectId) !== String(context.projectId) || String(plan.kind) !== String(row.kind) || plan.preHostLocalEffects !== 'none') throw recoveryRequiredError(`outbox ${row.id} planned 无法证明 continuation/本地副作`);
+      }
+      const deleteDb = ensureSchema(storage.databasePath);
+      try {
+        deleteDb.exec('BEGIN IMMEDIATE'); const remove = deleteDb.prepare("DELETE FROM team_output_outbox WHERE project_id=? AND id=? AND state='planned' AND receipt_json='{}'");
+        for (const row of plannedRows) if (remove.run(String(context.projectId), row.id).changes !== 1) throw recoveryRequiredError(`outbox ${row.id} planned 状态已变化`);
+        deleteDb.exec('COMMIT');
+      } catch (error) { try { deleteDb.exec('ROLLBACK'); } catch {} throw error; }
+      finally { deleteDb.close(); }
+      attempted += plannedRows.length; recovered += plannedRows.length; rows = rows.filter(row => row.state !== 'planned');
+    }
     for (const row of rows) {
       attempted += 1; assertNotAborted(context.signal);
       const sources = parseJson(row.source_json, []); const targets = parseJson(row.target_json, []); let result = parseJson(row.result_json, {});
       const plan = result.continuationPlan;
       if (!plan || Number(plan.version) !== 1 || String(plan.projectId) !== String(context.projectId) || String(plan.kind) !== String(row.kind)) throw recoveryRequiredError(`outbox ${row.id} 缺少完整 continuation plan`);
       const record = { storage, projectId: String(context.projectId), fingerprint: row.fingerprint, row, files: targets.map((target, index) => ({ ...target, sourcePath: sources[index]?.sourcePath || '', digest: sources[index]?.digest || '' })) };
-      if (row.state === 'planned') { await outboxState(record, 'completed', { result: { recoveryDisposition: 'aborted-before-host-side-effect' } }); recovered += 1; continue; }
       if (row.state === 'host_staging') {
         if (!row.stage_id) throw recoveryRequiredError(`outbox ${row.id} host_staging 缺少 stageId`);
-        await callHost(parentId, 'project.output', { action: 'rollback', stageId: row.stage_id });
-        await outboxState(record, 'completed', { result: { recoveryDisposition: 'rolled-back-uncommitted-stage' } }); recovered += 1; continue;
+        let rollback;
+        try { rollback = await callHost(parentId, 'project.output', { action: 'rollback', stageId: row.stage_id }); }
+        catch (error) { throw recoveryRequiredError(`outbox ${row.id} Host stage rollback 失败：${error.message || error}`); }
+        if (rollback?.rolledBack !== true || (rollback.stageId && String(rollback.stageId) !== String(row.stage_id))) throw recoveryRequiredError(`outbox ${row.id} Host stage rollback 未确认`);
+        if (plan.preHostLocalEffects !== 'none') throw recoveryRequiredError(`outbox ${row.id} Host stage 前存在未证明的本地副作`);
+        await deleteUncommittedOutputOutbox(record, 'host_staging'); recovered += 1; continue;
       }
       let receipt = parseJson(row.receipt_json, {});
       if (['host_staged','commit_inflight'].includes(row.state)) {
@@ -506,8 +534,21 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
         const ledger = await readJson(plan.ledgerPath, {}); ledger[plan.outputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 };
         await replaceJsonAtomic(plan.ledgerPath, ledger);
       } else if (row.kind === 'workflow-output') {
+        if (!plan.localSwap?.outputDirectory || !plan.localSwap?.stagingDirectory || !plan.localSwap?.swapToken) throw recoveryRequiredError(`workflow outbox ${row.id} 缺少本地 swap plan`);
+        let currentMatches = true;
+        for (const item of plan.outputs || []) {
+          const currentPath = path.resolve(plan.localSwap.outputDirectory, item.relativePath || '');
+          if (!item.relativePath || !isInside(plan.localSwap.outputDirectory, currentPath) || !fs.existsSync(currentPath) || !item.digest || await fileSha256(currentPath) !== item.digest) { currentMatches = false; break; }
+        }
+        if (!currentMatches) {
+          if (!fs.existsSync(plan.localSwap.stagingDirectory)) throw recoveryRequiredError(`workflow outbox ${row.id} 的 staging/current 均无法与计划摘要匹配`);
+          replacePersistentFromStage(plan.localSwap.stagingDirectory, plan.localSwap.outputDirectory, plan.localSwap.swapToken);
+        }
         const manifest = JSON.parse(JSON.stringify(plan.manifest));
-        manifest.outputOwnership = Object.fromEntries((receipt.outputs || []).map(item => [item.relativePath, { commitId: receipt.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
+        manifest.outputOwnership = Object.fromEntries((receipt.outputs || []).map(item => {
+          const planned = (plan.outputs || []).find(value => value.outputRelativePath === item.relativePath);
+          return [planned?.ownershipKey || item.relativePath, { commitId: receipt.commitId, artifactId: item.artifactId, sha256: item.sha256 }];
+        }));
         await writeJsonAtomic(plan.manifestPath, manifest);
         const domainDb = ensureSchema(storage.databasePath);
         try { domainDb.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(plan.workflowState.generatedAt), String(plan.workflowState.fingerprint), Date.now()); }
@@ -538,6 +579,10 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
       await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1;
     }
   }
+  const finalDb = ensureSchema(storage.databasePath); let remaining;
+  try { remaining = Number(finalDb.prepare("SELECT COUNT(*) count FROM team_output_outbox WHERE project_id=? AND state<>'completed'").get(String(context.projectId))?.count) || 0; }
+  finally { finalDb.close(); }
+  if (!remaining) return { attempted, recovered, pending: 0 };
   throw recoveryRequiredError('outbox drain 超过有界批次，无法证明状态稳定前进');
 };
 const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRelativePath) => {
@@ -547,7 +592,7 @@ const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRe
   const previous = ledger[outputRelativePath] || null;
   const sourceDigest = await fileSha256(sourcePath);
   const stableBusinessKey = `${storage.projectId}\0${normalizedBase}\0${outputRelativePath}\0${sourceDigest}\0${JSON.stringify(previous || null)}`;
-  const continuationPlan = { version: 1, kind: 'working-output', projectId: String(storage.projectId), ledgerPath, outputRelativePath };
+  const continuationPlan = { version: 1, kind: 'working-output', projectId: String(storage.projectId), preHostLocalEffects: 'none', ledgerPath, outputRelativePath };
   const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(stableBusinessKey).slice(0, 40)}`, previous, 'working-output', continuationPlan);
   const output = committed.outputs[0]; const record = committed[OUTPUT_OUTBOX]; let imported = parseJson(record?.row?.result_json, {}).materialized;
   if (!imported?.privatePath) {
@@ -1461,7 +1506,7 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
     const threshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * .00005);
     const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > threshold;
     const versionPayloadTemplate = { photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: merged.noRetouch ? '所有人物均确认无需修图；已将原图作为零修改输出登记' : `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false };
-    const continuationPlan = { version: 1, kind: 'merge-output', projectId: String(context.projectId), outputProgressId: String(outputProgress.id), outputRelativePath, versionPayloadTemplate, domain: { photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), tasks: photoTasks.map(task => ({ id: String(task.id), members: task.members.map(member => Number(member.personIndex)), completion: fingerprintTasks.find(item => item.id === String(task.id))?.memberArtifacts || [] })), finalStatus: 'merged', mergeMetrics: merged.metrics || [] } };
+    const continuationPlan = { version: 1, kind: 'merge-output', projectId: String(context.projectId), preHostLocalEffects: 'none', outputProgressId: String(outputProgress.id), outputRelativePath, versionPayloadTemplate, domain: { photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), tasks: photoTasks.map(task => ({ id: String(task.id), members: task.members.map(member => Number(member.personIndex)), completion: fingerprintTasks.find(item => item.id === String(task.id))?.memberArtifacts || [] })), finalStatus: 'merged', mergeMetrics: merged.metrics || [] } };
     const committed = await publishProjectFile(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`, null, 'merge-output', continuationPlan);
     const artifact = committed.outputs[0];
     const registered = await createVersionFromOutput(parentId, committed, { ...versionPayloadTemplate, commitId: committed.commitId, artifactId: artifact.artifactId });
@@ -2273,15 +2318,16 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
     await progressReports;
     if (job.cancelled || context.signal?.aborted) throw Object.assign(new Error('工作流程生成已取消'), { code: CANCELLED_CODE });
     const manifest = { version: 2, projectId: String(context.projectId), generatedAt: Date.now(), fingerprint, workflowSettings, groups: plan.manifestGroups };
-    const workflowPublication = replacePersistentFromStage(stagingDirectory, scope.outputDirectory, crypto.randomUUID());
-    backupDirectory = workflowPublication.backupPath;
-    stagingDirectory = '';
     try {
       const replacements = new Map(Object.entries(previousManifest?.outputOwnership || {}).map(([relativePath, value]) => [relativePath, value]));
-      const outputFiles = manifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(scope.outputDirectory, item.relativePath), outputRelativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
-      const continuationPlan = { version: 1, kind: 'workflow-output', projectId: String(context.projectId), manifestPath: scope.manifestPath, manifest: { ...manifest, outputOwnership: {} }, workflowState: { generatedAt: Number(manifest.generatedAt), fingerprint }, outputs: outputFiles.map(file => ({ outputRelativePath: file.outputRelativePath })) };
+      const outputFiles = manifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(stagingDirectory, item.relativePath), outputRelativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
+      const swapToken = crypto.randomUUID();
+      const continuationPlan = { version: 1, kind: 'workflow-output', projectId: String(context.projectId), preHostLocalEffects: 'none', manifestPath: scope.manifestPath, manifest: { ...manifest, outputOwnership: {} }, workflowState: { generatedAt: Number(manifest.generatedAt), fingerprint }, outputs: outputFiles.map((file, index) => ({ outputRelativePath: file.outputRelativePath, relativePath: path.relative(stagingDirectory, file.sourcePath).replace(/\\/g, '/'), digest: plan.files[index]?.sha256 || '' })), localSwap: { stagingDirectory, outputDirectory: scope.outputDirectory, swapToken, backupDirectory: `${scope.outputDirectory}.${swapToken}.backup` } };
       const committed = await publishProjectFiles(parentId, outputFiles, `workflow-${sha256(fingerprint).slice(0, 24)}`, replacements, continuationPlan);
       hostPublicationCommitted = true;
+      const workflowPublication = replacePersistentFromStage(stagingDirectory, scope.outputDirectory, swapToken);
+      backupDirectory = workflowPublication.backupPath;
+      stagingDirectory = '';
       manifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
       if (committed[OUTPUT_OUTBOX]) await outboxState(committed[OUTPUT_OUTBOX], 'domain_pending', { result: { ...parseJson(committed[OUTPUT_OUTBOX].row.result_json, {}), workflow: { manifestPath: scope.manifestPath, generatedAt: manifest.generatedAt, fingerprint } } });
       await writeJsonAtomic(scope.manifestPath, manifest);
@@ -2598,7 +2644,7 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
       const prior = priorOutputs.find(item => item.relativePath === activeRelativePath)?.ownership || ownership[activeRelativePath] || null;
       const activeDigest = await fileSha256(activeTarget);
       if (!prior || String(prior.sha256 || '').toLowerCase() !== activeDigest.toLowerCase()) {
-        const relayContinuation = { version: 1, kind: 'relay-output', projectId: String(context.projectId), manifestPath: scope.manifestPath, activeRelativePath, manifest: scope.manifest };
+        const relayContinuation = { version: 1, kind: 'relay-output', projectId: String(context.projectId), preHostLocalEffects: 'workflow-current-mutated', manifestPath: scope.manifestPath, activeRelativePath, manifest: scope.manifest };
         const committed = await publishProjectFile(parentId, activeTarget, activeRelativePath, `relay-${sha256(`${task.id}\0${activeIndex}\0${activeDigest}\0${JSON.stringify(prior || null)}`).slice(0, 24)}`, prior, 'relay-output', relayContinuation);
         committedPublications.push(committed);
         const output = committed.outputs[0]; ownership[activeRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
@@ -2627,11 +2673,13 @@ const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1, t
   const restoredScope = await workflowScopeForStorage(maintenanceStorage, context);
   if (restoredScope.manifest?.recovery?.state === 'needs-republish') {
     const restoredManifest = JSON.parse(JSON.stringify(restoredScope.manifest)); delete restoredManifest.recovery;
-    const outputFiles = (restoredManifest.groups || []).flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(restoredScope.outputDirectory, item.relativePath), outputRelativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
+    const restoreGeneration = sha256(`${context.projectId}\0${restoredManifest.fingerprint}`).slice(0, 20);
+    const outputFiles = (restoredManifest.groups || []).flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(restoredScope.outputDirectory, item.relativePath), ownershipKey: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}`, outputRelativePath: `团片协作/恢复-${restoreGeneration}/${String(item.relativePath).replace(/\\/g, '/')}` })));
     if (!outputFiles.length || outputFiles.some(item => !isInside(restoredScope.outputDirectory, item.sourcePath) || !fs.existsSync(item.sourcePath))) throw recoveryRequiredError('恢复的 workflow 缺少可重发布的当前私有文件');
-    const continuationPlan = { version: 1, kind: 'workflow-output', projectId: String(context.projectId), manifestPath: restoredScope.manifestPath, manifest: { ...restoredManifest, outputOwnership: {} }, workflowState: { generatedAt: Number(restoredManifest.generatedAt), fingerprint: String(restoredManifest.fingerprint) }, outputs: outputFiles.map(file => ({ outputRelativePath: file.outputRelativePath })) };
+    for (const file of outputFiles) { file.relativePath = path.relative(restoredScope.outputDirectory, file.sourcePath).replace(/\\/g, '/'); file.digest = await fileSha256(file.sourcePath); }
+    const continuationPlan = { version: 1, kind: 'workflow-output', projectId: String(context.projectId), preHostLocalEffects: 'none', manifestPath: restoredScope.manifestPath, manifest: { ...restoredManifest, outputOwnership: {} }, workflowState: { generatedAt: Number(restoredManifest.generatedAt), fingerprint: String(restoredManifest.fingerprint) }, outputs: outputFiles.map(file => ({ outputRelativePath: file.outputRelativePath, ownershipKey: file.ownershipKey, relativePath: file.relativePath, digest: file.digest })), localSwap: { stagingDirectory: restoredScope.outputDirectory, outputDirectory: restoredScope.outputDirectory, swapToken: `restore-${restoreGeneration}`, backupDirectory: '' } };
     const committed = await publishProjectFiles(parentId, outputFiles, `restore-workflow-${sha256(`${context.projectId}\0${restoredManifest.fingerprint}`).slice(0, 32)}`, new Map(), continuationPlan);
-    restoredManifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
+    restoredManifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [outputFiles.find(file => file.outputRelativePath === item.relativePath)?.ownershipKey || item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
     await writeJsonAtomic(restoredScope.manifestPath, restoredManifest);
     await withDomain(parentId, db => db.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(restoredManifest.generatedAt), String(restoredManifest.fingerprint), Date.now()));
     await completeOutputPublication(committed);
@@ -3373,6 +3421,10 @@ if (process.env.PHOTOFLOW_TEST_REVISION_LEASES === '1') {
     try { return { leases: Number(db.prepare('SELECT COUNT(*) count FROM team_project_revision_leases').get().count), guards: Number(db.prepare('SELECT COUNT(*) count FROM team_revision_guards').get().count), timers: projectRevisionLeaseHeartbeats.size, states: projectRevisionLeaseStates.size }; }
     finally { db.close(); }
   };
+}
+if (process.env.PHOTOFLOW_TEST_OUTPUT_OUTBOX === '1') {
+  const testMethod = 'team.test.output-publish.v1'; MUTATING_METHODS.add(testMethod);
+  handlers[testMethod] = (parentId, payload, context) => publishProjectFile(parentId, String(payload.sourcePath), String(payload.outputRelativePath), String(payload.idempotencyKey), null, 'working-output', { version: 1, kind: 'working-output', projectId: String(context.projectId), preHostLocalEffects: 'none', ledgerPath: String(payload.ledgerPath), outputRelativePath: String(payload.outputRelativePath) });
 }
 
 const startService = () => {
