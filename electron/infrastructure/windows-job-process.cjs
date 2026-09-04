@@ -200,10 +200,10 @@ const launchWindowsJobProcess = (command, args = [], options = {}, {
     if (!proxy.targetPid) readyReject(Object.assign(new Error(`Windows Job launcher exited before ready (${helperExit.code ?? helperExit.signal ?? 'unknown'})`), { code: 'JOB_LAUNCHER_EARLY_EXIT' }));
     proxy.exitCode = helperExit.code; proxy.signalCode = helperExit.signal; proxy.emit('exit', helperExit.code, helperExit.signal);
     terminalPublished = true;
-    if (helperClose) proxy.emit('close', helperClose.code, helperClose.signal);
+    if (helperClose) { proxy.__photoFlowCloseObserved = true; proxy.emit('close', helperClose.code, helperClose.signal); }
   };
   helper.on('exit', (code, signal) => { helperExit = { code, signal, published: false }; void publishTerminal(); });
-  helper.on('close', (code, signal) => { helperTerminalError ||= Object.assign(new Error(`Windows Job launcher closed before control setup (${code ?? signal ?? 'unknown'})`), { code: 'JOB_LAUNCHER_EARLY_CLOSE' }); helperClose = { code, signal }; if (!helperExit) helperExit = { code, signal, published: false }; if (terminalPublished) proxy.emit('close', code, signal); else void publishTerminal(); });
+  helper.on('close', (code, signal) => { helperTerminalError ||= Object.assign(new Error(`Windows Job launcher closed before control setup (${code ?? signal ?? 'unknown'})`), { code: 'JOB_LAUNCHER_EARLY_CLOSE' }); helperClose = { code, signal }; if (!helperExit) helperExit = { code, signal, published: false }; if (terminalPublished) { proxy.__photoFlowCloseObserved = true; proxy.emit('close', code, signal); } else void publishTerminal(); });
   return proxy;
 };
 

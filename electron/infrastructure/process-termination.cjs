@@ -2,25 +2,31 @@ const { execFile } = require('child_process');
 
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, Math.max(0, milliseconds)));
 const childHasExited = child => !child || child.exitCode != null || child.signalCode != null;
-const waitForChildExit = (child, deadlineAt = Infinity) => {
-  if (childHasExited(child)) return Promise.resolve(true);
+const waitForChildExit = (child, deadlineAt = Infinity, { requireClose = false } = {}) => {
+  let observedExit = false; let observedClose = false;
+  const completed = () => (childHasExited(child) || observedExit) && (!requireClose || child.__photoFlowCloseObserved === true || observedClose);
+  if (completed()) return Promise.resolve(true);
   return new Promise(resolve => {
     let timer = null;
     const finish = () => {
-      child.removeListener?.('exit', finish);
-      child.removeListener?.('close', finish);
+      if (!completed()) return;
+      child.removeListener?.('exit', onExit);
+      child.removeListener?.('close', onClose);
       if (timer) clearTimeout(timer);
       resolve(true);
     };
-    child.once('exit', finish);
-    child.once('close', finish);
-    // The process may exit between the initial probe and listener attachment.
-    if (childHasExited(child)) return finish();
+    const onExit = () => { observedExit = true; finish(); };
+    const onClose = () => { observedExit = true; observedClose = true; finish(); };
+    child.once('exit', onExit);
+    child.once('close', onClose);
     if (Number.isFinite(deadlineAt)) timer = setTimeout(() => {
-      child.removeListener?.('exit', finish);
-      child.removeListener?.('close', finish);
-      resolve(childHasExited(child));
+      child.removeListener?.('exit', onExit);
+      child.removeListener?.('close', onClose);
+      resolve(completed());
     }, Math.max(0, deadlineAt - Date.now()));
+    // Close the check/listen race: the child can settle between the initial
+    // predicate and listener registration.
+    if (completed()) finish();
   });
 };
 
@@ -40,6 +46,13 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
       child.__photoFlowTreeTerminationUnconfirmed = true;
       const error = new Error('Windows Job termination was not confirmed by ActiveProcesses=0');
       error.code = 'PROCESS_TREE_TERMINATION_UNCONFIRMED'; error.pid = child.pid || null;
+      throw error;
+    }
+    const helperClosed = await waitForChildExit(child, terminationDeadline, { requireClose: true });
+    if (!helperClosed) {
+      child.__photoFlowTreeTerminationUnconfirmed = true;
+      const error = new Error('Windows Job reached ActiveProcesses=0 but its control helper did not close before the deadline');
+      error.code = 'PROCESS_HELPER_CLOSE_UNCONFIRMED'; error.pid = child.pid || null;
       throw error;
     }
     if (rollbackSettleMs > 0) await delay(rollbackSettleMs);

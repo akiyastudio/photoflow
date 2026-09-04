@@ -294,6 +294,10 @@ class ManagedProcess extends EventEmitter {
       this._safeLog('error', 'Managed Windows Job termination is unconfirmed', this.details(this.lastExit));
       return Promise.resolve(this.lastExit);
     }
+    if (lifecycle.child.__photoFlowJobManaged && lifecycle.child.__photoFlowCloseObserved !== true) {
+      lifecycle.pendingExit = { code, signal };
+      return Promise.resolve(null);
+    }
     lifecycle.terminationFailed = false;
     return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
   }
@@ -380,7 +384,7 @@ class ManagedProcess extends EventEmitter {
     lifecycle.closeObserved = true;
     if (lifecycle.child.__photoFlowJobManaged && !lifecycle.child.__photoFlowTreeExitConfirmed) return this._onExit(lifecycle, code, signal);
     lifecycle.terminationFailed = false;
-    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
+    return this._finalizeLifecycle(lifecycle, { code: lifecycle.pendingExit?.code ?? code, signal: lifecycle.pendingExit?.signal ?? signal, error: lifecycle.error });
   }
 
   _settleLifecycle(lifecycle) {

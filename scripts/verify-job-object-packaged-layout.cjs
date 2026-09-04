@@ -10,8 +10,8 @@ module.exports = async context => {
   const identity = JSON.parse(fs.readFileSync(identityPath, 'utf8'));
   const helperPath = path.join(context.appOutDir, 'resources', identity.packagedFile);
   const asarPath = path.join(context.appOutDir, 'resources', 'app.asar');
-  let packagedIdentity = identity;
-  if (fs.existsSync(asarPath)) packagedIdentity = JSON.parse(require('@electron/asar').extractFile(asarPath, path.join('electron', 'generated', 'job-object-launcher-identity.json')).toString('utf8'));
+  if (!fs.existsSync(asarPath) || !fs.statSync(asarPath).isFile()) throw new Error('Packaged Windows Job launcher identity requires the final app.asar');
+  const packagedIdentity = JSON.parse(require('@electron/asar').extractFile(asarPath, path.join('electron', 'generated', 'job-object-launcher-identity.json')).toString('utf8'));
   if (identity.schemaVersion !== 2 || JSON.stringify(packagedIdentity) !== JSON.stringify(identity) || !fs.statSync(helperPath).isFile() || sha256File(helperPath) !== identity.sha256) {
     throw new Error('Packaged Windows Job launcher does not match its integrity-validated ASAR build identity');
   }
