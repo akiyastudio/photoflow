@@ -525,9 +525,9 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
       for (const row of sourceDb.prepare('SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE project_id=?').all(sourceProjectId)) for (const value of Object.values(row)) if (value) referencedPaths.add(String(value));
       for (const row of sourceDb.prepare('SELECT edited_patch_path FROM team_person_assignments WHERE project_id=?').all(sourceProjectId)) if (row.edited_patch_path) referencedPaths.add(String(row.edited_patch_path));
       for (const row of sourceDb.prepare('SELECT artifact_path FROM team_task_artifacts WHERE project_id=? AND is_deleted=0').all(sourceProjectId)) if (row.artifact_path) referencedPaths.add(String(row.artifact_path));
-      for (const row of sourceDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed'").all(sourceProjectId)) {
+      for (const row of sourceDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output'").all(sourceProjectId)) {
         const result = JSON.parse(row.result_json || '{}'); const plan = result.continuationPlan; const materialized = result.materialized;
-        if (!plan?.domain || String(plan.projectId) !== sourceProjectId || !materialized?.privatePath || !/^[0-9a-f]{64}$/i.test(String(materialized.sha256 || ''))) throw new Error(`团片项目恢复 working outbox ${row.id} continuation/materialized 无效`);
+        if (!plan?.domain || String(plan.projectId) !== sourceProjectId || !materialized?.privatePath || !/^[0-9a-f]{64}$/i.test(String(materialized.sha256 || ''))) { if (row.state === 'completed') continue; throw new Error(`团片项目恢复 working outbox ${row.id} continuation/materialized 无效`); }
         const normalized = String(materialized.privatePath).replace(/\\/g, '/').toLowerCase();
         if (!normalized.includes('/imported-outputs/')) throw new Error(`团片项目恢复 working outbox ${row.id} materialized 超出 Host imported-outputs`);
         referencedPaths.add(String(materialized.privatePath)); recoverableWorkingRows.push({ row, result, plan, materialized });
@@ -553,7 +553,7 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
       const rewrittenPlan = JSON.parse(rewriteProjectIdentityJson(rewriteJson(JSON.stringify(plan), buildReplacements(payload)), payload));
       const restoreGeneration = crypto.createHash('sha256').update(`${targetProjectId}\0${row.idempotency_key}`).digest('hex').slice(0, 20);
       const logicalTarget = JSON.parse(row.target_json || '[]')[0]?.outputRelativePath || 'working/output'; const outputRelativePath = `团片协作/恢复-${restoreGeneration}/working/${path.posix.basename(String(logicalTarget).replace(/\\/g, '/'))}`;
-      rewrittenPlan.projectId = targetProjectId; rewrittenPlan.outputRelativePath = outputRelativePath; rewrittenPlan.ledgerPath = path.join(destinationDataPath, 'output-ownership', targetHash, 'working-images.json'); rewrittenPlan.preHostLocalEffects = 'none';
+      rewrittenPlan.projectId = targetProjectId; rewrittenPlan.logicalOutputRelativePath = String(rewrittenPlan.logicalOutputRelativePath || logicalTarget); rewrittenPlan.outputRelativePath = outputRelativePath; rewrittenPlan.ledgerPath = path.join(destinationDataPath, 'output-ownership', targetHash, 'working-images.json'); rewrittenPlan.preHostLocalEffects = 'none';
       return { ...row, project_id: targetProjectId, id: crypto.randomUUID(), fingerprint: crypto.createHash('sha256').update(`${targetProjectId}\0${row.fingerprint}`).digest('hex'), idempotency_key: `restore-working-${restoreGeneration}`, state: 'restore_republish', stage_id: '', source_json: JSON.stringify([{ sourcePath: mapped.path, digest: mapped.digest }]), target_json: JSON.stringify([{ outputRelativePath, replacement: null }]), receipt_json: '{}', result_json: JSON.stringify({ continuationPlan: rewrittenPlan }), last_error: '', created_at: Date.now(), updated_at: Date.now() };
     });
     const result = restoreProjectStorage({ sourcePath: source.path, destinationPath, payload, ensureSchema, fault });

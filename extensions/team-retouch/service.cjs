@@ -482,7 +482,7 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
   const storage = await hostStorage(parentId); let attempted = 0; let recovered = 0;
   for (let batch = 0; batch < 256; batch += 1) {
     const db = ensureSchema(storage.databasePath); let rows;
-    try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY created_at,id LIMIT ?").all(String(context.projectId), Math.max(1, Number(batchSize) || 1)); }
+    try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY CASE WHEN state='domain_ready' THEN 1 ELSE 0 END,created_at,id LIMIT ?").all(String(context.projectId), Math.max(1, Number(batchSize) || 1)); }
     finally { db.close(); }
     if (!rows.length) return { attempted, recovered, pending: 0 };
     const plannedRows = rows.filter(row => row.state === 'planned' && !parseJson(row.result_json, {}).continuationPlan?.domain?.generationId);
@@ -546,9 +546,10 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
           materialized = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: receipt.commitId, artifactId: output.artifactId });
           await outboxState(record, 'domain_pending', { result: { materialized } }); result = parseJson(record.row.result_json, {});
         }
-        const ledger = await readJson(plan.ledgerPath, {}); ledger[plan.outputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+        const logicalOutputRelativePath = String(plan.logicalOutputRelativePath || plan.outputRelativePath); const ledger = await readJson(plan.ledgerPath, {}); ledger[logicalOutputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256, publishedRelativePath: output.relativePath };
         await replaceJsonAtomic(plan.ledgerPath, ledger);
         if (plan.domain?.generationId) {
+          await outboxState(record, 'domain_ready'); result = parseJson(record.row.result_json, {});
           const groupDb = ensureSchema(storage.databasePath); let candidates;
           try { candidates = groupDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed'").all(String(context.projectId)); }
           finally { groupDb.close(); }
@@ -634,12 +635,12 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
 };
 const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRelativePath, domainPlan = null) => {
   const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
-  const outputRelativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(sourcePath)].filter(Boolean).join('/');
+  const logicalOutputRelativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(sourcePath)].filter(Boolean).join('/');
   const ledgerPath = path.join(storage.dataPath, 'output-ownership', sha256(String(storage.projectId)), 'working-images.json'); const ledger = await readJson(ledgerPath, {});
-  const previous = ledger[outputRelativePath] || null;
+  const previous = ledger[logicalOutputRelativePath] || null; const outputRelativePath = String(previous?.publishedRelativePath || logicalOutputRelativePath);
   const sourceDigest = await fileSha256(sourcePath);
   const stableBusinessKey = `${storage.projectId}\0${normalizedBase}\0${outputRelativePath}\0${sourceDigest}\0${JSON.stringify(previous || null)}`;
-  const continuationPlan = { version: 1, kind: 'working-output', projectId: String(storage.projectId), preHostLocalEffects: 'none', ledgerPath, outputRelativePath, domain: domainPlan };
+  const continuationPlan = { version: 1, kind: 'working-output', projectId: String(storage.projectId), preHostLocalEffects: 'none', ledgerPath, logicalOutputRelativePath, outputRelativePath, domain: domainPlan };
   const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(stableBusinessKey).slice(0, 40)}`, previous, 'working-output', continuationPlan);
   const output = committed.outputs[0]; const record = committed[OUTPUT_OUTBOX]; let imported = parseJson(record?.row?.result_json, {}).materialized;
   if (!imported?.privatePath) {
@@ -648,9 +649,9 @@ const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRe
     if (record) await outboxState(record, 'materialized', { result: { ...parseJson(record.row.result_json, {}), materialized: imported } });
   }
   if (record) await outboxState(record, 'domain_pending', { result: { ...parseJson(record.row.result_json, {}), materialized: imported, ledgerPath, outputRelativePath } });
-  ledger[outputRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+  ledger[logicalOutputRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256, publishedRelativePath: output.relativePath };
   await replaceJsonAtomic(ledgerPath, ledger);
-  return { privatePath: imported.privatePath, outputRelativePath, ownership: ledger[outputRelativePath], publication: committed };
+  return { privatePath: imported.privatePath, outputRelativePath: logicalOutputRelativePath, publishedRelativePath: output.relativePath, ownership: ledger[logicalOutputRelativePath], publication: committed };
 };
 const publishWorkingImage = (parentId, storage, sourcePath, baseRelativePath, domainPlan = null) => withKeyedOperation(
   workingOwnershipOperations, String(storage.projectId),
@@ -1278,7 +1279,7 @@ const detectPhoto = async (parentId, payload, context) => {
     await rollbackPublished(published);
     await appendCommand(storage, { operationId, type: 'detect', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
     throw error;
-  } finally { await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); db.close(); }
+  } finally { const preserveStage = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND state<>'completed' AND source_json LIKE ? LIMIT 1").get(String(context.projectId), `%${stagingRoot.replace(/\\/g, '\\\\')}%`)); if (!preserveStage) await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); db.close(); }
 };
 
 const getPatchBundle = async (parentId, payload, context) => {
@@ -1664,7 +1665,7 @@ const detectBatch = async (parentId, payload, context) => {
         } catch (error) { await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
       }
       return { success: results.some(item => item.success), results, persistentBackend: Boolean(detectedBatch.persistentBackend), requestedMode: detectedBatch.requestedMode || 'auto', advancedUsedCount: results.filter(item => item.advancedBackend).length, fallbackCount: results.filter(item => item.fallbackReason).length, error: results.some(item => item.success) ? undefined : '批量识别全部失败' };
-    } finally { db.close(); await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); }
+    } finally { const preserveStage = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND state<>'completed' AND source_json LIKE ? LIMIT 1").get(String(context.projectId), `%${stagingRoot.replace(/\\/g, '\\\\')}%`)); db.close(); if (!preserveStage) await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); }
   });
 };
 
