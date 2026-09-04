@@ -166,12 +166,19 @@ const snapshotComponentArchive = async (sourcePath, targetPath, options = {}) =>
     return Object.freeze({ ...identity, bytes: identity.size, sha256: sourceSha256, inspectionToken: Object.freeze({ [SNAPSHOT_TOKEN]: true, archivePath: path.resolve(targetPath), identity: snapshotIdentity }) });
   } catch (error) {
     try {
-      const outputIdentity = targetHandle ? fileIdentity(await targetHandle.stat()) : null;
+      const outputStat = targetHandle ? await targetHandle.stat() : null;
+      const outputIdentity = outputStat ? fileIdentity(outputStat) : null;
       const pathStat = await fs.promises.lstat(targetPath);
       if (!outputIdentity || pathStat.isSymbolicLink() || !sameFileIdentity(outputIdentity, fileIdentity(pathStat))) throw new Error('快照输出路径已被其他对象占用');
-      await fs.promises.unlink(targetPath);
+      const recoveryHash = crypto.createHash('sha256');
+      await pipeline(targetHandle.createReadStream({ autoClose: false, start: 0, ...(outputStat.size ? { end: outputStat.size - 1 } : {}) }), new Transform({ transform(chunk, _encoding, callback) { recoveryHash.update(chunk); callback(); } }));
+      if (!sameFileIdentity(outputIdentity, fileIdentity(await targetHandle.stat())) || !sameFileIdentity(outputIdentity, fileIdentity(await fs.promises.lstat(targetPath)))) throw new Error('快照输出在恢复收据生成期间发生变化');
+      const cleanupReceipt = { path: path.resolve(targetPath), kind: 'file', nodeIdentity: nodeIdentity(outputStat), size: outputStat.size, sha256: recoveryHash.digest('hex'), mode: outputStat.mode & 0o777 };
+      error.recoveryPath = cleanupReceipt.path;
+      error.cleanupPendingPaths = [cleanupReceipt.path];
+      error.cleanupPendingReceipts = [cleanupReceipt];
     }
-    catch (cleanupError) { if (cleanupError?.code !== 'ENOENT') error.message = `${error.message || String(error)}；快照清理失败：${cleanupError.message || String(cleanupError)}`; }
+    catch (cleanupError) { if (cleanupError?.code !== 'ENOENT') { error.recoveryPath = path.resolve(targetPath); error.message = `${error.message || String(error)}；快照恢复收据生成失败，已保留路径：${cleanupError.message || String(cleanupError)}`; } }
     throw error;
   } finally { await closeOwnedHandle(targetHandle); await closeOwnedHandle(handle); operation.cleanup(); }
 };

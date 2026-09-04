@@ -116,9 +116,11 @@ const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return
       }
       return opened;
     };
-    try { await assert.rejects(snapshotComponentArchive(archive, rewrittenSnapshot), /输出内容与源文件不一致/); }
+    let rewrittenCleanupReceipt = null;
+    try { await assert.rejects(snapshotComponentArchive(archive, rewrittenSnapshot), error => { rewrittenCleanupReceipt = error.cleanupPendingReceipts?.[0]; return /输出内容与源文件不一致/.test(error.message) && rewrittenCleanupReceipt?.path === rewrittenSnapshot; }); }
     finally { fs.promises.open = originalOpen; }
-    assert.equal(fs.existsSync(rewrittenSnapshot), false, 'an in-place rewritten snapshot is rejected and its owned path is cleaned');
+    assert.equal(fs.existsSync(rewrittenSnapshot), true, 'library layer retains a failed snapshot for identity-bound cleanup');
+    await cleanupOwnedComponentPath(rewrittenCleanupReceipt); await finalizeComponentCleanupProof(rewrittenCleanupReceipt);
 
     const excessiveParents = path.join(root, 'excessive-implicit-parents.zip');
     writeZip(excessiveParents, [['component.json', manifest], ...Array.from({ length: 6_667 }, (_, index) => [`roots-${index}/a/b/file.bin`, ''])]);
@@ -232,6 +234,9 @@ const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return
     await assert.rejects(cleanupOwnedComponentPathRaw(replacedProofReceipt, { captureNativeProof: testCaptureNativeProof, deleteOwned: async () => { throw new Error('stop after marker'); } }), /stop after marker/); const replacedProofPaths = componentCleanupIntentPaths(replacedProofReceipt); fs.writeFileSync(replacedProofPaths.proofPath, JSON.stringify({ schemaVersion: 1, kind: 'directory', entries: [] }));
     await assert.rejects(cleanupOwnedComponentPath(replacedProofReceipt), /未绑定原始收据|完整证明/);
     const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+    const archiveSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'component-package-archive.cjs'), 'utf8');
+    assert.doesNotMatch(archiveSource, /snapshotComponentArchive[\s\S]*catch \(error\)[\s\S]{0,1800}unlink\(targetPath\)/, 'snapshot failure never performs a path-based final unlink');
+    assert.doesNotMatch(systemIpcSource, /components-delete-package[\s\S]{0,2000}unlink\(archivePath\)/, 'component package deletion is native identity-bound');
     assert.match(systemIpcSource, /error\?\.cleanupPendingReceipts[\s\S]*pendingCleanup[\s\S]*queueSystemFilesystemCleanup\(pendingCleanup/);
     assert.match(systemIpcSource, /filter\(candidate => candidate && typeof candidate === 'object'[\s\S]*candidate\.nodeIdentity/);
     assert.doesNotMatch(systemIpcSource, /typeof candidate === 'string' \? \{ path:/, 'automatic cleanup has no raw-path fallback');

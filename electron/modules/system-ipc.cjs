@@ -1121,9 +1121,22 @@ const registerSystemIpc = context => {
   ipcMain.handle('components-delete-package', async (_event, kind, componentId = '') => {
     try {
       const archivePath = await resolvePackageForDeletion(String(kind || ''), String(componentId || ''));
-      const stat = await fs.promises.stat(archivePath);
-      if (!stat.isFile()) throw new Error('安装包不是普通文件');
-      await fs.promises.unlink(archivePath);
+      if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用，安装包已保留');
+      const handle = await fs.promises.open(archivePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      let stat;
+      try {
+        stat = await handle.stat();
+        if (!stat.isFile()) throw new Error('安装包不是普通文件');
+        const native = await componentCleanupPublicationService.inspectPath(archivePath);
+        if (!native?.success || !native.identity) throw new Error('安装包原生身份检查不完整');
+        const linked = await fs.promises.lstat(archivePath);
+        if (linked.isSymbolicLink() || linked.dev !== stat.dev || linked.ino !== stat.ino || linked.size !== stat.size || linked.mtimeMs !== stat.mtimeMs || linked.ctimeMs !== stat.ctimeMs) throw new Error('安装包在删除检查期间被替换');
+        const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
+        const after = await handle.stat(); const afterPath = await fs.promises.lstat(archivePath);
+        if (after.dev !== stat.dev || after.ino !== stat.ino || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || after.ctimeMs !== stat.ctimeMs || afterPath.dev !== stat.dev || afterPath.ino !== stat.ino) throw new Error('安装包在哈希期间被替换或修改');
+        const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: archivePath, sha256: hash.digest('hex'), size: stat.size, identity: native.identity });
+        if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw new Error('安装包对象身份绑定删除未完全提交');
+      } finally { await handle.close().catch(() => undefined); }
       writeLog('info', 'Installed package deleted after user confirmation', { kind, componentId, archivePath, deletedBytes: stat.size });
       return { success: true, deletedBytes: stat.size };
     } catch (error) {
