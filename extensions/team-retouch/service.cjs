@@ -355,26 +355,30 @@ const updateOutputOutbox = (db, projectId, fingerprint, state, values = {}) => {
   db.prepare(`UPDATE team_output_outbox SET state=?,stage_id=COALESCE(?,stage_id),receipt_json=COALESCE(?,receipt_json),result_json=COALESCE(?,result_json),last_error=?,updated_at=? WHERE project_id=? AND fingerprint=?`)
     .run(state, values.stageId === undefined ? null : String(values.stageId), values.receipt === undefined ? null : JSON.stringify(values.receipt), values.result === undefined ? null : JSON.stringify(values.result), String(values.error || ''), Date.now(), String(projectId), String(fingerprint));
 };
-const prepareOutputOutbox = async (parentId, files, idempotencyKey, kind = 'project-output') => {
+const prepareOutputOutbox = async (parentId, files, idempotencyKey, kind = 'project-output', continuationPlan = null) => {
   const storage = await hostStorage(parentId); const projectId = String(storage.projectId || activeProjectId());
   if (!projectId) throw new Error('Host component storage is missing the bound project id');
-  const db = ensureSchema(storage.databasePath);
-  const byKey = readOutputOutboxByKey(db, projectId, idempotencyKey);
+  let lookupDb; let byKey;
+  try { lookupDb = ensureSchema(storage.databasePath); byKey = readOutputOutboxByKey(lookupDb, projectId, idempotencyKey); }
+  finally { try { lookupDb?.close(); } catch { /* no leaked SQLite handle */ } }
   if (byKey) {
     const storedSources = parseJson(byKey.source_json, []); const storedTargets = parseJson(byKey.target_json, []);
-    db.close();
     const described = storedTargets.map((target, index) => ({ sourcePath: storedSources[index]?.sourcePath || files[index]?.sourcePath || '', digest: storedSources[index]?.digest || '', outputRelativePath: target.outputRelativePath, replacement: target.replacement || null }));
     const incomingTargets = files.map(file => ({ outputRelativePath: String(file.outputRelativePath), replacement: file.replacement || null }));
     if (JSON.stringify(incomingTargets) !== JSON.stringify(storedTargets)) throw Object.assign(new Error('Host output idempotency key is already bound to another publication plan'), { code: 'COMPONENT_OUTPUT_IDEMPOTENCY_CONFLICT' });
+    const storedPlan = parseJson(byKey.result_json, {}).continuationPlan;
+    if (continuationPlan && JSON.stringify(storedPlan || null) !== JSON.stringify(continuationPlan)) throw Object.assign(new Error('Host output continuation plan conflicts with the persisted idempotency key'), { code: 'COMPONENT_OUTPUT_CONTINUATION_CONFLICT' });
     return { storage, projectId, fingerprint: byKey.fingerprint, files: described, row: byKey };
   }
   const described = [];
   for (const file of files) described.push({ ...file, digest: await fileSha256(file.sourcePath), replacement: file.replacement || null });
   const fingerprint = outputOutboxFingerprint({ idempotencyKey, files: described });
+  let db;
   try {
+    db = ensureSchema(storage.databasePath);
     const existing = readOutputOutbox(db, projectId, fingerprint);
-    if (!existing) db.prepare(`INSERT INTO team_output_outbox(project_id,id,kind,fingerprint,idempotency_key,state,stage_id,source_json,target_json,receipt_json,result_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,'planned','',?,?,'{}','{}','',?,?)`)
-      .run(projectId, crypto.randomUUID(), kind, fingerprint, String(idempotencyKey), JSON.stringify(described.map(file => ({ sourcePath: file.sourcePath, digest: file.digest }))), JSON.stringify(described.map(file => ({ outputRelativePath: file.outputRelativePath, replacement: file.replacement || null }))), Date.now(), Date.now());
+    if (!existing) db.prepare(`INSERT INTO team_output_outbox(project_id,id,kind,fingerprint,idempotency_key,state,stage_id,source_json,target_json,receipt_json,result_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,'planned','',?,?,'{}',?,'',?,?)`)
+      .run(projectId, crypto.randomUUID(), kind, fingerprint, String(idempotencyKey), JSON.stringify(described.map(file => ({ sourcePath: file.sourcePath, digest: file.digest }))), JSON.stringify(described.map(file => ({ outputRelativePath: file.outputRelativePath, replacement: file.replacement || null }))), JSON.stringify({ continuationPlan }), Date.now(), Date.now());
     return { storage, projectId, fingerprint, files: described, row: readOutputOutbox(db, projectId, fingerprint) };
   } finally { db.close(); }
 };
@@ -390,12 +394,15 @@ const validateOutputReceipt = (record, receipt) => {
 };
 const outboxState = async (record, state, values = {}) => {
   const db = ensureSchema(record.storage.databasePath);
-  try { updateOutputOutbox(db, record.projectId, record.fingerprint, state, values); record.row = readOutputOutbox(db, record.projectId, record.fingerprint); }
+  try {
+    if (values.result) values = { ...values, result: { ...parseJson(record.row.result_json, {}), ...values.result } };
+    updateOutputOutbox(db, record.projectId, record.fingerprint, state, values); record.row = readOutputOutbox(db, record.projectId, record.fingerprint);
+  }
   finally { db.close(); }
 };
 
-const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null, kind = 'project-output') => {
-  const record = await prepareOutputOutbox(parentId, [{ sourcePath, outputRelativePath, replacement }], idempotencyKey, kind);
+const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null, kind = 'project-output', continuationPlan = null) => {
+  const record = await prepareOutputOutbox(parentId, [{ sourcePath, outputRelativePath, replacement }], idempotencyKey, kind, continuationPlan);
   const priorReceipt = parseJson(record.row.receipt_json, {});
   if (record.row.state === 'completed' || Object.keys(priorReceipt).length) return attachOutputOutbox(validateOutputReceipt(record, priorReceipt), record);
   let stage = record.row.stage_id ? { stageId: record.row.stage_id, privatePath: parseJson(record.row.result_json, {}).stagePrivatePath } : null;
@@ -420,8 +427,8 @@ const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idem
   } catch (error) { await outboxState(record, record.row.state || 'planned', { error: error.message || String(error) }).catch(() => undefined); throw error; }
   finally { if (stage?.stageId && parseJson(record.row.receipt_json, {})?.commitId) void callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
 };
-const publishProjectFiles = async (parentId, files, idempotencyKey, replacements = new Map()) => {
-  const record = await prepareOutputOutbox(parentId, files.map(file => ({ ...file, replacement: replacements.get(file.outputRelativePath) || null })), idempotencyKey, 'workflow-output');
+const publishProjectFiles = async (parentId, files, idempotencyKey, replacements = new Map(), continuationPlan = null) => {
+  const record = await prepareOutputOutbox(parentId, files.map(file => ({ ...file, replacement: replacements.get(file.outputRelativePath) || null })), idempotencyKey, 'workflow-output', continuationPlan);
   const priorReceipt = parseJson(record.row.receipt_json, {});
   if (record.row.state === 'completed' || Object.keys(priorReceipt).length) return attachOutputOutbox(validateOutputReceipt(record, priorReceipt), record);
   let stage = record.row.stage_id ? { stageId: record.row.stage_id, privatePath: parseJson(record.row.result_json, {}).stagePrivatePath } : null;
@@ -460,58 +467,78 @@ const completeOutputPublication = async committed => {
   const record = committed?.[OUTPUT_OUTBOX];
   if (record) { await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); }
 };
-const recoverProjectOutputOutbox = async (parentId, context, limit = 20) => {
-  const storage = await hostStorage(parentId); const db = ensureSchema(storage.databasePath); let rows;
-  try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY created_at LIMIT ?").all(String(context.projectId), Math.max(1, Number(limit) || 1)); }
-  finally { db.close(); }
-  let recovered = 0;
-  for (const row of rows) {
-    assertNotAborted(context.signal);
-    const sources = parseJson(row.source_json, []); const targets = parseJson(row.target_json, []);
-    const record = { storage, projectId: String(context.projectId), fingerprint: row.fingerprint, row, files: targets.map((target, index) => ({ ...target, sourcePath: sources[index]?.sourcePath || '', digest: sources[index]?.digest || '' })) };
-    let receipt = parseJson(row.receipt_json, {});
-    if (['host_staged','commit_inflight'].includes(row.state)) {
-      await outboxState(record, 'commit_inflight');
-      receipt = await callHost(parentId, 'project.output', { action: 'commit', stageId: row.stage_id, idempotencyKey: row.idempotency_key });
-      validateOutputReceipt(record, receipt); await outboxState(record, 'output_committed', { receipt });
-    }
-    if (row.kind === 'working-output' && receipt.commitId) {
-      const output = receipt.outputs?.[0]; let result = parseJson(record.row.result_json, {}); let materialized = result.materialized;
-      if (!materialized?.privatePath) {
-        materialized = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: receipt.commitId, artifactId: output.artifactId });
-        result = { ...result, materialized }; await outboxState(record, 'domain_pending', { result });
+const recoveryRequiredError = detail => Object.assign(new Error(`团片输出恢复需要人工处理：${detail}`), { code: 'COMPONENT_RECOVERY_REQUIRED', retryable: false });
+const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => {
+  const storage = await hostStorage(parentId); let attempted = 0; let recovered = 0;
+  for (let batch = 0; batch < 256; batch += 1) {
+    const db = ensureSchema(storage.databasePath); let rows;
+    try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY created_at,id LIMIT ?").all(String(context.projectId), Math.max(1, Number(batchSize) || 1)); }
+    finally { db.close(); }
+    if (!rows.length) return { attempted, recovered, pending: 0 };
+    for (const row of rows) {
+      attempted += 1; assertNotAborted(context.signal);
+      const sources = parseJson(row.source_json, []); const targets = parseJson(row.target_json, []); let result = parseJson(row.result_json, {});
+      const plan = result.continuationPlan;
+      if (!plan || Number(plan.version) !== 1 || String(plan.projectId) !== String(context.projectId) || String(plan.kind) !== String(row.kind)) throw recoveryRequiredError(`outbox ${row.id} 缺少完整 continuation plan`);
+      const record = { storage, projectId: String(context.projectId), fingerprint: row.fingerprint, row, files: targets.map((target, index) => ({ ...target, sourcePath: sources[index]?.sourcePath || '', digest: sources[index]?.digest || '' })) };
+      if (row.state === 'planned') { await outboxState(record, 'completed', { result: { recoveryDisposition: 'aborted-before-host-side-effect' } }); recovered += 1; continue; }
+      if (row.state === 'host_staging') {
+        if (!row.stage_id) throw recoveryRequiredError(`outbox ${row.id} host_staging 缺少 stageId`);
+        await callHost(parentId, 'project.output', { action: 'rollback', stageId: row.stage_id });
+        await outboxState(record, 'completed', { result: { recoveryDisposition: 'rolled-back-uncommitted-stage' } }); recovered += 1; continue;
       }
-      const outputRelativePath = targets[0]?.outputRelativePath; const ledgerPath = result.ledgerPath || path.join(storage.dataPath, 'output-ownership', sha256(String(storage.projectId)), 'working-images.json');
-      const ledger = await readJson(ledgerPath, {}); ledger[outputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 };
-      await replaceJsonAtomic(ledgerPath, ledger); await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1; continue;
-    }
-    let result = parseJson(record.row.result_json, {});
-    if (row.kind === 'workflow-output' && result.workflow) {
-      const manifest = await readJson(result.workflow.manifestPath, null);
-      if (manifest && String(manifest.projectId) === String(context.projectId) && Number(manifest.generatedAt) === Number(result.workflow.generatedAt) && String(manifest.fingerprint) === String(result.workflow.fingerprint)) {
+      let receipt = parseJson(row.receipt_json, {});
+      if (['host_staged','commit_inflight'].includes(row.state)) {
+        await outboxState(record, 'commit_inflight');
+        receipt = await callHost(parentId, 'project.output', { action: 'commit', stageId: row.stage_id, idempotencyKey: row.idempotency_key });
+        validateOutputReceipt(record, receipt); await outboxState(record, 'output_committed', { receipt }); result = parseJson(record.row.result_json, {});
+      } else if (receipt.commitId) validateOutputReceipt(record, receipt);
+      if (!receipt.commitId && !['domain_committed','cleanup_pending'].includes(record.row.state)) throw recoveryRequiredError(`outbox ${row.id} 状态 ${record.row.state} 没有 Host receipt`);
+      if (['domain_committed','cleanup_pending'].includes(record.row.state)) { await outboxState(record, 'completed'); recovered += 1; continue; }
+      const output = receipt.outputs?.[0];
+      if (row.kind === 'working-output') {
+        let materialized = result.materialized;
+        if (!materialized?.privatePath) {
+          await outboxState(record, 'materialize_inflight');
+          materialized = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: receipt.commitId, artifactId: output.artifactId });
+          await outboxState(record, 'domain_pending', { result: { materialized } }); result = parseJson(record.row.result_json, {});
+        }
+        const ledger = await readJson(plan.ledgerPath, {}); ledger[plan.outputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+        await replaceJsonAtomic(plan.ledgerPath, ledger);
+      } else if (row.kind === 'workflow-output') {
+        const manifest = JSON.parse(JSON.stringify(plan.manifest));
+        manifest.outputOwnership = Object.fromEntries((receipt.outputs || []).map(item => [item.relativePath, { commitId: receipt.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
+        await writeJsonAtomic(plan.manifestPath, manifest);
         const domainDb = ensureSchema(storage.databasePath);
-        try { domainDb.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(manifest.generatedAt), String(manifest.fingerprint), Date.now()); }
+        try { domainDb.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(plan.workflowState.generatedAt), String(plan.workflowState.fingerprint), Date.now()); }
         finally { domainDb.close(); }
-        await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1; continue;
-      }
-    }
-    if (row.kind === 'merge-output' && result.versionPayload && !result.versionResult?.versionId) {
-      const versionResult = await callHost(parentId, 'version.create', result.versionPayload);
-      if (!versionResult?.versionId || (versionResult.result?.photo?.id && String(versionResult.result.photo.id) !== String(result.versionPayload.photoId))) throw Object.assign(new Error('Recovered Host version receipt mismatched the persisted tuple'), { code: 'COMPONENT_VERSION_RECEIPT_MISMATCH' });
-      result = { ...result, versionResult }; await outboxState(record, 'domain_pending', { result });
-    }
-    if (row.kind === 'merge-output' && result.versionResult?.versionId && result.versionPayload) {
-      const domainDb = ensureSchema(storage.databasePath);
-      try {
-        domainDb.exec('BEGIN IMMEDIATE');
-        domainDb.prepare("UPDATE team_patch_tasks SET status='merged',merged_version_id=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND is_deleted=0").run(String(result.versionResult.versionId), Date.now(), String(context.projectId), String(result.versionPayload.photoId), String(result.versionPayload.parentVersionId));
-        domainDb.exec('COMMIT');
-      } catch (error) { try { domainDb.exec('ROLLBACK'); } catch {} throw error; }
-      finally { domainDb.close(); }
+      } else if (row.kind === 'relay-output') {
+        const manifest = JSON.parse(JSON.stringify(plan.manifest)); manifest.outputOwnership = { ...(manifest.outputOwnership || {}), [plan.activeRelativePath]: { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 } };
+        await writeJsonAtomic(plan.manifestPath, manifest);
+      } else if (row.kind === 'merge-output') {
+        let versionPayload = result.versionPayload;
+        if (!versionPayload) versionPayload = { ...plan.versionPayloadTemplate, commitId: receipt.commitId, artifactId: output.artifactId };
+        if (!result.versionResult?.versionId) {
+          await outboxState(record, 'version_inflight', { result: { versionPayload } });
+          const versionResult = await callHost(parentId, 'version.create', versionPayload);
+          if (!versionResult?.versionId || (versionResult.result?.photo?.id && String(versionResult.result.photo.id) !== String(versionPayload.photoId))) throw Object.assign(new Error('Recovered Host version receipt mismatched the persisted tuple'), { code: 'COMPONENT_VERSION_RECEIPT_MISMATCH' });
+          await outboxState(record, 'domain_pending', { result: { versionPayload, versionResult } }); result = parseJson(record.row.result_json, {});
+        }
+        const domainDb = ensureSchema(storage.databasePath);
+        try {
+          domainDb.exec('BEGIN IMMEDIATE');
+          for (const task of plan.domain.tasks) {
+            const changed = domainDb.prepare("UPDATE team_patch_tasks SET status='merged',merged_version_id=?,merge_metrics_json=?,updated_at=? WHERE project_id=? AND id=? AND photo_id=? AND base_version_id=? AND is_deleted=0").run(String(result.versionResult.versionId), JSON.stringify(plan.domain.mergeMetrics.find(item => item.taskId === task.id) || {}), Date.now(), String(context.projectId), task.id, plan.domain.photoId, plan.domain.baseVersionId).changes;
+            if (changed !== 1) throw recoveryRequiredError(`merge task ${task.id} 已变化`);
+          }
+          domainDb.exec('COMMIT');
+        } catch (error) { try { domainDb.exec('ROLLBACK'); } catch {} throw error; }
+        finally { domainDb.close(); }
+      } else throw recoveryRequiredError(`outbox ${row.id} kind ${row.kind} 不可恢复`);
       await outboxState(record, 'domain_committed'); await outboxState(record, 'completed'); recovered += 1;
     }
   }
-  return { attempted: rows.length, recovered, pending: rows.length - recovered };
+  throw recoveryRequiredError('outbox drain 超过有界批次，无法证明状态稳定前进');
 };
 const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRelativePath) => {
   const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
@@ -520,7 +547,8 @@ const publishWorkingImageUnlocked = async (parentId, storage, sourcePath, baseRe
   const previous = ledger[outputRelativePath] || null;
   const sourceDigest = await fileSha256(sourcePath);
   const stableBusinessKey = `${storage.projectId}\0${normalizedBase}\0${outputRelativePath}\0${sourceDigest}\0${JSON.stringify(previous || null)}`;
-  const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(stableBusinessKey).slice(0, 40)}`, previous, 'working-output');
+  const continuationPlan = { version: 1, kind: 'working-output', projectId: String(storage.projectId), ledgerPath, outputRelativePath };
+  const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(stableBusinessKey).slice(0, 40)}`, previous, 'working-output', continuationPlan);
   const output = committed.outputs[0]; const record = committed[OUTPUT_OUTBOX]; let imported = parseJson(record?.row?.result_json, {}).materialized;
   if (!imported?.privatePath) {
     if (record) await outboxState(record, 'materialize_inflight', { result: { ...parseJson(record.row.result_json, {}) } });
@@ -898,7 +926,7 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   if (signal?.aborted) control.cancel(); else signal?.addEventListener('abort', control.cancel, { once: true });
   child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8000); });
   lines.on('line', line => {
-    if (Buffer.byteLength(line, 'utf8') > 1024 * 1024) { timedOut = true; terminateProcessTree(child); return; }
+    if (Buffer.byteLength(line, 'utf8') > 1024 * 1024) { timedOut = true; terminationPromise ||= terminateProcessTree(child); return; }
     let message;
     try { message = JSON.parse(line); } catch { return; }
     if (message?.type === 'progress') {
@@ -1432,9 +1460,11 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
     if (!fs.existsSync(privateOutputPath)) throw new Error('合成算法没有生成输出文件');
     const threshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * .00005);
     const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > threshold;
-    const committed = await publishProjectFile(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`, null, 'merge-output');
+    const versionPayloadTemplate = { photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: merged.noRetouch ? '所有人物均确认无需修图；已将原图作为零修改输出登记' : `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false };
+    const continuationPlan = { version: 1, kind: 'merge-output', projectId: String(context.projectId), outputProgressId: String(outputProgress.id), outputRelativePath, versionPayloadTemplate, domain: { photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), tasks: photoTasks.map(task => ({ id: String(task.id), members: task.members.map(member => Number(member.personIndex)), completion: fingerprintTasks.find(item => item.id === String(task.id))?.memberArtifacts || [] })), finalStatus: 'merged', mergeMetrics: merged.metrics || [] } };
+    const committed = await publishProjectFile(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`, null, 'merge-output', continuationPlan);
     const artifact = committed.outputs[0];
-    const registered = await createVersionFromOutput(parentId, committed, { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: merged.noRetouch ? '所有人物均确认无需修图；已将原图作为零修改输出登记' : `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
+    const registered = await createVersionFromOutput(parentId, committed, { ...versionPayloadTemplate, commitId: committed.commitId, artifactId: artifact.artifactId });
     const versionId = registered.versionId;
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -2100,6 +2130,7 @@ const workspaceSnapshot = async (parentId, context) => {
     const generatedOrder = uniqueText(generatedSettings?.preferredIdentityOrder);
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
     const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
+    const recoveryRequired = resolvedManifest?.recovery?.state === 'needs-republish' ? { required: true, state: 'needs-republish', resources: ['workflow-output'], action: 'team.workflow.reconcile-drain.v1' } : null;
     const assignmentIdentityBySubject = new Map(normalizedAssignments.map(item => [`${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
     const assignmentIdentityByStableSubject = new Map(normalizedAssignments.map(item => [`${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
     const workflowItemIdentity = item => {
@@ -2123,6 +2154,7 @@ const workspaceSnapshot = async (parentId, context) => {
       workflowParticipantKeys: workflowItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowParticipantSubjectKeys: workflowItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds },
+      recoveryRequired,
     };
   } finally { db.close(); }
 };
@@ -2247,7 +2279,8 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
     try {
       const replacements = new Map(Object.entries(previousManifest?.outputOwnership || {}).map(([relativePath, value]) => [relativePath, value]));
       const outputFiles = manifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(scope.outputDirectory, item.relativePath), outputRelativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
-      const committed = await publishProjectFiles(parentId, outputFiles, `workflow-${sha256(fingerprint).slice(0, 24)}`, replacements);
+      const continuationPlan = { version: 1, kind: 'workflow-output', projectId: String(context.projectId), manifestPath: scope.manifestPath, manifest: { ...manifest, outputOwnership: {} }, workflowState: { generatedAt: Number(manifest.generatedAt), fingerprint }, outputs: outputFiles.map(file => ({ outputRelativePath: file.outputRelativePath })) };
+      const committed = await publishProjectFiles(parentId, outputFiles, `workflow-${sha256(fingerprint).slice(0, 24)}`, replacements, continuationPlan);
       hostPublicationCommitted = true;
       manifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
       if (committed[OUTPUT_OUTBOX]) await outboxState(committed[OUTPUT_OUTBOX], 'domain_pending', { result: { ...parseJson(committed[OUTPUT_OUTBOX].row.result_json, {}), workflow: { manifestPath: scope.manifestPath, generatedAt: manifest.generatedAt, fingerprint } } });
@@ -2565,7 +2598,8 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
       const prior = priorOutputs.find(item => item.relativePath === activeRelativePath)?.ownership || ownership[activeRelativePath] || null;
       const activeDigest = await fileSha256(activeTarget);
       if (!prior || String(prior.sha256 || '').toLowerCase() !== activeDigest.toLowerCase()) {
-        const committed = await publishProjectFile(parentId, activeTarget, activeRelativePath, `relay-${sha256(`${task.id}\0${activeIndex}\0${activeDigest}\0${JSON.stringify(prior || null)}`).slice(0, 24)}`, prior);
+        const relayContinuation = { version: 1, kind: 'relay-output', projectId: String(context.projectId), manifestPath: scope.manifestPath, activeRelativePath, manifest: scope.manifest };
+        const committed = await publishProjectFile(parentId, activeTarget, activeRelativePath, `relay-${sha256(`${task.id}\0${activeIndex}\0${activeDigest}\0${JSON.stringify(prior || null)}`).slice(0, 24)}`, prior, 'relay-output', relayContinuation);
         committedPublications.push(committed);
         const output = committed.outputs[0]; ownership[activeRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
       }
@@ -2590,6 +2624,18 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
 
 const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1, taskIds = []) => {
   const maintenanceStorage = await hostStorage(parentId);
+  const restoredScope = await workflowScopeForStorage(maintenanceStorage, context);
+  if (restoredScope.manifest?.recovery?.state === 'needs-republish') {
+    const restoredManifest = JSON.parse(JSON.stringify(restoredScope.manifest)); delete restoredManifest.recovery;
+    const outputFiles = (restoredManifest.groups || []).flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(restoredScope.outputDirectory, item.relativePath), outputRelativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
+    if (!outputFiles.length || outputFiles.some(item => !isInside(restoredScope.outputDirectory, item.sourcePath) || !fs.existsSync(item.sourcePath))) throw recoveryRequiredError('恢复的 workflow 缺少可重发布的当前私有文件');
+    const continuationPlan = { version: 1, kind: 'workflow-output', projectId: String(context.projectId), manifestPath: restoredScope.manifestPath, manifest: { ...restoredManifest, outputOwnership: {} }, workflowState: { generatedAt: Number(restoredManifest.generatedAt), fingerprint: String(restoredManifest.fingerprint) }, outputs: outputFiles.map(file => ({ outputRelativePath: file.outputRelativePath })) };
+    const committed = await publishProjectFiles(parentId, outputFiles, `restore-workflow-${sha256(`${context.projectId}\0${restoredManifest.fingerprint}`).slice(0, 32)}`, new Map(), continuationPlan);
+    restoredManifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
+    await writeJsonAtomic(restoredScope.manifestPath, restoredManifest);
+    await withDomain(parentId, db => db.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(restoredManifest.generatedAt), String(restoredManifest.fingerprint), Date.now()));
+    await completeOutputPublication(committed);
+  }
   await retryWorkflowOutputCleanup(parentId, maintenanceStorage, context).catch(() => undefined);
   await drainCleanupOutbox(maintenanceStorage.databasePath, context.projectId, 50).catch(() => undefined);
   const selectedTaskIds = uniqueText(Array.isArray(taskIds) ? taskIds : []).slice(0, 50);
