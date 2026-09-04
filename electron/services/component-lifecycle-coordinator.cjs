@@ -38,19 +38,31 @@ class ComponentLifecycleCoordinator {
     if (!id) throw new Error('组件 ID 不能为空');
     this.assertAvailable(id);
     let released = false;
+    let references = 1;
+    const releaseReference = () => {
+      references -= 1;
+      if (references > 0) return;
+      leases.delete(lease);
+      if (!leases.size) {
+        this.work.delete(id);
+        for (const resolve of this.workWaiters.get(id) || []) resolve();
+        this.workWaiters.delete(id);
+      }
+    };
     const lease = {
       componentId: id,
       operation,
       token: Symbol(id),
+      retain: () => {
+        if (references <= 0) throw Object.assign(new Error('组件 work lease 已释放'), { code: 'COMPONENT_QUIESCING' });
+        references += 1;
+        let retainedReleased = false;
+        return { release: () => { if (!retainedReleased) { retainedReleased = true; releaseReference(); } } };
+      },
       release: () => {
         if (released) return;
         released = true;
-        leases.delete(lease);
-        if (!leases.size) {
-          this.work.delete(id);
-          for (const resolve of this.workWaiters.get(id) || []) resolve();
-          this.workWaiters.delete(id);
-        }
+        releaseReference();
       },
     };
     const leases = this.work.get(id) || new Set();
@@ -156,6 +168,9 @@ class ComponentLifecycleCoordinator {
 
   assertLaunchAllowed(componentId, lease) {
     const id = String(componentId || '');
+    if (this.startupRecovering) throw Object.assign(new Error('组件持久事务仍在启动恢复中'), { code: 'COMPONENT_RECOVERY_PENDING' });
+    if (this.corruptTransactionState || this.persistentBlocks.has(id)) throw Object.assign(new Error(`组件 ${id} 有未完成的持久事务，恢复前禁止启动`), { code: 'COMPONENT_TRANSACTION_BLOCKED' });
+    if (this.blocker(id)) throw Object.assign(new Error(`组件 ${id} 的旧进程树尚未确认清空，请重试关闭后台进程`), { code: 'COMPONENT_TERMINATION_UNCONFIRMED' });
     if (this.applicationQuitPhase === 'stop' || this.applicationQuitPhase === 'committed' || this.transitions.get(id)?.stopRequested === true) throw Object.assign(new Error('组件停止已确认，禁止启动新的组件进程'), { code: 'COMPONENT_QUIESCING' });
     const validWorkLease = lease?.componentId === id && this.isActiveWorkLease(id, lease);
     if (validWorkLease) return;

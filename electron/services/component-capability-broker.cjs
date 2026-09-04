@@ -81,16 +81,19 @@ class ComponentCapabilityBroker {
       ? inheritedLease
       : this.lifecycleCoordinator?.acquireWork?.(componentId, `capability:${normalized}`);
     const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
+    const retainedLifecycleLease = !ownsLifecycleLease ? lifecycleLease?.retain?.() : null;
     const internalContext = withComponentLifecycleLease(boundContext, lifecycleLease);
     this.activeByComponent.set(componentId, (this.activeByComponent.get(componentId) || 0) + 1);
     try {
       const result = handler(clonePayload(payload), internalContext, descriptor);
-      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { this.finishInvocation(componentId); if (ownsLifecycleLease) lifecycleLease.release(); });
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { this.finishInvocation(componentId); retainedLifecycleLease?.release(); if (ownsLifecycleLease) lifecycleLease.release(); });
       this.finishInvocation(componentId);
+      retainedLifecycleLease?.release();
       if (ownsLifecycleLease) lifecycleLease.release();
       return result;
     } catch (error) {
       this.finishInvocation(componentId);
+      retainedLifecycleLease?.release();
       if (ownsLifecycleLease) lifecycleLease.release();
       throw error;
     }

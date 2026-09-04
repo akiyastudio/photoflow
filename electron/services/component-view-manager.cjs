@@ -1,6 +1,7 @@
 const path = require('path');
 const { fileURLToPath } = require('url');
 const { normalizeComponentSettingsFormValues, validateComponentSettingsFormPatch } = require('../contracts/component-settings-form-contract.cjs');
+const { getComponentLifecycleLease } = require('./component-lifecycle-context.cjs');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
 const normalizeIdentity = value => String(value || '').trim().replace(/\\/g, '/').toLocaleLowerCase();
@@ -247,7 +248,14 @@ class ComponentViewManager {
   }
 
   async openSurface(rawRequest, surface) {
-    this.lifecycleCoordinator?.assertAvailable?.(rawRequest?.componentId);
+    const componentId = String(rawRequest?.componentId || '');
+    const inheritedLease = getComponentLifecycleLease(rawRequest);
+    const lifecycleLease = this.lifecycleCoordinator?.isActiveWorkLease?.(componentId, inheritedLease)
+      ? inheritedLease
+      : this.lifecycleCoordinator?.acquireWork?.(componentId, `view-open:${String(surface || '')}`);
+    const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
+    const retainedLifecycleLease = !ownsLifecycleLease ? lifecycleLease?.retain?.() : null;
+    try {
     const activationGeneration = ++this.activationGeneration;
     const applicationLevel = surface === 'application.settings' || surface === 'application.command';
     const request = applicationLevel ? rawRequest : this.resolveOpenContext(rawRequest, surface);
@@ -416,6 +424,10 @@ class ComponentViewManager {
       throw new Error('Component page open was superseded');
     }
     return this.publicInstance(instance, leaseId);
+    } finally {
+      retainedLifecycleLease?.release();
+      if (ownsLifecycleLease) lifecycleLease.release();
+    }
   }
 
   publicInstance(instance, leaseId = '') {

@@ -445,7 +445,7 @@ class ManagedProcess extends EventEmitter {
         this.start();
       } catch (error) {
         this._safeLog('error', 'Managed process restart failed', this.details({ error: safeError(error) }));
-        if (['COMPONENT_QUIESCING', 'COMPONENT_TRANSACTION_BLOCKED', 'COMPONENT_RECOVERY_PENDING'].includes(error?.code)) this.state = 'failed';
+        if (['COMPONENT_QUIESCING', 'COMPONENT_TRANSACTION_BLOCKED', 'COMPONENT_RECOVERY_PENDING', 'COMPONENT_TERMINATION_UNCONFIRMED'].includes(error?.code)) this.state = 'failed';
         else this._scheduleRestart('restart-start-failed');
       }
     }, delayMs);

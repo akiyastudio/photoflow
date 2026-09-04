@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
-const { getComponentLifecycleLease } = require('../electron/services/component-lifecycle-context.cjs');
+const { ComponentLifecycleCoordinator } = require('../electron/services/component-lifecycle-coordinator.cjs');
+const { getComponentLifecycleLease, withComponentLifecycleLease } = require('../electron/services/component-lifecycle-context.cjs');
 
 const descriptor = {
   componentId: 'fixture.component',
@@ -63,6 +64,23 @@ const runCase = async handler => {
   assert.deepEqual(nestedBroker.invoke(descriptor, 'component.settings', { action: 'outer' }, { surface: 'project' }), { ok: true });
   assert.equal(nestedAcquired, 1, 'nested capability reuses its parent lease');
   assert.equal(nestedReleased, 1, 'only the parent owner releases the reused lease');
+
+  const retainedCoordinator = new ComponentLifecycleCoordinator();
+  const parentLease = retainedCoordinator.acquireWork(descriptor.componentId, 'parent-rpc');
+  let finishNested;
+  const retainedBroker = new ComponentCapabilityBroker({ lifecycleCoordinator: retainedCoordinator });
+  retainedBroker.register('component.settings', () => new Promise(resolve => { finishNested = resolve; }));
+  const nestedPromise = retainedBroker.invoke(descriptor, 'component.settings', { action: 'get' }, withComponentLifecycleLease({ surface: 'project' }, parentLease));
+  parentLease.release();
+  assert.equal(retainedCoordinator.hasWork(descriptor.componentId), true, 'nested capability retains the parent lease after parent timeout/exit');
+  const transition = retainedCoordinator.acquire(descriptor.componentId, 'uninstall', { stopOnly: true });
+  assert.doesNotThrow(() => retainedCoordinator.assertLaunchAllowed(descriptor.componentId, getComponentLifecycleLease(withComponentLifecycleLease({}, parentLease))));
+  transition.requestStop();
+  assert.throws(() => retainedCoordinator.assertLaunchAllowed(descriptor.componentId, parentLease), error => error.code === 'COMPONENT_QUIESCING');
+  finishNested({ ok: true });
+  await nestedPromise;
+  assert.equal(retainedCoordinator.hasWork(descriptor.componentId), false, 'last nested owner releases the retained lease');
+  transition.release();
 
   console.log('Component capability lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

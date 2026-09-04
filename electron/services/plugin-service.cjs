@@ -10,12 +10,15 @@ const createPluginService = ({ app, registry, runJsonCommand, processSupervisor 
       ? inheritedLease
       : lifecycleCoordinator?.acquireWork?.(componentId, `runtime-json:${label}`);
     const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
+    const retainedLifecycleLease = !ownsLifecycleLease ? lifecycleLease?.retain?.() : null;
     try {
       const result = runJsonCommand(legacyRun, label, timeoutMs, onMessage, signal, requestedDeadlineAt, { componentId, lifecycleLease });
-      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { if (ownsLifecycleLease) lifecycleLease.release(); });
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { retainedLifecycleLease?.release(); if (ownsLifecycleLease) lifecycleLease.release(); });
+      retainedLifecycleLease?.release();
       if (ownsLifecycleLease) lifecycleLease.release();
       return result;
     } catch (error) {
+      retainedLifecycleLease?.release();
       if (ownsLifecycleLease) lifecycleLease.release();
       throw error;
     }

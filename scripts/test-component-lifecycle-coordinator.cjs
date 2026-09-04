@@ -67,5 +67,29 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
   assert.doesNotThrow(() => cancelledCoordinator.assertLaunchAllowed('cancel-fixture', cancelledWork), 'cancel leaves existing work healthy');
   cancelledWork.release();
 
+  const terminationCoordinator = new ComponentLifecycleCoordinator({ blocker: id => blocked.has(id) });
+  const terminationLease = terminationCoordinator.acquireWork('hard-termination');
+  blocked.add('hard-termination');
+  assert.throws(() => terminationCoordinator.assertLaunchAllowed('hard-termination', terminationLease), error => error.code === 'COMPONENT_TERMINATION_UNCONFIRMED');
+  terminationLease.release(); blocked.delete('hard-termination');
+
+  const persistentCoordinator = new ComponentLifecycleCoordinator();
+  const persistentLease = persistentCoordinator.acquireWork('hard-persistent');
+  persistentCoordinator.blockPersistent('hard-persistent', new Error('blocked'));
+  assert.throws(() => persistentCoordinator.assertLaunchAllowed('hard-persistent', persistentLease), error => error.code === 'COMPONENT_TRANSACTION_BLOCKED');
+  persistentLease.release();
+
+  const corruptCoordinator = new ComponentLifecycleCoordinator();
+  const corruptLease = corruptCoordinator.acquireWork('hard-corrupt');
+  corruptCoordinator.blockForCorruptTransaction();
+  assert.throws(() => corruptCoordinator.assertLaunchAllowed('hard-corrupt', corruptLease), error => error.code === 'COMPONENT_TRANSACTION_BLOCKED');
+  corruptLease.release();
+
+  const startupCoordinator = new ComponentLifecycleCoordinator();
+  const startupLease = startupCoordinator.acquireWork('hard-startup');
+  startupCoordinator.beginStartupRecovery();
+  assert.throws(() => startupCoordinator.assertLaunchAllowed('hard-startup', startupLease), error => error.code === 'COMPONENT_RECOVERY_PENDING');
+  startupLease.release();
+
   console.log('Component lifecycle coordinator tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

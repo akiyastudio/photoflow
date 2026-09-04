@@ -21,8 +21,9 @@ class Child extends EventEmitter {
     componentId: 'fixture.component', componentVersion: '1', componentRoot: __dirname,
     service: { protocolVersion: 1, runtime: 'node', entry: __filename, rpcMethods: ['fixture.echo', 'fixture.restore.project'], capabilities: [], permissions: [], backupRestore: { project: { method: 'fixture.restore.project' } } },
   };
-  let released = 0; const acquisitions = []; let activeLease = null;
+  let released = 0; const acquisitions = []; let activeLease = null; let rejectNewWork = false;
   const lifecycleCoordinator = { acquireWork: (componentId, operation) => {
+    if (rejectNewWork) throw Object.assign(new Error('intent rejects new work'), { code: 'COMPONENT_QUIESCING' });
     const lease = { componentId, operation, token: Symbol(operation), release: () => { released += 1; if (activeLease === lease) activeLease = null; } };
     activeLease = lease;
     acquisitions.push(lease);
@@ -54,6 +55,21 @@ class Child extends EventEmitter {
   assert.equal(released, 2, 'backup preparation holds and releases a work lease');
   await manager.invokeBackupRestore(descriptor.componentId, 'project', { operationId: 'restore' }, { surface: 'project' });
   assert.equal(released, 3, 'backup restore invocation holds one lease through its response');
+  for (const mode of ['transition-intent', 'global-intent']) {
+    let releaseBarrier;
+    manager.storageSnapshotBarrier = { released: new Promise(resolve => { releaseBarrier = resolve; }) };
+    const acquiredBefore = acquisitions.length; const releasedBefore = released;
+    const queued = manager.invoke(descriptor.componentId, 'fixture.echo', { mode }, { surface: 'project' });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(acquisitions.length, acquiredBefore + 1, `${mode} queued RPC acquires before waiting`);
+    rejectNewWork = true;
+    rejectNewWork = false; // user cancels the prompt; the already admitted RPC remains valid
+    manager.storageSnapshotBarrier = null;
+    releaseBarrier();
+    assert.deepEqual(await queued, { ok: true });
+    assert.equal(acquisitions.length, acquiredBefore + 1, `${mode} barrier recursion must not reacquire`);
+    assert.equal(released, releasedBefore + 1, `${mode} has one lease owner`);
+  }
   await manager.destroy();
   console.log('Component service lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

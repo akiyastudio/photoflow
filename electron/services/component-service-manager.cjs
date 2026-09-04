@@ -192,16 +192,21 @@ class ComponentServiceManager {
   async invoke(componentId, method, payload, boundContext) {
     if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; }
-    if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.invoke(componentId, method, payload, boundContext); }
-    if (this.storageSnapshotBarrier) {
-      await this.storageSnapshotBarrier.released;
-      return this.invoke(componentId, method, payload, boundContext);
-    }
     const inheritedLease = getComponentLifecycleLease(boundContext);
     const lifecycleLease = this.lifecycleCoordinator?.isActiveWorkLease?.(componentId, inheritedLease)
       ? inheritedLease
       : this.lifecycleCoordinator?.acquireWork?.(componentId, `service-rpc:${String(method || '')}`);
     const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
+    const retainedLifecycleLease = !ownsLifecycleLease ? lifecycleLease?.retain?.() : null;
+    try { return await this.invokeWithLease(componentId, method, payload, boundContext, lifecycleLease); }
+    finally { retainedLifecycleLease?.release(); if (ownsLifecycleLease) lifecycleLease.release(); }
+  }
+
+  async invokeWithLease(componentId, method, payload, boundContext, lifecycleLease) {
+    while (this.backupRestoreLeaseCount > 0 || this.storageSnapshotBarrier) {
+      if (this.backupRestoreLeaseCount > 0) await this.backupRestoreIdle;
+      if (this.storageSnapshotBarrier) await this.storageSnapshotBarrier.released;
+    }
     this.activeInvocations += 1;
     try {
     const descriptor = this.registry.resolve(componentId);
@@ -216,7 +221,6 @@ class ComponentServiceManager {
     const normalizedPayload = cloneRequestPayload(payload);
     return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext, null, false, null, lifecycleLease);
     } finally {
-      if (ownsLifecycleLease) lifecycleLease.release();
       this.activeInvocations -= 1;
       if (this.activeInvocations === 0) {
         for (const notify of this.activityWaiters) notify();
