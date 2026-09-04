@@ -14,6 +14,23 @@ const manifest = { apiVersion: 1, id: 'verifier-fixture', version: '1.2.3', plat
 
 const zip = writeZip;
 const expectFailure = async (target, pattern) => assert.rejects(verifyComponentPackage(target), pattern);
+const findCentralEntry = (image, entryName) => {
+  const expectedName = Buffer.from(entryName);
+  for (let offset = 0; offset + 46 <= image.length; offset += 1) {
+    if (image.readUInt32LE(offset) !== 0x02014b50) continue;
+    const nameLength = image.readUInt16LE(offset + 28);
+    if (nameLength === expectedName.length && image.subarray(offset + 46, offset + 46 + nameLength).equals(expectedName)) return offset;
+  }
+  throw new Error(`Missing central entry: ${entryName}`);
+};
+const rewriteDeclaredSize = (target, entryName, size, { local = true } = {}) => {
+  const image = fs.readFileSync(target);
+  const centralOffset = findCentralEntry(image, entryName);
+  image.writeUInt32LE(size, centralOffset + 24);
+  if (local) image.writeUInt32LE(size, image.readUInt32LE(centralOffset + 42) + 22);
+  fs.writeFileSync(target, image);
+};
+const verifierTemporaryDirectories = () => new Set(fs.readdirSync(os.tmpdir()).filter(name => name.startsWith('photoflow-component-verify-')));
 
 (async () => {
   try {
@@ -48,6 +65,16 @@ const expectFailure = async (target, pattern) => assert.rejects(verifyComponentP
 
     zip(archive, [['sample/child/file.txt', 'child'], ['sample/child', 'file collision'], ...goodEntries]);
     await expectFailure(archive, /文件\/目录碰撞/);
+
+    zip(archive, [['sample/component.json', JSON.stringify(manifest)], ['sample/worker.cjs', 'A'.repeat(1024 * 1024), { method: 8 }]]);
+    rewriteDeclaredSize(archive, 'sample/worker.cjs', 1, { local: false });
+    await expectFailure(archive, /本地条目大小或校验值与中央目录不一致/);
+
+    zip(archive, [['sample/component.json', JSON.stringify(manifest)], ['sample/worker.cjs', 'A'.repeat(1024 * 1024), { method: 8 }]]);
+    rewriteDeclaredSize(archive, 'sample/worker.cjs', 1);
+    const temporaryBefore = verifierTemporaryDirectories();
+    await expectFailure(archive, /实际展开大小超过声明或安全上限/);
+    assert.deepEqual(verifierTemporaryDirectories(), temporaryBefore, 'failed bounded extraction must clean its temporary snapshot and output');
 
     const wrongName = path.join(root, `PhotoFlow-wrong-id-1.2.3-${process.platform}-${process.arch}.zip`);
     zip(wrongName, goodEntries);

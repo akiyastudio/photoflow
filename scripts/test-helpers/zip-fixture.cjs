@@ -1,4 +1,5 @@
 const fs = require('node:fs');
+const zlib = require('node:zlib');
 
 const crc32 = buffer => {
   let crc = 0xffffffff;
@@ -13,29 +14,33 @@ const writeZip = (target, entries) => {
   const local = [];
   const central = [];
   let offset = 0;
-  for (const [name, raw] of entries) {
+  for (const [name, raw, options = {}] of entries) {
     const nameBuffer = Buffer.from(name);
     const data = Buffer.from(raw);
+    const method = options.method === 8 ? 8 : 0;
+    const compressed = method === 8 ? zlib.deflateRawSync(data) : data;
     const checksum = crc32(data);
     const header = Buffer.alloc(30);
     header.writeUInt32LE(0x04034b50);
     header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(method, 8);
     header.writeUInt32LE(checksum, 14);
-    header.writeUInt32LE(data.length, 18);
+    header.writeUInt32LE(compressed.length, 18);
     header.writeUInt32LE(data.length, 22);
     header.writeUInt16LE(nameBuffer.length, 26);
-    local.push(header, nameBuffer, data);
+    local.push(header, nameBuffer, compressed);
     const record = Buffer.alloc(46);
     record.writeUInt32LE(0x02014b50);
     record.writeUInt16LE(20, 4);
     record.writeUInt16LE(20, 6);
+    record.writeUInt16LE(method, 10);
     record.writeUInt32LE(checksum, 16);
-    record.writeUInt32LE(data.length, 20);
+    record.writeUInt32LE(compressed.length, 20);
     record.writeUInt32LE(data.length, 24);
     record.writeUInt16LE(nameBuffer.length, 28);
     record.writeUInt32LE(offset, 42);
     central.push(record, nameBuffer);
-    offset += header.length + nameBuffer.length + data.length;
+    offset += header.length + nameBuffer.length + compressed.length;
   }
   const directory = Buffer.concat(central);
   const end = Buffer.alloc(22);

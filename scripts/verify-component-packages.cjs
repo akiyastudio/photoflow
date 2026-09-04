@@ -11,6 +11,7 @@ const { validateComponentIntegrity } = require('../electron/component-integrity.
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const defaultPackageRoot = path.join(repositoryRoot, 'artifacts', 'installers');
+const MAX_ARCHIVE_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_INTEGRITY_BYTES = 4 * 1024 * 1024;
@@ -39,10 +40,14 @@ const entryDataOffset = (archive, entry) => {
     if (local.readUInt32LE(0) !== 0x04034b50) throw new Error(`ZIP 本地条目损坏：${entry.name}`);
     const flags = local.readUInt16LE(6);
     const method = local.readUInt16LE(8);
+    const localCrc = local.readUInt32LE(14);
+    const localCompressedSize = local.readUInt32LE(18);
+    const localUncompressedSize = local.readUInt32LE(22);
     const nameLength = local.readUInt16LE(26);
     const extraLength = local.readUInt16LE(28);
     const localName = readExact(fd, nameLength, entry.localOffset + 30).toString('utf8').replace(/\\/g, '/');
     if (localName !== entry.name || flags !== entry.flags || method !== entry.method) throw new Error(`ZIP 本地条目与中央目录不一致：${entry.name}`);
+    if (!(flags & 8) && (localCrc !== entry.expectedCrc || localCompressedSize !== entry.compressedSize || localUncompressedSize !== entry.uncompressedSize)) throw new Error(`ZIP 本地条目大小或校验值与中央目录不一致：${entry.name}`);
     const start = entry.localOffset + 30 + nameLength + extraLength;
     if (start + entry.compressedSize > archive.size) throw new Error(`ZIP 条目数据越界：${entry.name}`);
     return start;
@@ -90,6 +95,7 @@ const snapshotArchive = async (archivePath, target) => {
   try {
     const before = await handle.stat();
     if (!before.isFile()) throw new Error(`组件包不是普通文件：${archivePath}`);
+    if (!Number.isSafeInteger(before.size) || before.size < 22 || before.size > MAX_ARCHIVE_BYTES) throw new Error(`组件包本体大小超过安全上限：${archivePath}`);
     const identity = identityFor(before);
     assertSourceIdentity(archivePath, identity);
     await pipeline(handle.createReadStream({ autoClose: false }), fs.createWriteStream(target, { flags: 'wx' }));
@@ -117,7 +123,7 @@ const expectedComponentPackages = (packageRoot, platform = process.platform, arc
   }).sort((left, right) => left.id.localeCompare(right.id, 'en'));
 };
 
-const extractEntry = async (archive, entry, target) => {
+const extractEntry = async (archive, entry, target, actualBudget) => {
   if (entry.name.endsWith('/')) { fs.mkdirSync(target, { recursive: true }); return; }
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const start = entryDataOffset(archive, entry);
@@ -128,7 +134,12 @@ const extractEntry = async (archive, entry, target) => {
   let bytes = 0;
   let crc = 0xffffffff;
   const inspect = new Transform({ transform(chunk, encoding, callback) {
-    bytes += chunk.length;
+    const nextEntryBytes = bytes + chunk.length;
+    const nextPackageBytes = actualBudget.bytes + chunk.length;
+    if (nextEntryBytes > entry.uncompressedSize || nextEntryBytes > MAX_ENTRY_BYTES) return callback(new Error(`ZIP 条目实际展开大小超过声明或安全上限：${entry.name}`));
+    if (nextPackageBytes > MAX_PACKAGE_BYTES) return callback(new Error('安装包实际展开大小超过安全上限'));
+    bytes = nextEntryBytes;
+    actualBudget.bytes = nextPackageBytes;
     hash.update(chunk);
     for (const byte of chunk) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
     callback(null, chunk);
@@ -164,7 +175,8 @@ const verifyComponentPackage = async archivePath => {
     if (!Array.isArray(manifest.platforms) || !manifest.platforms.includes(platform)) throw new Error(`组件清单平台与文件名不匹配：${platform}`);
     if (!Array.isArray(manifest.architectures) || !manifest.architectures.includes(arch)) throw new Error(`组件清单架构与文件名不匹配：${arch}`);
     const extractedRoot = path.join(temporaryRoot, 'extracted');
-    for (const entry of entries) await extractEntry(archive, entry, path.join(extractedRoot, ...entry.name.split('/')));
+    const actualBudget = { bytes: 0 };
+    for (const entry of entries) await extractEntry(archive, entry, path.join(extractedRoot, ...entry.name.split('/')), actualBudget);
     const manifestRoot = path.dirname(path.join(extractedRoot, ...packageManifest.manifestEntry.split('/')));
     parseComponentHostManifest(manifest, manifestRoot);
     const registry = createComponentRegistry({ projectRoot: repositoryRoot, userComponentRoot: isolatedPackageRoot, isPackaged: true, platform, arch });
