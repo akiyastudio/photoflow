@@ -40,7 +40,8 @@ class ManagedProcess extends EventEmitter {
       this.lifecycle.startAfterSettle = true;
       return this.lifecycle.child;
     }
-    if (this.owner?.componentId) this.supervisor.lifecycleCoordinator?.assertLaunchAllowed?.(this.owner.componentId, this.specification.lifecycleLease);
+    const lifecycleLease = typeof this.specification.getLifecycleLease === 'function' ? this.specification.getLifecycleLease() : this.specification.lifecycleLease;
+    if (this.owner?.componentId) this.supervisor.lifecycleCoordinator?.assertLaunchAllowed?.(this.owner.componentId, lifecycleLease);
     clearTimeout(this.restartTimer);
     this.restartTimer = null;
     this.stopping = false;
@@ -473,7 +474,8 @@ class ProcessSupervisor {
     if (this.stopping) throw new Error('Process supervisor is stopping');
     const id = String(specification?.id || '').trim();
     if (!id) throw new Error('Managed process ID is required');
-    if (specification?.owner?.componentId) this.lifecycleCoordinator?.assertLaunchAllowed?.(specification.owner.componentId, specification.lifecycleLease);
+    const lifecycleLease = typeof specification?.getLifecycleLease === 'function' ? specification.getLifecycleLease() : specification?.lifecycleLease;
+    if (specification?.owner?.componentId) this.lifecycleCoordinator?.assertLaunchAllowed?.(specification.owner.componentId, lifecycleLease);
     const existing = this.processes.get(id);
     if (existing && !existing.released) throw new Error(`Managed process already exists: ${id}`);
     const effectiveSpecification = this.enableNativeComponentJobs

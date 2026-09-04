@@ -1,4 +1,5 @@
 const { CAPABILITY_PERMISSIONS, HOST_CAPABILITIES } = require('../component-host-contract.cjs');
+const { getComponentLifecycleLease, withComponentLifecycleLease } = require('./component-lifecycle-context.cjs');
 
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
 const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings', 'component.lifecycle', 'dialogs', 'notifications', 'component.secrets']);
@@ -75,18 +76,22 @@ class ComponentCapabilityBroker {
     if (permission && !descriptor.service.permissions?.includes(permission)) { const error = new Error(`Component capability permission is not granted: ${permission}`); error.code = 'COMPONENT_HOST_PERMISSION_DENIED'; throw error; }
     const handler = this.handlers.get(normalized);
     if (!handler) throw new Error(`Host capability is unavailable: ${normalized}`);
-    const lifecycleLease = this.lifecycleCoordinator?.acquireWork?.(componentId, `capability:${normalized}`);
-    const internalContext = lifecycleLease ? { ...(boundContext || {}), lifecycleLease } : boundContext;
+    const inheritedLease = getComponentLifecycleLease(boundContext);
+    const lifecycleLease = this.lifecycleCoordinator?.isActiveWorkLease?.(componentId, inheritedLease)
+      ? inheritedLease
+      : this.lifecycleCoordinator?.acquireWork?.(componentId, `capability:${normalized}`);
+    const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
+    const internalContext = withComponentLifecycleLease(boundContext, lifecycleLease);
     this.activeByComponent.set(componentId, (this.activeByComponent.get(componentId) || 0) + 1);
     try {
       const result = handler(clonePayload(payload), internalContext, descriptor);
-      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { this.finishInvocation(componentId); lifecycleLease?.release(); });
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { this.finishInvocation(componentId); if (ownsLifecycleLease) lifecycleLease.release(); });
       this.finishInvocation(componentId);
-      lifecycleLease?.release();
+      if (ownsLifecycleLease) lifecycleLease.release();
       return result;
     } catch (error) {
       this.finishInvocation(componentId);
-      lifecycleLease?.release();
+      if (ownsLifecycleLease) lifecycleLease.release();
       throw error;
     }
   }

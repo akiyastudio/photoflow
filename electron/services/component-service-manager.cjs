@@ -1,4 +1,5 @@
 const path = require('path');
+const { getComponentLifecycleLease, withComponentLifecycleLease } = require('./component-lifecycle-context.cjs');
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const MAX_CAPABILITIES_PER_REQUEST = 128;
@@ -108,7 +109,9 @@ class ComponentServiceManager {
       const descriptor = this.registry.resolve(componentId);
       if (!descriptor?.service?.backupRestore) throw new Error(`Unknown component backup restore owner: ${componentId}`);
       this.capabilityBroker.assertCapabilities(descriptor);
-      const session = await this.ensureSession(descriptor); await session.ready;
+      const lifecycleLease = this.lifecycleCoordinator?.acquireWork?.(componentId, 'backup-restore-prepare');
+      try { const session = await this.ensureSession(descriptor, lifecycleLease); await session.ready; }
+      finally { lifecycleLease?.release(); }
     }
     return true;
   }
@@ -138,16 +141,20 @@ class ComponentServiceManager {
 
   async withBackupRestoreLeaseExclusive(componentIds, worker) {
     if (!Array.isArray(componentIds) || typeof worker !== 'function') throw new TypeError('Invalid component backup restore lease');
+    const normalizedIds = [...new Set(componentIds.map(String))];
+    const lifecycleLeases = new Map();
+    try {
+      for (const componentId of normalizedIds) lifecycleLeases.set(componentId, this.lifecycleCoordinator?.acquireWork?.(componentId, 'backup-restore'));
     let preparedSessions;
     while (true) {
       if (this.storageSnapshotBarrier) await this.storageSnapshotBarrier.released;
       preparedSessions = new Map();
-      for (const componentId of [...new Set(componentIds.map(String))]) {
+      for (const componentId of normalizedIds) {
         this.assertNotQuarantined(componentId);
         const descriptor = this.registry.resolve(componentId);
         if (!descriptor) throw new Error(`Unknown component: ${componentId}`);
         this.capabilityBroker.assertCapabilities(descriptor);
-        const session = await this.ensureSession(descriptor); await session.ready; preparedSessions.set(componentId, session);
+        const session = await this.ensureSession(descriptor, lifecycleLeases.get(componentId)); await session.ready; preparedSessions.set(componentId, session);
       }
       if (!this.storageSnapshotBarrier) break;
     }
@@ -170,12 +177,15 @@ class ComponentServiceManager {
         if (!hook || !preparedSessions.has(componentId)) throw new Error(`Component ${componentId} is outside the backup restore lease`);
         return this.invokeOnce(descriptor, hook.method, cloneRequestPayload(payload), {
           ...boundContext, componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, surface: 'backup.restore',
-        }, preparedSessions.get(componentId), true, BACKUP_RESTORE_INVOCATION);
+        }, preparedSessions.get(componentId), true, BACKUP_RESTORE_INVOCATION, lifecycleLeases.get(componentId));
       };
       return await worker(invoke);
     } finally {
       if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
       releaseBarrier();
+    }
+    } finally {
+      for (const lifecycleLease of lifecycleLeases.values()) lifecycleLease?.release();
     }
   }
 
@@ -187,7 +197,11 @@ class ComponentServiceManager {
       await this.storageSnapshotBarrier.released;
       return this.invoke(componentId, method, payload, boundContext);
     }
-    const lifecycleLease = this.lifecycleCoordinator?.acquireWork?.(componentId, `service-rpc:${String(method || '')}`);
+    const inheritedLease = getComponentLifecycleLease(boundContext);
+    const lifecycleLease = this.lifecycleCoordinator?.isActiveWorkLease?.(componentId, inheritedLease)
+      ? inheritedLease
+      : this.lifecycleCoordinator?.acquireWork?.(componentId, `service-rpc:${String(method || '')}`);
+    const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
     this.activeInvocations += 1;
     try {
     const descriptor = this.registry.resolve(componentId);
@@ -202,7 +216,7 @@ class ComponentServiceManager {
     const normalizedPayload = cloneRequestPayload(payload);
     return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext, null, false, null, lifecycleLease);
     } finally {
-      lifecycleLease?.release();
+      if (ownsLifecycleLease) lifecycleLease.release();
       this.activeInvocations -= 1;
       if (this.activeInvocations === 0) {
         for (const notify of this.activityWaiters) notify();
@@ -228,7 +242,7 @@ class ComponentServiceManager {
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const pending = { resolve, reject, timer: null, context: lifecycleLease ? { ...(boundContext || {}), lifecycleLease } : boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, onTimeout: null };
+      const pending = { resolve, reject, timer: null, context: withComponentLifecycleLease(boundContext, lifecycleLease), method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, onTimeout: null };
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
@@ -295,7 +309,7 @@ class ComponentServiceManager {
       prepareReady(session);
       session.managed = this.processSupervisor.launch({
         id: `component-service:${componentId}`,
-        kind: 'component-service', command, args, options, owner: { componentId }, lifecycleLease, windowsJob: true,
+        kind: 'component-service', command, args, options, owner: { componentId }, getLifecycleLease: () => this.lifecycleCoordinator?.currentLease?.(componentId), windowsJob: true,
         health: { startupTimeoutMs: 15000 },
         restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
         onSpawn: (child, managed) => this.attach(session, child, managed),

@@ -17,6 +17,7 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
   assert.doesNotThrow(() => coordinator.assertLaunchAllowed('b', work), 'existing work may launch while the user is deciding');
   intent.requestStop();
   assert.throws(() => coordinator.assertLaunchAllowed('b', work), error => error.code === 'COMPONENT_QUIESCING');
+  assert.throws(() => coordinator.assertLaunchAllowed('b', intent), error => error.code === 'COMPONENT_QUIESCING', 'transition token cannot authorize process launch after stop');
   let promoted = false;
   const promotion = intent.promote().then(() => { promoted = true; });
   await new Promise(resolve => setImmediate(resolve));

@@ -1,13 +1,24 @@
 const { PLUGIN_DEFINITIONS, findPluginByCapability } = require('../plugins/plugin-catalog.cjs');
 const { legacyRuntimeCommandCapability } = require('../compatibility/legacy-runtime-capabilities.cjs');
+const { getComponentLifecycleLease } = require('./component-lifecycle-context.cjs');
 
-const createPluginService = ({ app, registry, runJsonCommand }) => {
+const createPluginService = ({ app, registry, runJsonCommand, processSupervisor = null, lifecycleCoordinator = processSupervisor?.lifecycleCoordinator }) => {
   const runComponentJsonCommand = (run, label, timeoutMs, onMessage, signal, requestedDeadlineAt, supervision = null) => {
     const { componentId, ...legacyRun } = run;
-    return runJsonCommand(legacyRun, label, timeoutMs, onMessage, signal, requestedDeadlineAt, {
-      componentId,
-      lifecycleLease: supervision?.lifecycleLease,
-    });
+    const inheritedLease = getComponentLifecycleLease(supervision);
+    const lifecycleLease = lifecycleCoordinator?.isActiveWorkLease?.(componentId, inheritedLease)
+      ? inheritedLease
+      : lifecycleCoordinator?.acquireWork?.(componentId, `runtime-json:${label}`);
+    const ownsLifecycleLease = Boolean(lifecycleLease && lifecycleLease !== inheritedLease);
+    try {
+      const result = runJsonCommand(legacyRun, label, timeoutMs, onMessage, signal, requestedDeadlineAt, { componentId, lifecycleLease });
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { if (ownsLifecycleLease) lifecycleLease.release(); });
+      if (ownsLifecycleLease) lifecycleLease.release();
+      return result;
+    } catch (error) {
+      if (ownsLifecycleLease) lifecycleLease.release();
+      throw error;
+    }
   };
   const componentForCapability = capability => registry.list().find(component => component?.installed
     && component.enabled !== false

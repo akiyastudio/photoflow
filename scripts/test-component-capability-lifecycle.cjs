@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
+const { getComponentLifecycleLease } = require('../electron/services/component-lifecycle-context.cjs');
 
 const descriptor = {
   componentId: 'fixture.component',
@@ -10,6 +11,7 @@ const runCase = async handler => {
   let acquired = 0; let released = 0; let observedContext;
   const lease = { componentId: descriptor.componentId, token: Symbol('lease'), release: () => { released += 1; } };
   const broker = new ComponentCapabilityBroker({ lifecycleCoordinator: {
+    isActiveWorkLease: (componentId, candidate) => componentId === descriptor.componentId && candidate === lease,
     acquireWork: (componentId, operation) => {
       acquired += 1;
       assert.equal(componentId, descriptor.componentId);
@@ -29,7 +31,9 @@ const runCase = async handler => {
 (async () => {
   const sync = await runCase(() => ({ ok: true }));
   assert.deepEqual(sync.broker.invoke(descriptor, 'component.settings', { action: 'get' }, { surface: 'project' }), { ok: true });
-  assert.equal(sync.context().lifecycleLease, sync.lease);
+  assert.equal(getComponentLifecycleLease(sync.context()), sync.lease);
+  assert.equal(Object.keys(sync.context()).includes('lifecycleLease'), false);
+  assert.equal(JSON.stringify(sync.context()).includes('lifecycleLease'), false);
   assert.deepEqual(sync.counts(), { acquired: 1, released: 1 });
 
   let resolveAsync;
@@ -43,6 +47,22 @@ const runCase = async handler => {
   const failure = await runCase(() => { throw new Error('fixture failure'); });
   assert.throws(() => failure.broker.invoke(descriptor, 'component.settings', { action: 'get' }, { surface: 'project' }), /fixture failure/);
   assert.deepEqual(failure.counts(), { acquired: 1, released: 1 });
+
+  let nestedAcquired = 0; let nestedReleased = 0; let activeLease = null;
+  const nestedBroker = new ComponentCapabilityBroker({ lifecycleCoordinator: {
+    acquireWork: componentId => {
+      nestedAcquired += 1;
+      activeLease = { componentId, token: Symbol(componentId), release: () => { nestedReleased += 1; activeLease = null; } };
+      return activeLease;
+    },
+    isActiveWorkLease: (componentId, lease) => lease === activeLease && lease?.componentId === componentId,
+  } });
+  nestedBroker.register('component.settings', (payload, context) => payload.action === 'outer'
+    ? nestedBroker.invoke(descriptor, 'component.settings', { action: 'inner' }, context)
+    : { ok: true });
+  assert.deepEqual(nestedBroker.invoke(descriptor, 'component.settings', { action: 'outer' }, { surface: 'project' }), { ok: true });
+  assert.equal(nestedAcquired, 1, 'nested capability reuses its parent lease');
+  assert.equal(nestedReleased, 1, 'only the parent owner releases the reused lease');
 
   console.log('Component capability lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

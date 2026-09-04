@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { createPluginService } = require('../electron/services/plugin-service.cjs');
+const { withComponentLifecycleLease } = require('../electron/services/component-lifecycle-context.cjs');
 
 const component = {
   id: 'fixture-runtime-component', installed: true, enabled: true, compatible: true,
@@ -25,14 +26,27 @@ const service = createPluginService({
     app: { isPackaged: false },
     registry: { list: () => [component], resolve: id => id === component.id ? component : null },
     runJsonCommand: async (run, label, _timeout, _onMessage, _signal, _deadline, supervision) => { supervisedCalls.push({ run, label, supervision }); return 'ok'; },
+    lifecycleCoordinator: { isActiveWorkLease: (componentId, lease) => componentId === component.id && lease === lifecycleLease },
   });
-  await supervised.runJsonForCapability('fixture.runtime.cli', [], 1000, undefined, undefined, undefined, { lifecycleLease });
-  await supervised.runJsonForComponentCapability(component.id, 'fixture.runtime.cli', [], 1000, undefined, undefined, undefined, { lifecycleLease });
-  await supervised.runJson(component.id, [], 1000, undefined, undefined, undefined, { lifecycleLease });
+  const supervisionContext = withComponentLifecycleLease({}, lifecycleLease);
+  await supervised.runJsonForCapability('fixture.runtime.cli', [], 1000, undefined, undefined, undefined, supervisionContext);
+  await supervised.runJsonForComponentCapability(component.id, 'fixture.runtime.cli', [], 1000, undefined, undefined, undefined, supervisionContext);
+  await supervised.runJson(component.id, [], 1000, undefined, undefined, undefined, supervisionContext);
   assert.equal(supervisedCalls.length, 3);
   for (const call of supervisedCalls) {
     assert.deepEqual(call.run.command, 'fixture-runtime.exe');
     assert.deepEqual(call.supervision, { componentId: component.id, lifecycleLease });
   }
+
+  let directAcquired = 0; let directReleased = 0; let finishDirect;
+  const direct = createPluginService({
+    app: { isPackaged: false }, registry: { list: () => [component], resolve: () => component },
+    lifecycleCoordinator: { isActiveWorkLease: () => false, acquireWork: componentId => { directAcquired += 1; return { componentId, release: () => { directReleased += 1; } }; } },
+    runJsonCommand: () => new Promise(resolve => { finishDirect = resolve; }),
+  });
+  const directRun = direct.runJson(component.id, [], 1000);
+  assert.equal(directAcquired, 1); assert.equal(directReleased, 0);
+  finishDirect('ok'); await directRun;
+  assert.equal(directReleased, 1, 'direct plugin runner owns its lease for the full promise');
   console.log('Plugin service manifest runtime capability resolution tests passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

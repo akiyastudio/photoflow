@@ -300,6 +300,16 @@ const main = async () => {
   assert.equal(gatedSpawnCount, 1, 'component restart cannot cross a transition gate');
   assert.equal(gatedRestart.status().state, 'failed');
   await gatedRestartSupervisor.stopAll();
+  let dynamicLease = { generation: 1 }; let dynamicSpawnCount = 0; const observedLeases = [];
+  const dynamicLeaseSupervisor = createProcessSupervisor({ terminationPlatform: 'test', spawnImpl: () => { dynamicSpawnCount += 1; return new FakeChild(9970 + dynamicSpawnCount); } });
+  dynamicLeaseSupervisor.lifecycleCoordinator = { assertLaunchAllowed: (_componentId, lease) => observedLeases.push(lease) };
+  const dynamicRestart = dynamicLeaseSupervisor.launch({ id: 'component:dynamic-lease', kind: 'component-service', owner: { componentId: 'fixture-component' }, getLifecycleLease: () => dynamicLease, command: 'fixture.exe', restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [20] } });
+  dynamicRestart.child.emit('exit', 1, null);
+  dynamicLease = { generation: 2 };
+  await delay(40);
+  assert.equal(dynamicSpawnCount, 2);
+  assert.equal(observedLeases.at(-1), dynamicLease, 'automatic restart resolves the current lifecycle lease instead of retaining the creation lease');
+  await dynamicLeaseSupervisor.stopAll();
   const pythonRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-python-resolver-'));
   try {
     const pythonPath = developmentPythonPath(pythonRoot);

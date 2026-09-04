@@ -129,6 +129,10 @@ class ComponentLifecycleCoordinator {
     return Boolean(this.work.get(String(componentId || ''))?.size);
   }
 
+  isActiveWorkLease(componentId, lease) {
+    return Boolean(lease && this.work.get(String(componentId || ''))?.has(lease));
+  }
+
   async waitForAllWork({ timeoutMs = 7500 } = {}) {
     const pending = [...this.work.keys()].map(componentId => new Promise(resolve => {
       const waiters = this.workWaiters.get(componentId) || new Set();
@@ -152,10 +156,10 @@ class ComponentLifecycleCoordinator {
 
   assertLaunchAllowed(componentId, lease) {
     const id = String(componentId || '');
-    const validWorkLease = lease?.componentId === id && this.work.get(id)?.has(lease);
-    if (validWorkLease && this.applicationQuitPhase !== 'stop' && this.applicationQuitPhase !== 'committed' && this.transitions.get(id)?.stopRequested !== true) return;
+    if (this.applicationQuitPhase === 'stop' || this.applicationQuitPhase === 'committed' || this.transitions.get(id)?.stopRequested === true) throw Object.assign(new Error('组件停止已确认，禁止启动新的组件进程'), { code: 'COMPONENT_QUIESCING' });
+    const validWorkLease = lease?.componentId === id && this.isActiveWorkLease(id, lease);
+    if (validWorkLease) return;
     if (this.globalQuiescing) throw Object.assign(new Error('应用正在退出，禁止启动新的组件进程'), { code: 'COMPONENT_QUIESCING' });
-    if (lease?.componentId === id && this.transitions.get(id)?.token === lease.token) return;
     this.assertAvailable(id);
   }
 

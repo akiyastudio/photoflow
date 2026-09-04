@@ -76,7 +76,7 @@ const createBundledPythonRuntime = ({
   const spawnSupervisedJob = ({ prefix, command, args, supervision = null }) => processSupervisor.launch({
     id: `${prefix}:${++supervisedJobSequence}`,
     kind: 'python-job',
-    ...(supervision?.componentId ? { owner: { componentId: supervision.componentId }, lifecycleLease: supervision.lifecycleLease } : {}),
+    ...(supervision?.componentId ? { owner: { componentId: supervision.componentId }, lifecycleLease: supervision.lifecycleLease, windowsJob: true } : {}),
     command,
     args,
     options: { stdio: ['ignore', 'pipe', 'pipe'] },
