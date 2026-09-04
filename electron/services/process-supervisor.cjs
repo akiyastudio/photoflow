@@ -1,7 +1,7 @@
 const { EventEmitter } = require('events');
 const { spawn: defaultSpawn } = require('child_process');
 const { stopProcessAndWait, terminateAndWait } = require('../infrastructure/process-termination.cjs');
-const { wrapComponentJobSpecification } = require('../infrastructure/windows-component-job.cjs');
+const { launchWindowsJobProcess } = require('../infrastructure/windows-job-process.cjs');
 
 const DEFAULT_RESTART_POLICY = Object.freeze({ enabled: false, maxRestarts: 0, windowMs: 60000, backoffMs: [100, 300, 1000] });
 const safeError = error => error?.message || String(error || 'unknown error');
@@ -28,6 +28,7 @@ class ManagedProcess extends EventEmitter {
     this.stopping = false;
     this.released = false;
     this.lifecycle = null;
+    this.stopPromise = null;
   }
 
   start() {
@@ -50,7 +51,10 @@ class ManagedProcess extends EventEmitter {
     const spec = this.specification;
     let child;
     try {
-      child = this.supervisor.spawnImpl(spec.command, spec.args || [], {
+      const spawnProcess = this.supervisor.terminationPlatform === 'win32' && spec.windowsJob === true
+        ? this.supervisor.spawnWindowsJobImpl
+        : this.supervisor.spawnImpl;
+      child = spawnProcess(spec.command, spec.args || [], {
         windowsHide: true,
         ...(spec.options || {}),
       });
@@ -63,12 +67,22 @@ class ManagedProcess extends EventEmitter {
     const lifecycle = {
       child, generation, stopRequested: false, settled: false, cleanupPromise: Promise.resolve(),
       startAfterSettle: false, lastHealthyAt: 0, stderrTail: '', finalizePromise: null,
-      terminationFailed: false, cleanupTimedOut: false,
+      terminationFailed: false, cleanupTimedOut: false, terminationPromise: null,
       settledPromise: new Promise(resolve => { resolveSettled = resolve; }), resolveSettled,
     };
     this.lifecycle = lifecycle;
     this.state = 'running';
     this._safeLog('info', 'Managed process started', this.details({ pid: child.pid, generation }));
+    if (child.ready && typeof child.ready.then === 'function') {
+      void child.ready.then(({ targetPid } = {}) => {
+        if (this.lifecycle !== lifecycle || lifecycle.settled) return;
+        this._safeLog('info', 'Managed Windows Job target started', this.details({ pid: child.pid, targetPid, generation }));
+        this._safeEmit('target-spawn', targetPid, child, generation);
+      }, error => {
+        if (this.lifecycle !== lifecycle || lifecycle.settled) return;
+        void this._onError(lifecycle, error);
+      });
+    }
     child.stderr?.on?.('data', data => {
       if (this.lifecycle !== lifecycle) return;
       lifecycle.stderrTail = (lifecycle.stderrTail + data.toString()).slice(-16000);
@@ -122,7 +136,7 @@ class ManagedProcess extends EventEmitter {
     if (!lifecycle || lifecycle.settled) return this.start();
     this._safeLog('warn', 'Managed process recycled', this.details({ reason, generation: lifecycle.generation }));
     lifecycle.stopRequested = true;
-    await stopProcessAndWait(lifecycle.child, timeoutMs, { rollbackSettleMs, platform: this.supervisor.terminationPlatform });
+    await this._terminateLifecycle(lifecycle, timeoutMs, rollbackSettleMs);
     if (!lifecycle.exitObserved && (lifecycle.child.exitCode != null || lifecycle.child.signalCode != null)) {
       await this._onExit(lifecycle, lifecycle.child.exitCode, lifecycle.child.signalCode);
     }
@@ -135,7 +149,15 @@ class ManagedProcess extends EventEmitter {
     return this.start();
   }
 
-  async stop(reason = 'shutdown', { release = true, timeoutMs = this.specification.windowsJob ? 12000 : 2000, rollbackSettleMs = 25 } = {}) {
+  stop(reason = 'shutdown', options = {}) {
+    if (this.stopPromise) return this.stopPromise;
+    const operation = this._stopOnce(reason, options);
+    this.stopPromise = operation.finally(() => { if (this.stopPromise === tracked) this.stopPromise = null; });
+    const tracked = this.stopPromise;
+    return tracked;
+  }
+
+  async _stopOnce(reason = 'shutdown', { release = true, timeoutMs = 2000, rollbackSettleMs = 25 } = {}) {
     this.stopping = true;
     this.state = 'stopping';
     this._restartReason = null;
@@ -146,7 +168,16 @@ class ManagedProcess extends EventEmitter {
     const child = this.child;
     const lifecycle = this.lifecycle;
     if (lifecycle) lifecycle.stopRequested = true;
-    await stopProcessAndWait(child, timeoutMs, { rollbackSettleMs, platform: this.supervisor.terminationPlatform });
+    try {
+      if (lifecycle) await this._terminateLifecycle(lifecycle, timeoutMs, rollbackSettleMs);
+      else await stopProcessAndWait(child, timeoutMs, { rollbackSettleMs, platform: this.supervisor.terminationPlatform });
+    } catch (error) {
+      if (lifecycle) lifecycle.terminationFailed = true;
+      this.state = 'failed';
+      this.lastExit = { at: this.supervisor.now(), generation: lifecycle?.generation || this.generation, expected: true, terminationPending: true, error: safeError(error) };
+      throw error;
+    }
+    if (lifecycle) lifecycle.terminationFailed = false;
     if (lifecycle && !lifecycle.exitObserved && (child?.exitCode != null || child?.signalCode != null)) {
       await this._onExit(lifecycle, child.exitCode, child.signalCode);
     }
@@ -156,6 +187,16 @@ class ManagedProcess extends EventEmitter {
     this._safeLog('info', 'Managed process stopped', this.details({ reason }));
     if (release) this.release();
     return { stopped: true };
+  }
+
+  _terminateLifecycle(lifecycle, timeoutMs, rollbackSettleMs) {
+    if (lifecycle.terminationPromise) return lifecycle.terminationPromise;
+    const operation = stopProcessAndWait(lifecycle.child, timeoutMs, { rollbackSettleMs, platform: this.supervisor.terminationPlatform }).then(result => {
+      lifecycle.terminationFailed = false; return result;
+    }, error => { lifecycle.terminationFailed = true; throw error; });
+    const tracked = operation.finally(() => { if (lifecycle.terminationPromise === tracked) lifecycle.terminationPromise = null; });
+    lifecycle.terminationPromise = tracked;
+    return tracked;
   }
 
   release() {
@@ -171,6 +212,8 @@ class ManagedProcess extends EventEmitter {
       owner: this.owner || undefined,
       state: this.state,
       pid: this.child?.pid || null,
+      controlPid: this.child?.pid || null,
+      targetPid: this.child?.targetPid || null,
       generation: this.generation,
       startedAt: this.startedAt,
       lastHealthyAt: this.lastHealthyAt,
@@ -240,10 +283,19 @@ class ManagedProcess extends EventEmitter {
 
   async _onExit(lifecycle, code, signal) {
     lifecycle.exitObserved = true;
-    const jobVerdict = lifecycle.child?.__photoFlowJobControl ? await lifecycle.child.__photoFlowJobControl.terminalVerdict : null;
-    const terminationFailed = Boolean(jobVerdict && jobVerdict.confirmed !== true);
-    lifecycle.terminationFailed = terminationFailed;
-    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error, terminationFailed });
+    if (lifecycle.child.__photoFlowJobManaged && !lifecycle.child.__photoFlowTreeExitConfirmed) {
+      lifecycle.terminationFailed = true;
+      this.state = 'failed';
+      this.lastExit = {
+        at: this.supervisor.now(), generation: lifecycle.generation, code, signal, expected: false,
+        stderr: lifecycle.stderrTail.trim(), terminationPending: true,
+        error: 'Windows Job exited without an authoritative ActiveProcesses=0 confirmation',
+      };
+      this._safeLog('error', 'Managed Windows Job termination is unconfirmed', this.details(this.lastExit));
+      return Promise.resolve(this.lastExit);
+    }
+    lifecycle.terminationFailed = false;
+    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
   }
 
   _finalizeLifecycle(lifecycle, { code = null, signal = null, error = null, terminationFailed = false } = {}) {
@@ -326,10 +378,9 @@ class ManagedProcess extends EventEmitter {
 
   async _onClose(lifecycle, code, signal) {
     lifecycle.closeObserved = true;
-    const jobVerdict = lifecycle.child?.__photoFlowJobControl ? await lifecycle.child.__photoFlowJobControl.terminalVerdict : null;
-    const terminationFailed = Boolean(jobVerdict && jobVerdict.confirmed !== true);
-    lifecycle.terminationFailed = terminationFailed;
-    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error, terminationFailed });
+    if (lifecycle.child.__photoFlowJobManaged && !lifecycle.child.__photoFlowTreeExitConfirmed) return this._onExit(lifecycle, code, signal);
+    lifecycle.terminationFailed = false;
+    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
   }
 
   _settleLifecycle(lifecycle) {
@@ -395,8 +446,9 @@ class ManagedProcess extends EventEmitter {
 }
 
 class ProcessSupervisor {
-  constructor({ spawnImpl = defaultSpawn, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform, nativeJobHostPath, enableNativeComponentJobs = spawnImpl === defaultSpawn } = {}) {
+  constructor({ spawnImpl = defaultSpawn, spawnWindowsJobImpl = null, windowsJobOptions = {}, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform } = {}) {
     this.spawnImpl = spawnImpl;
+    this.spawnWindowsJobImpl = spawnWindowsJobImpl || ((command, args, options) => launchWindowsJobProcess(command, args, options, windowsJobOptions));
     this.writeLog = writeLog;
     this.now = now;
     this.terminationPlatform = terminationPlatform;
@@ -461,7 +513,9 @@ class ProcessSupervisor {
 
   async stopAll(reason = 'application-shutdown') {
     this.stopping = true;
-    await Promise.all([...this.processes.values()].map(process => process.stop(reason)));
+    const results = await Promise.allSettled([...this.processes.values()].map(process => process.stop(reason)));
+    const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) { this.stopping = false; throw new AggregateError(errors, 'Unable to stop every managed process'); }
     this.processes.clear();
   }
 }

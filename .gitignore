@@ -53,6 +53,7 @@ env/
 !/artifacts/publish-release.bat
 /out/
 /electron/bin/
+/electron/generated/
 /media-runtime/vendor/
 /components1/
 

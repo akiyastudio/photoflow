@@ -559,7 +559,15 @@ const registerSystemIpc = context => {
     queueComponentStatusRefresh(true);
   };
   const componentLifecycleService = createComponentLifecycleService({
-    app, backgroundTasks, pluginService, spawn, processSupervisor,
+    app, backgroundTasks, pluginService,
+    spawn: (command, args, options = {}) => processSupervisor.launch({
+      id: `component-lifecycle:${String(options.env?.PHOTOFLOW_COMPONENT_ID || 'unknown')}:${crypto.randomUUID()}`,
+      kind: 'component-lifecycle', owner: { componentId: String(options.env?.PHOTOFLOW_COMPONENT_ID || '') },
+      command: String(command).toLowerCase() === 'powershell.exe'
+        ? path.join(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+        : command,
+      args, options, windowsJob: true, ephemeral: true,
+    }).child,
     developmentActionRoot: path.resolve(__dirname, '..', '..', 'scripts'),
     invalidateComponentStatus, writeLog,
   });

@@ -255,7 +255,7 @@ const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 const processSupervisor = createProcessSupervisor({
   writeLog: (...args) => writeLog(...args),
-  nativeJobHostPath: app.isPackaged ? path.join(process.resourcesPath, 'component-job-host.exe') : path.join(__dirname, 'bin', 'component-job-host.exe'),
+  windowsJobOptions: { packaged: app.isPackaged, resourcesPath: process.resourcesPath },
 });
 const componentLifecycleCoordinator = new ComponentLifecycleCoordinator({ blocker: componentId => processSupervisor.hasUnconfirmedOwner(componentId) });
 processSupervisor.lifecycleCoordinator = componentLifecycleCoordinator;

@@ -21,7 +21,9 @@ const makeChild = () => {
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
-  child.pid = 123;
+  child.pid = 999;
+  child.targetPid = 123;
+  child.ready = Promise.resolve({ targetPid: 123 });
   child.stdinLines = [];
   child.stdin.on('data', chunk => child.stdinLines.push(...chunk.toString('utf8').trim().split(/\r?\n/).filter(Boolean).map(line => { const envelope = JSON.parse(line), semantic = envelope.event.slice('command.'.length); return { command: v1ToLegacyCommand[semantic] || semantic, ...envelope.payload }; })));
   child.killed = false;
@@ -49,13 +51,14 @@ const run = async () => {
   const children = [];
   const spawned = [];
   const surfaceBounds = [];
+  const surfacePids = [];
   let uuidIndex = 0;
   const service = createAdvancedVideoService({
     captureService: makeCaptures(),
     BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
     crypto: { randomUUID: () => `session-${++uuidIndex}` },
     mediaInputSessionService: makeMediaInputs(),
-    nativeSurfaceService: { attach: async () => ({ setBounds: value => surfaceBounds.push(value), close: () => undefined }) },
+    nativeSurfaceService: { attach: async request => { surfacePids.push(request.componentProcess.pid); return { setBounds: value => surfaceBounds.push(value), close: () => undefined }; } },
     path,
     playbackBroker: { defaultBackendId: () => 'fixture-backend',
       resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\fixture-playback-backend.exe', args }),
@@ -75,6 +78,7 @@ const run = async () => {
   const child = children[0];
   const stdinLines = child.stdinLines;
   assert.strictEqual(result.sessionId, 'session-1');
+  assert.deepStrictEqual(surfacePids, [123], 'native playback surfaces must bind the real target PID, not the Job helper PID');
   assert.strictEqual(spawned[0].options.windowsHide, true);
   assert.deepStrictEqual(spawned[0].args, ['--session-id', 'session-1']);
   assert.deepStrictEqual(stdinLines[0], { command: 'open', path: path.resolve(sourceVideo) });

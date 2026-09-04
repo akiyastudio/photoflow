@@ -289,7 +289,7 @@ class ComponentServiceManager {
       prepareReady(session);
       session.managed = this.processSupervisor.launch({
         id: `component-service:${componentId}`,
-        kind: 'component-service', command, args, options, owner: { componentId }, windowsJob: true,
+        kind: 'component-service', owner: { componentId }, command, args, options, windowsJob: true,
         health: { startupTimeoutMs: 15000 },
         restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
         onSpawn: (child, managed) => this.attach(session, child, managed),

@@ -85,11 +85,11 @@ const createPluginService = ({ app, registry, runJsonCommand, processSupervisor 
     },
     runJsonForCapability: (capability, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => {
       const { component, declaration } = runtimeCapability(capability);
-      return runComponentJsonCommand({ ...resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), componentId: component.id }, `Component capability ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt);
+      return runJsonCommand(resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), `Component capability ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt, { componentId: component.id });
     },
     runJsonForComponentCapability: (componentId, capability, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => {
       const { component, declaration } = componentRuntimeCapability(componentId, capability);
-      return runComponentJsonCommand({ ...resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), componentId: component.id }, `Component runtime ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt);
+      return runJsonCommand(resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), `Component runtime ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt, { componentId: component.id });
     },
     verifyComponentDirectory: (pluginId, componentRoot, force = true) => registry.verifyDirectory(pluginId, componentRoot, force),
     verifyComponentDirectoryAsync: (pluginId, componentRoot, force = true) => registry.verifyDirectoryAsync(pluginId, componentRoot, force),
@@ -98,8 +98,8 @@ const createPluginService = ({ app, registry, runJsonCommand, processSupervisor 
     setComponentEnabled: (pluginId, enabled) => registry.setComponentEnabled(pluginId, enabled),
     clearComponentEnabledState: pluginId => registry.clearComponentEnabledState(pluginId),
     requireCapability,
-    runJson: (pluginId, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => runComponentJsonCommand(
-      { ...resolveRunConfig(pluginId, args), componentId: pluginId }, `Plugin ${pluginId}`, timeoutMs, onMessage, signal, requestedDeadlineAt,
+    runJson: (pluginId, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => runJsonCommand(
+      resolveRunConfig(pluginId, args), `Plugin ${pluginId}`, timeoutMs, onMessage, signal, requestedDeadlineAt, { componentId: pluginId },
     ),
     installRoot: registry.installRoot,
     ensureInstallRoot: () => registry.ensureInstallRoot(),
