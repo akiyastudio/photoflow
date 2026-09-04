@@ -5,7 +5,7 @@ const { componentDataRoot, createComponentLifecycleService } = require('../servi
 const { createComponentTransactionService, nodeIdentity: componentPathIdentity } = require('../services/component-transaction-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
-const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, componentTreeIdentityDigest, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
+const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, componentTreeIdentityDigest, extractComponentArchive, finalizeComponentCleanupProof, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 const { validateComponentPackageInspection } = require('../component-registry.cjs');
 
@@ -413,9 +413,48 @@ const savePrivacyConsentWithConfig = async ({ request, privacyService, configMut
 };
 
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, fileSystemService, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, filePublicationService, fileSystemService, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
   const lifecycleCoordinator = processSupervisor?.lifecycleCoordinator;
+  const componentCleanupPublicationService = filePublicationService;
+  const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath }) => {
+    if (!componentCleanupPublicationService.nativeAvailable()) throw new Error('对象身份绑定删除服务不可用');
+    const batchesByBudget = (items, measure, maxItems) => { const batches = []; let batch = []; let bytes = 0; for (const item of items) { const itemBytes = measure(item); if (itemBytes > 400 * 1024) throw new Error('单个组件清理路径超过原生清单预算'); if (batch.length && (batch.length >= maxItems || bytes + itemBytes > 400 * 1024)) { batches.push(batch); batch = []; bytes = 0; } batch.push(item); bytes += itemBytes; } if (batch.length) batches.push(batch); return batches; };
+    if (receipt.kind === 'file') {
+      const stat = await fs.promises.lstat(isolatedPath); const hash = crypto.createHash('sha256');
+      for await (const chunk of fs.createReadStream(isolatedPath)) hash.update(chunk);
+      const inspected = await componentCleanupPublicationService.inspectPath(isolatedPath);
+      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: isolatedPath, sha256: hash.digest('hex'), size: stat.size, identity: inspected.identity });
+      if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw Object.assign(new Error('原生文件清理未完全提交'), { outcomeUnknown: Boolean(deleted?.outcomeUnknown) });
+      return;
+    }
+    const tree = await captureComponentTreeIdentity(isolatedPath);
+    const entries = [{ path: '', kind: 'directory' }, ...tree];
+    const absoluteFor = entry => entry.path ? path.join(isolatedPath, ...entry.path.split('/')) : isolatedPath;
+    const volumeRoot = path.parse(isolatedPath).root;
+    const anchorPaths = []; for (let current = isolatedPath; ; current = path.dirname(current)) { anchorPaths.unshift(current); if (current === volumeRoot) break; }
+    const identityByPath = new Map();
+    const inspectTargets = [...new Set([...anchorPaths, ...entries.map(absoluteFor)])];
+    for (const batchPaths of batchesByBudget(inspectTargets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) {
+      const inspected = await componentCleanupPublicationService.inspectPathsBatch(batchPaths);
+      if (inspected.length !== batchPaths.length || inspected.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整');
+      batchPaths.forEach((target, index) => identityByPath.set(target, inspected[index].identity));
+    }
+    const parentChainFor = target => { const chain = []; for (let current = path.dirname(target); ; current = path.dirname(current)) { chain.unshift({ path: current, identity: identityByPath.get(current) }); if (current === volumeRoot) break; } return chain; };
+    const files = tree.filter(entry => entry.kind === 'file').map(entry => { const target = absoluteFor(entry); return { path: target, rootPath: volumeRoot, parentChain: parentChainFor(target), identity: identityByPath.get(target), size: entry.size, sha256: entry.sha256 }; });
+    for (const batch of batchesByBudget(files, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
+      const results = await componentCleanupPublicationService.compareDeleteFilesBatch(batch);
+      if (results.some(item => !item?.success || item.deleted !== true || item.outcomeUnknown)) throw Object.assign(new Error('原生批量文件清理未完全提交'), { outcomeUnknown: results.some(item => item?.outcomeUnknown) });
+    }
+    const directories = entries.filter(entry => entry.kind === 'directory').sort((a, b) => b.path.split('/').length - a.path.split('/').length);
+    for (const depth of [...new Set(directories.map(entry => entry.path ? entry.path.split('/').length : 0))].sort((a, b) => b - a)) {
+      const layer = directories.filter(entry => (entry.path ? entry.path.split('/').length : 0) === depth).map(entry => { const target = absoluteFor(entry); return { path: target, rootPath: volumeRoot, parentChain: parentChainFor(target), identity: identityByPath.get(target) }; });
+      for (const batch of batchesByBudget(layer, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
+        const results = await componentCleanupPublicationService.deleteDirectoriesBatch(batch);
+        if (results.some(item => !item?.success || item.deleted !== true || item.outcomeUnknown)) throw Object.assign(new Error('原生批量目录清理未完全提交'), { outcomeUnknown: results.some(item => item?.outcomeUnknown) });
+      }
+    }
+  };
   const mutateConfig = configMutationService.mutate;
   ipcMain.handle('domain-health-status', () => ({
     success: true,
@@ -619,7 +658,7 @@ const registerSystemIpc = context => {
       task?.report(10, title);
       const failures = [];
       for (const target of targets) try {
-        await cleanupOwnedComponentPath(target);
+        await cleanupOwnedComponentPath(target, { deleteOwned: deleteOwnedComponentIsolation });
       } catch (error) {
         const updated = error.cleanupPendingReceipts?.[0];
         if (updated) Object.assign(target, updated);
@@ -628,22 +667,30 @@ const registerSystemIpc = context => {
         writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) });
       }
       if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
-      task?.report(100, '清理完成');
+      task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
+      if (backgroundTasks?.flush?.() !== true) throw Object.assign(new Error('无法同步持久化组件清理完成前状态'), { cleanupPendingReceipts: targets });
       return { removedCount: targets.length };
     };
     if (!backgroundTasks?.run) {
-      setTimeout(() => void execute().catch(error => writeLog('warn', 'Deferred system cleanup remains pending', { paths: error.cleanupPendingPaths, error: error.message || String(error) })), 0);
+      writeLog('warn', 'Persistent background task service unavailable; component cleanup retained for manual recovery', { targets: targets.map(target => target.path) });
       return;
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
-    const run = () => backgroundTasks.run({
+    const run = async () => {
+      const completion = await backgroundTasks.run({
       ...(restartTask?.id ? { id: restartTask.id } : {}),
       type: 'system-filesystem-cleanup',
       title,
       dedupeKey,
       cancellable: false,
       metadata: { targets, title },
-    }, execute, run);
+      }, execute, run);
+      if (completion?.task?.state === 'completed') {
+        if (backgroundTasks.flush?.() !== true) throw Object.assign(new Error('组件清理任务完成状态无法同步持久化'), { cleanupPendingReceipts: targets });
+        for (const target of targets) await finalizeComponentCleanupProof(target);
+      }
+      return completion;
+    };
     if (restartTask?.id) return run();
     setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) })), 250);
   };
