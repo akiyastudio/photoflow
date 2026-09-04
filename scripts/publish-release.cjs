@@ -7,6 +7,7 @@ const releaseConfig = require('./release-config.cjs');
 const { verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release-staging.cjs');
 const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
 const { captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
+const { runPublishStateMachine } = require('./release-publish-state.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
@@ -224,30 +225,29 @@ const run = async () => {
     const attemptRoot = path.join(repositoryRoot, 'artifacts', 'release-publish-attempts'); fs.mkdirSync(attemptRoot, { recursive: true });
     const attemptPath = path.join(attemptRoot, `${stagedEvidence.manifestSha256}.json`);
     if (fs.existsSync(attemptPath)) throw new Error(`此交付清单已有发布尝试；为避免重复线上记录，请先人工核验：${attemptPath}`);
-    fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'pending', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     const outputRoot = path.join(repositoryRoot, 'artifacts', 'cloudbase'); fs.mkdirSync(outputRoot, { recursive: true });
     const outputPath = path.join(outputRoot, `app-release-${version}.json`);
     const priorIdentity = fs.existsSync(outputPath) ? captureArtifactIdentity(outputPath) : null;
     const temporaryPath = `${outputPath}.${stagedEvidence.manifestSha256}.pending`;
     const backupPath = `${outputPath}.${stagedEvidence.manifestSha256}.backup`;
-    fs.rmSync(temporaryPath, { force: true });
-    let preparedFd;
-    try { preparedFd = fs.openSync(temporaryPath, 'wx'); fs.writeFileSync(preparedFd, `${JSON.stringify(record, null, 2)}\n`); fs.fsyncSync(preparedFd); }
-    finally { if (preparedFd !== undefined) fs.closeSync(preparedFd); }
-    try { await publishReleaseOnce({ url: `${String(releaseConfig.apiBaseUrl).replace(/\/+$/, '')}/v1/admin/releases`, token, record, idempotencyKey: stagedEvidence.manifestSha256 }); }
-    catch (error) { throw new Error(`线上发布结果未确认；pending 尝试已保留且自动重试被禁止：${error.message || error}`); }
-    try {
-      if (priorIdentity) assertSourceIdentity(outputPath, priorIdentity);
-      else if (fs.existsSync(outputPath)) throw new Error('本地 release 记录在发布期间被其他进程创建');
-      if (priorIdentity) fs.renameSync(outputPath, backupPath);
-      fs.renameSync(temporaryPath, outputPath);
-      fs.rmSync(backupPath, { force: true });
-      fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'committed', manifestSha256: stagedEvidence.manifestSha256, version }, null, 2)}\n`);
-    } catch (error) {
-      fs.writeFileSync(attemptPath, `${JSON.stringify({ schemaVersion: 1, state: 'remote-saved-local-pending', manifestSha256: stagedEvidence.manifestSha256, version, preparedPath: temporaryPath, backupPath: fs.existsSync(backupPath) ? backupPath : null }, null, 2)}\n`);
-      throw new Error(`线上发布已确认，但本地记录落盘失败；禁止重发，请按 pending 记录修复：${error.message || error}`);
-    }
-    assertStagedReleaseUnchanged(stagedEvidence);
+    const attemptBase = { schemaVersion: 1, manifestSha256: stagedEvidence.manifestSha256, version };
+    await runPublishStateMachine({
+      writeInitialPending: state => fs.writeFileSync(attemptPath, `${JSON.stringify({ ...attemptBase, ...state }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' }),
+      prepareLocalRecord: () => {
+        fs.rmSync(temporaryPath, { force: true }); let fd;
+        try { fd = fs.openSync(temporaryPath, 'wx'); fs.writeFileSync(fd, `${JSON.stringify(record, null, 2)}\n`); fs.fsyncSync(fd); }
+        finally { if (fd !== undefined) fs.closeSync(fd); }
+      },
+      publishRemote: () => publishReleaseOnce({ url: `${String(releaseConfig.apiBaseUrl).replace(/\/+$/, '')}/v1/admin/releases`, token, record, idempotencyKey: stagedEvidence.manifestSha256 }),
+      promoteLocalRecord: () => {
+        if (priorIdentity) assertSourceIdentity(outputPath, priorIdentity); else if (fs.existsSync(outputPath)) throw new Error('本地 release 记录在发布期间被其他进程创建');
+        if (priorIdentity) fs.renameSync(outputPath, backupPath);
+        fs.renameSync(temporaryPath, outputPath);
+        fs.rmSync(backupPath, { force: true });
+      },
+      assertArtifactsUnchanged: () => assertStagedReleaseUnchanged(stagedEvidence),
+      writeState: state => fs.writeFileSync(attemptPath, `${JSON.stringify({ ...attemptBase, ...state, preparedPath: fs.existsSync(temporaryPath) ? temporaryPath : null, backupPath: fs.existsSync(backupPath) ? backupPath : null }, null, 2)}\n`),
+    });
 
     console.log(`\n版本 ${version} 已发布完成。`);
   } finally {

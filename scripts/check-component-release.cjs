@@ -24,6 +24,7 @@ const steps = [
   ['release workflow order', process.execPath, ['scripts/test-release-workflow-order.cjs']],
   ['stable release staging', process.execPath, ['scripts/test-release-staging.cjs']],
   ['release publish confirmation', process.execPath, ['scripts/test-release-publish-confirmation.cjs']],
+  ['release publish state machine', process.execPath, ['scripts/test-release-publish-state.cjs']],
   ['declared package layouts', process.execPath, [npmCli, 'run', 'test:component-package-layout']],
   ['video playback full package tests', process.execPath, [npmCli, '--prefix', 'extensions/video-playback-mpv', 'test']],
   ['video tools full package tests', process.execPath, [npmCli, '--prefix', 'extensions/video-tools', 'test']],
