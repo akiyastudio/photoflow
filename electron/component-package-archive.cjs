@@ -846,5 +846,6 @@ module.exports = {
   persistComponentCleanupIntent,
   snapshotComponentArchive,
   validateComponentTreeIdentityReceipt,
+  validatePreparedSidecarReceipts,
   verifyComponentTreeIdentity,
 };

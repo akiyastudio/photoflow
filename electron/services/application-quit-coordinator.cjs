@@ -1,4 +1,4 @@
-const activeProcess = status => !['idle', 'stopped', 'exited'].includes(status.state);
+const { isActiveManagedProcessStatus } = require('./process-supervisor.cjs');
 
 const registerMainWindowQuitGuard = ({ window, app, getQuitState, platform = process.platform }) => {
   if (platform === 'darwin') return () => undefined;
@@ -27,7 +27,7 @@ const runApplicationQuit = async ({
   const initialStatuses = processSupervisor.list();
   const supervisedOwnerIds = initialStatuses.map(status => String(status.owner?.componentId || '').trim()).filter(Boolean);
   const guardedComponentIds = [...new Set([...componentIds, ...supervisedOwnerIds])];
-  const background = initialStatuses.filter(status => status.owner?.componentId && (activeProcess(status) || status.terminationFailed === true));
+  const background = initialStatuses.filter(status => status.owner?.componentId && isActiveManagedProcessStatus(status));
   if (background.length && !await confirmBackgroundProcesses(background)) {
     componentLifecycleCoordinator.cancelApplicationQuit();
     throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
@@ -44,7 +44,7 @@ const runApplicationQuit = async ({
     await componentLifecycleCoordinator.waitForAllWork({ timeoutMs: 7500 });
     await processSupervisor.stopAll('application-quit');
     const finalStatuses = processSupervisor.list();
-    const remainingOwners = finalStatuses.filter(status => status.owner?.componentId && (activeProcess(status) || status.terminationFailed === true));
+    const remainingOwners = finalStatuses.filter(status => status.owner?.componentId && isActiveManagedProcessStatus(status));
     const stickyUnconfirmedIds = guardedComponentIds.filter(componentId => processSupervisor.hasUnconfirmedOwner?.(componentId) === true);
     const unconfirmedIds = [...new Set([...remainingOwners.map(status => String(status.owner.componentId)), ...stickyUnconfirmedIds])];
     if (unconfirmedIds.length) throw Object.assign(new Error('组件后台进程树终止状态仍未确认'), { code: 'PROCESS_TERMINATION_FAILED', componentIds: unconfirmedIds });

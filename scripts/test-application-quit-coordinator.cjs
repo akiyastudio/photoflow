@@ -13,7 +13,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
     commitApplicationQuit: () => events.push('commit'),
   };
   const processSupervisor = {
-    list: () => processesPresent ? [{ state: 'running', owner: { componentId: 'fixture.component' } }] : [],
+    list: () => processesPresent ? [{ state: 'running', pid: 1234, owner: { componentId: 'fixture.component' } }] : [],
     stopWhere: async () => events.push('component-processes-stopped'),
     stopAll: async () => {
       events.push('all-processes-stop');
@@ -70,6 +70,12 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   await runApplicationQuit(continued.options);
   assert(continued.events.indexOf('all-processes-stopped') < continued.events.indexOf('commit'));
   assert(continued.events.indexOf('commit') < continued.events.indexOf('video-disposed'));
+
+  const exhausted = fixture({ background: false, confirm: true });
+  exhausted.options.processSupervisor.list = () => [{ state: 'failed', pid: null, targetPid: null, terminationFailed: false, owner: { componentId: 'fixture.component' } }];
+  exhausted.options.processSupervisor.hasUnconfirmedOwner = () => false;
+  await runApplicationQuit(exhausted.options);
+  assert.equal(exhausted.events.includes('prompt'), false, 'restart-exhausted entries without a live child do not prompt on quit');
 
   const retry = fixture({ confirm: true, failStopOnce: true });
   await assert.rejects(runApplicationQuit(retry.options), error => error.code === 'PROCESS_TERMINATION_FAILED');

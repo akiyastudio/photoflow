@@ -5,6 +5,7 @@ const { launchWindowsJobProcess } = require('../infrastructure/windows-job-proce
 
 const DEFAULT_RESTART_POLICY = Object.freeze({ enabled: false, maxRestarts: 0, windowMs: 60000, backoffMs: [100, 300, 1000] });
 const safeError = error => error?.message || String(error || 'unknown error');
+const isActiveManagedProcessStatus = status => status?.terminationFailed === true || status?.pid != null || status?.targetPid != null || status?.state === 'restarting';
 
 class ManagedProcess extends EventEmitter {
   constructor(supervisor, specification) {
@@ -505,7 +506,7 @@ class ProcessSupervisor {
   hasWhere(predicate) {
     return [...this.processes.values()].some(process => {
       const status = process.status();
-      return predicate(status) && !['idle', 'stopped', 'exited'].includes(status.state);
+      return predicate(status) && isActiveManagedProcessStatus(status);
     });
   }
 
@@ -536,4 +537,4 @@ class ProcessSupervisor {
 
 const createProcessSupervisor = options => new ProcessSupervisor(options);
 
-module.exports = { DEFAULT_RESTART_POLICY, ManagedProcess, ProcessSupervisor, createProcessSupervisor, stopProcessAndWait, terminateAndWait };
+module.exports = { DEFAULT_RESTART_POLICY, ManagedProcess, ProcessSupervisor, createProcessSupervisor, isActiveManagedProcessStatus, stopProcessAndWait, terminateAndWait };

@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { awaitDurableCleanupRestart, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { awaitDurableCleanupRestart, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 
@@ -194,19 +194,15 @@ try {
   await assert.rejects(extractComponentArchive(corruptInspection, path.join(temporaryRoot, 'corrupt-out')), /CRC-32/);
 
   const raceRoot = path.join(temporaryRoot, 'race-install'); const raceContainer = path.join(raceRoot, 'third-party.tool');
-  const raceDestination = path.join(raceContainer, 'runtime'); const raceBackup = path.join(raceRoot, '.backup'); const raceStaging = path.join(raceRoot, '.staging');
+  const raceDestination = path.join(raceContainer, 'runtime'); const raceStaging = path.join(raceRoot, '.staging');
   fs.mkdirSync(raceContainer, { recursive: true });
   const safeLocation = await prepareSafeComponentInstallContainer({ fs, path, installRoot: raceRoot, componentId: 'third-party.tool' });
   assert.equal(safeLocation.container, raceContainer);
-  fs.mkdirSync(raceBackup); fs.writeFileSync(path.join(raceBackup, 'old.txt'), 'old runtime');
-  const backupStat = fs.lstatSync(raceBackup); const backupNodeIdentity = { dev: backupStat.dev, ino: backupStat.ino, birthtimeMs: backupStat.birthtimeMs };
-  const backupTreeIdentity = await captureComponentTreeIdentity(raceBackup);
   fs.mkdirSync(raceStaging); fs.writeFileSync(path.join(raceStaging, 'new.txt'), 'new runtime');
   fs.mkdirSync(raceDestination); fs.writeFileSync(path.join(raceDestination, 'competitor.txt'), 'do not delete');
   await assert.rejects(fs.promises.rename(raceStaging, raceDestination));
-  await assert.rejects(rollbackComponentPublication({ fs, destination: raceDestination, publishedByThisOperation: false, publishedNodeIdentity: null, publishedTreeIdentity: [], backupPath: raceBackup, backupNodeIdentity, backupTreeIdentity }), /其他操作占用/);
-  assert.equal(fs.readFileSync(path.join(raceDestination, 'competitor.txt'), 'utf8'), 'do not delete', 'a destination created before rename is never deleted by rollback');
-  assert.equal(fs.readFileSync(path.join(raceBackup, 'old.txt'), 'utf8'), 'old runtime', 'the captured backup is preserved when a competitor owns destination');
+  assert.equal(fs.readFileSync(path.join(raceDestination, 'competitor.txt'), 'utf8'), 'do not delete', 'a destination created before publication is never deleted');
+  assert.equal(fs.readFileSync(path.join(raceStaging, 'new.txt'), 'utf8'), 'new runtime', 'failed no-clobber publication preserves caller-owned staging');
 
   const junctionRoot = path.join(temporaryRoot, 'junction-install'); const external = path.join(temporaryRoot, 'external-target');
   fs.mkdirSync(junctionRoot); fs.mkdirSync(external); fs.writeFileSync(path.join(external, 'sentinel.txt'), 'outside');

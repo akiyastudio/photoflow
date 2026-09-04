@@ -285,11 +285,19 @@ const main = async () => {
     status: () => ({ id: 'retry-fixture', state: 'running' }),
     stop: async () => { if (rejectStop) throw new Error('termination failed'); },
   });
-  await assert.rejects(retrySupervisor.stopAll('first-quit'), /termination failed/);
+  await assert.rejects(retrySupervisor.stopAll('first-quit'), error => error instanceof AggregateError && error.errors.some(cause => /termination failed/.test(cause.message)));
   assert.equal(retrySupervisor.stopping, false, 'failed stopAll must reopen admission for a safe retry');
   rejectStop = false;
   await retrySupervisor.stopAll('second-quit');
   assert.deepStrictEqual(retrySupervisor.list(), []);
+  const ownershipSupervisor = createProcessSupervisor({ terminationPlatform: 'test' });
+  ownershipSupervisor.processes.set('exhausted', { owner: { componentId: 'fixture-component' }, lifecycle: { terminationFailed: false }, status: () => ({ id: 'exhausted', state: 'failed', pid: null, targetPid: null, terminationFailed: false, owner: { componentId: 'fixture-component' } }), stop: async () => undefined });
+  assert.equal(ownershipSupervisor.hasComponentOwnerProcesses('fixture-component'), false, 'restart-exhausted failed entries without a live child do not prompt');
+  let stickyStopAttempts = 0;
+  ownershipSupervisor.processes.set('sticky', { owner: { componentId: 'sticky-component' }, lifecycle: { terminationFailed: true }, status: () => ({ id: 'sticky', state: 'failed', pid: null, targetPid: null, terminationFailed: true, owner: { componentId: 'sticky-component' } }), stop: async () => { stickyStopAttempts += 1; } });
+  assert.equal(ownershipSupervisor.hasComponentOwnerProcesses('sticky-component'), true, 'sticky termination failure remains actionable without a pid');
+  await ownershipSupervisor.stopWhere(status => status.owner?.componentId === 'sticky-component');
+  assert.equal(stickyStopAttempts, 1, 'stopWhere can retry sticky unconfirmed owners');
   let restartGate = false; let gatedSpawnCount = 0;
   const gatedRestartSupervisor = createProcessSupervisor({ terminationPlatform: 'test', spawnImpl: () => { gatedSpawnCount += 1; return new FakeChild(9950 + gatedSpawnCount); } });
   gatedRestartSupervisor.lifecycleCoordinator = { assertLaunchAllowed: () => { if (restartGate) throw Object.assign(new Error('transition active'), { code: 'COMPONENT_QUIESCING' }); } };
