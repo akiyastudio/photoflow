@@ -443,6 +443,11 @@ const registerSystemIpc = context => {
     try { const stat = await handle.stat(); const native = await componentCleanupPublicationService.inspectPath(item.path); const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk); const linked = await fs.promises.lstat(item.path); if (!native?.success || !native.identity || stat.size !== expected.length || hash.digest('hex') !== expectedSha256 || linked.dev !== stat.dev || linked.ino !== stat.ino) throw new Error('组件清理 sidecar prepared identity 捕获失败'); return { path: item.path, role: item.role, size: expected.length, sha256: expectedSha256, nativeIdentity: native.identity }; }
     finally { await handle.close().catch(() => undefined); }
   }));
+  const verifyComponentCleanupSidecar = async ({ path: sidecarPath, size, sha256, nativeIdentity }) => {
+    const handle = await fs.promises.open(sidecarPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try { const before = await handle.stat(); const native = await componentCleanupPublicationService.inspectPath(sidecarPath); const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk); const after = await handle.stat(); const linked = await fs.promises.lstat(sidecarPath); if (!native?.success || native.identity !== nativeIdentity || before.size !== size || hash.digest('hex') !== sha256 || before.dev !== after.dev || before.ino !== after.ino || linked.dev !== after.dev || linked.ino !== after.ino) throw new Error('组件清理 sidecar preflight identity 不匹配'); return true; }
+    finally { await handle.close().catch(() => undefined); }
+  };
   const deleteComponentCleanupSidecar = async ({ path: sidecarPath, size, sha256, nativeIdentity }) => {
     if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
     const handle = await fs.promises.open(sidecarPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
@@ -700,7 +705,7 @@ const registerSystemIpc = context => {
         task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
         if (backgroundTasks?.flush?.() !== true) throw Object.assign(new Error('无法同步持久化组件清理完成前状态'), { cleanupPendingReceipts: targets });
       }
-      for (const target of targets) await finalizeComponentCleanupProof(target, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar });
+      for (const target of targets) await finalizeComponentCleanupProof(target, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar, verifySidecar: verifyComponentCleanupSidecar });
       return { removedCount: targets.length };
     };
     if (!backgroundTasks?.run) {

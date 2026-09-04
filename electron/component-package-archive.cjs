@@ -770,7 +770,7 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
   }
   return { cleaned: true, intentPath: paths.intentPath, preparedReceipt };
 };
-const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersisted = false, deleteSidecar } = {}) => {
+const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersisted = false, deleteSidecar, verifySidecar } = {}) => {
   const paths = componentCleanupIntentPaths(receipt);
   validatePreparedSidecarReceipts(receipt, paths);
   const expectedIntent = `${JSON.stringify(cleanupIntentPayload(receipt))}\\n`;
@@ -782,7 +782,12 @@ const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersi
   const verified = await readBoundedSidecar(paths.verifiedPath);
   if (!intent) { if (dataCleanupCompletePersisted && !proofText && !verified) return true; throw new Error('组件清理完成证明缺失'); }
   if (intent !== expectedIntent) throw new Error('组件清理完成证明无效，拒绝回收 sidecar');
-  if (typeof deleteSidecar !== 'function') throw cleanupBoundaryError('COMPONENT_CLEANUP_NATIVE_REQUIRED', '组件清理 sidecar 需要对象身份绑定删除服务');
+  if (typeof deleteSidecar !== 'function' || typeof verifySidecar !== 'function') throw cleanupBoundaryError('COMPONENT_CLEANUP_NATIVE_REQUIRED', '组件清理 sidecar 需要对象身份绑定验证和删除服务');
+  const receiptByPath = new Map(receipt.sidecarReceipts.map(item => [item.path, item]));
+  const assertExpectedReceipt = (sidecarPath, value, label) => { const expected = Buffer.from(value); const sidecar = receiptByPath.get(sidecarPath); if (!sidecar || sidecar.size !== expected.length || sidecar.sha256 !== crypto.createHash('sha256').update(expected).digest('hex')) throw cleanupBoundaryError('COMPONENT_CLEANUP_SIDECAR_PROOF_MISMATCH', `${label} identity receipt 与 immutable 内容不一致`); };
+  assertExpectedReceipt(paths.intentPath, expectedIntent, 'intent');
+  if (proofText) { const proofRecord = await readComponentCleanupProof(paths, receipt); assertExpectedReceipt(paths.proofPath, proofText, 'proof'); const expectedVerified = cleanupVerifiedContent(receipt, proofRecord.binding); if (verified) assertExpectedReceipt(paths.verifiedPath, expectedVerified, 'verified'); }
+  for (const sidecar of receipt.sidecarReceipts) { const exists = await fs.promises.lstat(sidecar.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error)); if (!exists) { if (!dataCleanupCompletePersisted) throw new Error('组件清理 sidecar 在preflight期间缺失'); continue; } await verifySidecar(sidecar); }
   const deletePreparedSidecar = async sidecar => {
     const linked = await fs.promises.lstat(sidecar.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
     if (!linked) { if (dataCleanupCompletePersisted) return false; throw new Error('组件清理 sidecar 在未持久化完成前缺失'); }
@@ -808,13 +813,13 @@ const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersi
   await deletePreparedSidecar(intentReceipt);
   return true;
 };
-const createComponentCleanupOrchestrator = ({ deleteOwned, deleteSidecar, captureNativeProof, prepareSidecars, persistPrepared, persistPhase = async () => true } = {}) => ({
+const createComponentCleanupOrchestrator = ({ deleteOwned, deleteSidecar, verifySidecar, captureNativeProof, prepareSidecars, persistPrepared, persistPhase = async () => true } = {}) => ({
   async run(receipt) {
     if (await persistPhase('pending', receipt) !== true) return { status: 'pending', outcomeUnknown: false, receipt, error: 'cleanup phase persistence failed' };
     try { const result = await cleanupOwnedComponentPath(receipt, { deleteOwned, captureNativeProof, prepareSidecars, persistPrepared }); const appliedReceipt = result.preparedReceipt || receipt; if (await persistPhase('data-complete', appliedReceipt, result) !== true) return { status: 'pending', outcomeUnknown: false, receipt: appliedReceipt, result, error: 'cleanup completion phase persistence failed' }; return { status: 'complete', outcomeUnknown: false, receipt: appliedReceipt, result }; }
     catch (error) { return { status: 'pending', outcomeUnknown: Boolean(error?.outcomeUnknown), receipt: error?.cleanupPendingReceipts?.[0] || receipt, recoveryPath: error?.recoveryPath, error: error?.message || String(error) }; }
   },
-  async finalize(receipt, { completionFlushed = false } = {}) { if (!completionFlushed) return { status: 'pending', outcomeUnknown: false, receipt, error: 'durable task completion not confirmed' }; await finalizeComponentCleanupProof(receipt, { dataCleanupCompletePersisted: true, deleteSidecar }); return { status: 'complete', outcomeUnknown: false, receipt }; },
+  async finalize(receipt, { completionFlushed = false } = {}) { if (!completionFlushed) return { status: 'pending', outcomeUnknown: false, receipt, error: 'durable task completion not confirmed' }; await finalizeComponentCleanupProof(receipt, { dataCleanupCompletePersisted: true, deleteSidecar, verifySidecar }); return { status: 'complete', outcomeUnknown: false, receipt }; },
 });
 
 module.exports = {
