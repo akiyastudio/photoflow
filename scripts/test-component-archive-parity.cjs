@@ -170,6 +170,12 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     const renamedCrashReceipt = await receiptForDirectory(renamedCrashRoot); await persistComponentCleanupIntent(renamedCrashReceipt); const renamedCrashPaths = componentCleanupIntentPaths(renamedCrashReceipt); fs.renameSync(renamedCrashRoot, renamedCrashPaths.isolatedPath); await cleanupOwnedComponentPath(renamedCrashReceipt);
     assert.equal(fs.existsSync(renamedCrashPaths.isolatedPath), false, 'rename-before-delete crash converges from deterministic isolation path');
 
+    const emptyMarkerRoot = path.join(root, 'empty-marker-crash'); fs.mkdirSync(emptyMarkerRoot); fs.writeFileSync(path.join(emptyMarkerRoot, 'a'), 'a'); const emptyMarkerReceipt = await receiptForDirectory(emptyMarkerRoot); await persistComponentCleanupIntent(emptyMarkerReceipt); const emptyMarkerPaths = componentCleanupIntentPaths(emptyMarkerReceipt); fs.renameSync(emptyMarkerRoot, emptyMarkerPaths.isolatedPath); fs.writeFileSync(emptyMarkerPaths.verifiedPath, ''); await cleanupOwnedComponentPath(emptyMarkerReceipt);
+    assert.equal(fs.existsSync(emptyMarkerPaths.isolatedPath), false, 'crash after marker create but before write is safely rebuilt from the intact receipt');
+
+    const halfMarkerRoot = path.join(root, 'half-marker-crash'); fs.mkdirSync(halfMarkerRoot); fs.writeFileSync(path.join(halfMarkerRoot, 'a'), 'a'); const halfMarkerReceipt = await receiptForDirectory(halfMarkerRoot); await persistComponentCleanupIntent(halfMarkerReceipt); const halfMarkerPaths = componentCleanupIntentPaths(halfMarkerReceipt); fs.renameSync(halfMarkerRoot, halfMarkerPaths.isolatedPath); fs.writeFileSync(`${halfMarkerPaths.verifiedPath}.tmp`, 'half'); await cleanupOwnedComponentPath(halfMarkerReceipt);
+    assert.equal(fs.existsSync(halfMarkerPaths.isolatedPath), false, 'crash after partial marker tmp write is safely rebuilt from the intact receipt');
+
     const partialCrashRoot = path.join(root, 'partial-delete-crash'); fs.mkdirSync(partialCrashRoot); fs.writeFileSync(path.join(partialCrashRoot, 'a'), 'a'); fs.writeFileSync(path.join(partialCrashRoot, 'b'), 'b');
     const partialCrashReceipt = await receiptForDirectory(partialCrashRoot); const originalCleanupRm = fs.promises.rm; let partialCrashInjected = false;
     fs.promises.rm = async (target, options) => { if (!partialCrashInjected && String(target).includes('.cleanup-')) { partialCrashInjected = true; await originalCleanupRm(path.join(target, 'a')); throw Object.assign(new Error('crash after partial delete'), { code: 'EACCES' }); } return originalCleanupRm(target, options); };
@@ -194,14 +200,14 @@ const rejection = fn => { try { fn(); return false; } catch { return true; } };
     assert.match(systemIpcSource, /setTimeout\([\s\S]*run\(\)\.catch/, 'timer-launched cleanup routes failures into a promise rejection handler');
     assert.match(systemIpcSource, /assertInstallActive\(\);[\s\S]*fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity[\s\S]*assertInstallActive\(\)/, 'deadline checks bracket copy and receipt verification');
 
-    const volume = await fs.promises.statfs(root, { bigint: true });
-    const moreThanHalf = Number((volume.bavail * volume.bsize / 2n) + 1n);
-    if (Number.isSafeInteger(moreThanHalf) && moreThanHalf > 0) {
-      const competing = await Promise.allSettled([reserveComponentInstallCapacity(root, moreThanHalf), reserveComponentInstallCapacity(root, moreThanHalf)]);
+    const originalStatfs = fs.promises.statfs;
+    fs.promises.statfs = async () => ({ bavail: 1_000n, bsize: 1n });
+    try {
+      const competing = await Promise.allSettled([reserveComponentInstallCapacity(root, 600), reserveComponentInstallCapacity(root, 600)]);
       assert.equal(competing.filter(result => result.status === 'fulfilled').length, 1, 'same-volume reservations are serialized atomically');
       assert.match(competing.find(result => result.status === 'rejected').reason.message, /容量已被其他安装预留/);
       await competing.find(result => result.status === 'fulfilled').value.release();
-    }
+    } finally { fs.promises.statfs = originalStatfs; }
     const logicalPayload = Buffer.alloc(100 * 1024 * 1024, 0x61);
     const benchmarkArchives = Array.from({ length: 3 }, (_, index) => path.join(root, `benchmark-${index}.zip`));
     for (const target of benchmarkArchives) writeZip(target, [['pkg/component.json', manifest], ['pkg/model.bin', logicalPayload, { method: 8 }], ['pkg/worker.cjs', 'ok']]);

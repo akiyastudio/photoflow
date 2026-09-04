@@ -585,12 +585,33 @@ const persistComponentCleanupIntent = async receipt => {
   return payload;
 };
 const cleanupVerifiedContent = receipt => `${crypto.createHash('sha256').update(JSON.stringify(cleanupIntentPayload(receipt))).digest('hex')}\n`;
-const persistComponentCleanupVerified = async (receipt, paths) => {
+const persistComponentCleanupVerified = async (receipt, paths, { allowRepair = false } = {}) => {
   const content = cleanupVerifiedContent(receipt);
-  const existing = await fs.promises.readFile(paths.verifiedPath, 'utf8').catch(error => error?.code === 'ENOENT' ? '' : Promise.reject(error));
-  if (existing) { if (existing !== content) throw new Error('组件清理 verified marker 冲突'); return; }
-  const handle = await fs.promises.open(paths.verifiedPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
-  try { await handle.writeFile(content, 'utf8'); await handle.sync(); } finally { await closeOwnedHandle(handle); }
+  const invalidSuffix = value => crypto.createHash('sha256').update(value).digest('hex').slice(0, 16);
+  const preserveInvalid = async (sourcePath, value) => {
+    const stat = await fs.promises.lstat(sourcePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('组件清理 marker 不是安全的普通文件');
+    const preserved = `${sourcePath}.invalid-${invalidSuffix(value)}`;
+    try { await fs.promises.rename(sourcePath, preserved); }
+    catch (error) { const existing = await fs.promises.readFile(preserved, 'utf8').catch(() => null); if (existing !== value) throw error; await fs.promises.unlink(sourcePath); }
+  };
+  const existingStat = await fs.promises.lstat(paths.verifiedPath).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  const existing = existingStat ? await fs.promises.readFile(paths.verifiedPath, 'utf8') : '';
+  if (existingStat && existing === content) return;
+  if (existingStat) { if (!allowRepair) throw new Error('组件清理 verified marker 内容无效'); await preserveInvalid(paths.verifiedPath, existing); }
+  const temporary = `${paths.verifiedPath}.tmp`;
+  const pendingStat = await fs.promises.lstat(temporary).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  const pending = pendingStat ? await fs.promises.readFile(temporary, 'utf8') : '';
+  if (pendingStat && pending !== content) { if (!allowRepair) throw new Error('组件清理 verified marker 临时文件无效'); await preserveInvalid(temporary, pending); }
+  if (!pendingStat || pending !== content) {
+    const handle = await fs.promises.open(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+    try { await handle.writeFile(content, 'utf8'); await handle.sync(); } finally { await closeOwnedHandle(handle); }
+  }
+  try { await fs.promises.rename(temporary, paths.verifiedPath); }
+  catch (error) { const raced = await fs.promises.readFile(paths.verifiedPath, 'utf8').catch(() => ''); if (raced !== content) throw error; await fs.promises.unlink(temporary).catch(() => undefined); }
+  const markerHandle = await fs.promises.open(paths.verifiedPath, fs.constants.O_RDWR | (fs.constants.O_NOFOLLOW || 0));
+  try { await markerHandle.sync(); } finally { await closeOwnedHandle(markerHandle); }
+  if (await fs.promises.readFile(paths.verifiedPath, 'utf8') !== content) throw new Error('组件清理 verified marker 持久化复核失败');
 };
 const cleanupOwnedComponentPath = async receipt => {
   if (!receipt || typeof receipt.path !== 'string' || !receipt.nodeIdentity || !['file', 'directory'].includes(receipt.kind)) throw new Error('拒绝清理缺少身份收据的组件路径');
@@ -609,6 +630,9 @@ const cleanupOwnedComponentPath = async receipt => {
   if (intent !== expectedIntent) throw new Error('组件清理持久意图内容无效');
   original = await fs.promises.lstat(paths.originalPath).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
   isolated = await fs.promises.lstat(paths.isolatedPath).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  // The small intent/marker sidecars are deliberate completion tombstones.
+  // They remain bounded (constant size per cleanup) so a stale persisted task
+  // can prove both deterministic data paths are gone without guessing ENOENT.
   if (!original && !isolated) return { cleaned: true, alreadyMissing: true, intentPath: paths.intentPath };
   if (!isolated) {
     const expectedType = receipt.kind === 'directory' ? original?.isDirectory() : original?.isFile();
@@ -623,14 +647,13 @@ const cleanupOwnedComponentPath = async receipt => {
     throw Object.assign(new Error('组件清理隔离对象身份已变化，replacement 未删除'), { recoveryPath: occupant ? paths.isolatedPath : paths.originalPath });
   }
   const verifiedMarker = await fs.promises.readFile(paths.verifiedPath, 'utf8').catch(error => error?.code === 'ENOENT' ? '' : Promise.reject(error));
-  if (verifiedMarker && verifiedMarker !== cleanupVerifiedContent(receipt)) throw new Error('组件清理 verified marker 内容无效');
-  if (!verifiedMarker) {
+  if (verifiedMarker !== cleanupVerifiedContent(receipt)) {
     if (receipt.kind === 'directory' && componentTreeIdentityDigest(await captureComponentTreeIdentity(paths.isolatedPath)) !== receipt.treeDigest) {
       const occupant = await fs.promises.lstat(paths.originalPath).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
       if (!occupant) await fs.promises.rename(paths.isolatedPath, paths.originalPath);
-      throw Object.assign(new Error('组件清理隔离目录内容与原始收据不一致'), { recoveryPath: occupant ? paths.isolatedPath : paths.originalPath });
+      throw Object.assign(new Error('组件清理 marker 未确认且隔离目录与原始收据不一致'), { recoveryPath: occupant ? paths.isolatedPath : paths.originalPath });
     }
-    await persistComponentCleanupVerified(receipt, paths);
+    await persistComponentCleanupVerified(receipt, paths, { allowRepair: true });
   }
   if (receipt.kind === 'file') { await fs.promises.unlink(paths.isolatedPath); return { cleaned: true, intentPath: paths.intentPath }; }
   try { await captureComponentTreeIdentity(paths.isolatedPath); await fs.promises.rm(paths.isolatedPath, { recursive: true, force: false }); }
