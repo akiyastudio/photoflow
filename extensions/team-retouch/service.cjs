@@ -485,7 +485,7 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
     try { rows = db.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND state<>'completed' ORDER BY created_at,id LIMIT ?").all(String(context.projectId), Math.max(1, Number(batchSize) || 1)); }
     finally { db.close(); }
     if (!rows.length) return { attempted, recovered, pending: 0 };
-    const plannedRows = rows.filter(row => row.state === 'planned');
+    const plannedRows = rows.filter(row => row.state === 'planned' && !parseJson(row.result_json, {}).continuationPlan?.domain?.generationId);
     if (plannedRows.length) {
       for (const row of plannedRows) {
         const plan = parseJson(row.result_json, {}).continuationPlan;
@@ -507,6 +507,10 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
       if (!plan || Number(plan.version) !== 1 || String(plan.projectId) !== String(context.projectId) || String(plan.kind) !== String(row.kind)) throw recoveryRequiredError(`outbox ${row.id} 缺少完整 continuation plan`);
       const record = { storage, projectId: String(context.projectId), fingerprint: row.fingerprint, row, files: targets.map((target, index) => ({ ...target, sourcePath: sources[index]?.sourcePath || '', digest: sources[index]?.digest || '' })) };
       let receipt = parseJson(row.receipt_json, {});
+      if (row.state === 'planned' && row.kind === 'working-output' && plan.domain?.generationId) {
+        const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working generation ${plan.domain.generationId} 缺少待发布 source`);
+        await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan); continue;
+      }
       if (row.state === 'restore_republish') {
         const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working restore outbox ${row.id} 私有副本缺失或摘要不匹配`);
         const committed = await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan);
@@ -519,7 +523,12 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
         catch (error) { throw recoveryRequiredError(`outbox ${row.id} Host stage rollback 失败：${error.message || error}`); }
         if (rollback?.rolledBack !== true || (rollback.stageId && String(rollback.stageId) !== String(row.stage_id))) throw recoveryRequiredError(`outbox ${row.id} Host stage rollback 未确认`);
         if (plan.preHostLocalEffects !== 'none') throw recoveryRequiredError(`outbox ${row.id} Host stage 前存在未证明的本地副作`);
-        await deleteUncommittedOutputOutbox(record, 'host_staging'); recovered += 1; continue;
+        await deleteUncommittedOutputOutbox(record, 'host_staging');
+        if (row.kind === 'working-output' && plan.domain?.generationId) {
+          const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working generation ${plan.domain.generationId} rollback 后 source 缺失`);
+          await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan); continue;
+        }
+        recovered += 1; continue;
       }
       if (['host_staged','commit_inflight'].includes(row.state)) {
         await outboxState(record, 'commit_inflight');
@@ -539,6 +548,27 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
         }
         const ledger = await readJson(plan.ledgerPath, {}); ledger[plan.outputRelativePath] = { commitId: receipt.commitId, artifactId: output.artifactId, sha256: output.sha256 };
         await replaceJsonAtomic(plan.ledgerPath, ledger);
+        if (plan.domain?.generationId) {
+          const groupDb = ensureSchema(storage.databasePath); let candidates;
+          try { candidates = groupDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed'").all(String(context.projectId)); }
+          finally { groupDb.close(); }
+          const group = candidates.map(value => ({ row: value, result: parseJson(value.result_json, {}), plan: parseJson(value.result_json, {}).continuationPlan })).filter(value => value.plan?.domain?.generationId === plan.domain.generationId);
+          const expectedIds = new Set(plan.domain.allTaskIds || []); const byTask = new Map(group.map(value => [String(value.plan.domain.task?.id || ''), value]));
+          const ready = group.length === expectedIds.size && [...expectedIds].every(id => byTask.get(id)?.result?.materialized?.privatePath && fs.existsSync(byTask.get(id).result.materialized.privatePath));
+          if (!ready) continue;
+          const domainDb = ensureSchema(storage.databasePath);
+          try {
+            domainDb.exec('BEGIN IMMEDIATE');
+            const recoveredTasks = [...expectedIds].map(id => { const value = byTask.get(id); return { ...value.plan.domain.task, patchPath: value.result.materialized.privatePath }; });
+            replacePatches(domainDb, context, plan.domain.photoId, plan.domain.baseVersionId, recoveredTasks);
+            registerPhoto(domainDb, context, plan.domain.photoId, plan.domain.baseVersionId, plan.domain.photo || {});
+            const finish = domainDb.prepare("UPDATE team_output_outbox SET state='completed',updated_at=? WHERE project_id=? AND id=? AND state<>'completed'");
+            for (const value of group) finish.run(Date.now(), String(context.projectId), value.row.id);
+            domainDb.exec('COMMIT'); recovered += group.length;
+          } catch (error) { try { domainDb.exec('ROLLBACK'); } catch {} throw error; }
+          finally { domainDb.close(); }
+          continue;
+        }
         const domainDb = ensureSchema(storage.databasePath);
         try { domainDb.exec('BEGIN IMMEDIATE'); restoreWorkingTaskDomain(domainDb, context, plan.domain, materialized.privatePath); domainDb.exec('COMMIT'); }
         catch (error) { try { domainDb.exec('ROLLBACK'); } catch {} throw error; }
@@ -1083,7 +1113,7 @@ const replacePatches = (db, context, photoId, baseVersionId, tasks) => {
   const old = listTasks(db, photoId, baseVersionId);
   db.prepare('UPDATE team_patch_tasks SET is_deleted=1,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').run(Date.now(), String(context.projectId), String(photoId), String(baseVersionId));
   db.prepare('DELETE FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=?').run(String(context.projectId), String(photoId), String(baseVersionId));
-  const insert = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,assignee,detector,bbox_json,crop_json,patch_path,mask_path,mask_json,members_json,needs_review,review_reason,edited_patch_path,status,merge_metrics_json,merged_version_id,generation_json,created_at,updated_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`);
+  const insert = db.prepare(`INSERT OR REPLACE INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,assignee,detector,bbox_json,crop_json,patch_path,mask_path,mask_json,members_json,needs_review,review_reason,edited_patch_path,status,merge_metrics_json,merged_version_id,generation_json,created_at,updated_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0)`);
   const insertStage = db.prepare(`INSERT OR IGNORE INTO team_task_stages(project_id,id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`);
   const now = Date.now();
   for (const task of tasks || []) {
@@ -1219,10 +1249,11 @@ const detectPhoto = async (parentId, payload, context) => {
     if (missing.length) throw new Error(`切好的图片没有成功保存（缺少 ${missing.length} 个文件）`);
     const publishedTasks = [];
     const workingPublications = [];
+    const workingGenerationId = sha256(JSON.stringify({ projectId: context.projectId, photoId: payload.photoId, baseVersionId: payload.baseVersionId, tasks: await Promise.all((detected.tasks || []).map(async item => ({ id: String(item.id), digest: await fileSha256(item.patchPath) }))) }));
     for (const task of detected.tasks || []) {
       let maskTarget = null;
       if (task.maskPath) { maskTarget = path.join(authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
-      const domainPlan = { version: 1, photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), allTaskIds: (detected.tasks || []).map(item => String(item.id)), task: { ...task, maskPath: maskTarget }, photo: { displayName: bundle.photo?.displayName || bundle.photo?.originalName || '', relativePath: metadataBase.relativePath || '', relativePathState: metadataBase.relativePathState || 'ready', fileMissing: Boolean(metadataBase.fileMissing) } };
+      const domainPlan = { version: 1, generationId: workingGenerationId, photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), allTaskIds: (detected.tasks || []).map(item => String(item.id)), task: { ...task, maskPath: maskTarget }, photo: { displayName: bundle.photo?.displayName || bundle.photo?.originalName || '', relativePath: metadataBase.relativePath || '', relativePathState: metadataBase.relativePathState || 'ready', fileMissing: Boolean(metadataBase.fileMissing) } };
       const working = await publishWorkingImage(parentId, storage, task.patchPath, metadataBase.relativePath, domainPlan);
       workingPublications.push(working.publication);
       const patchTarget = working.privatePath;
@@ -1236,10 +1267,10 @@ const detectPhoto = async (parentId, payload, context) => {
       if (payload.restoreExcluded) db.prepare('DELETE FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').run(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
       queueCleanupArtifacts(db, context.projectId, replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
       queueCleanupArtifacts(db, context.projectId, published.map(item => item.backupPath));
+      for (const publication of workingPublications) db.prepare("UPDATE team_output_outbox SET state='completed',updated_at=? WHERE project_id=? AND fingerprint=?").run(Date.now(), String(context.projectId), publication[OUTPUT_OUTBOX].fingerprint);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'detect', state: 'committed' }).catch(() => undefined);
-    for (const publication of workingPublications) await completeOutputPublication(publication);
     await commitPublished(published).catch(() => undefined);
     await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
     return { success: true, ...publicBundle(bundle), tasks: replaced.tasks.map(publicTask), excludedPersonCount: exclusions.length, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || 'auto', advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount ?? replaced.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
@@ -1606,10 +1637,11 @@ const detectBatch = async (parentId, payload, context) => {
         try {
           const publishedTasks = [];
           const workingPublications = [];
+          const workingGenerationId = sha256(JSON.stringify({ projectId: context.projectId, photoId: item.bundle.photo.id, baseVersionId: item.base.id, tasks: await Promise.all((detected.tasks || []).map(async value => ({ id: String(value.id), digest: await fileSha256(value.patchPath) }))) }));
           for (const task of detected.tasks || []) {
             let maskTarget = null;
             if (task.maskPath) { maskTarget = path.join(item.authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
-            const domainPlan = { version: 1, photoId: String(item.bundle.photo.id), baseVersionId: String(item.base.id), allTaskIds: (detected.tasks || []).map(value => String(value.id)), task: { ...task, maskPath: maskTarget }, photo: { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName || '', relativePath: item.base.relativePath || '', relativePathState: item.base.relativePathState || 'ready', fileMissing: Boolean(item.base.fileMissing) } };
+            const domainPlan = { version: 1, generationId: workingGenerationId, photoId: String(item.bundle.photo.id), baseVersionId: String(item.base.id), allTaskIds: (detected.tasks || []).map(value => String(value.id)), task: { ...task, maskPath: maskTarget }, photo: { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName || '', relativePath: item.base.relativePath || '', relativePathState: item.base.relativePathState || 'ready', fileMissing: Boolean(item.base.fileMissing) } };
             const working = await publishWorkingImage(parentId, storage, task.patchPath, item.base.relativePath, domainPlan);
             workingPublications.push(working.publication);
             const patchTarget = working.privatePath;
@@ -1622,11 +1654,11 @@ const detectBatch = async (parentId, payload, context) => {
             registerPhoto(db, context, item.bundle.photo.id, item.base.id, { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName, relativePath: item.base.relativePath, relativePathState: item.base.relativePathState, fileMissing: item.base.fileMissing });
             queueCleanupArtifacts(db, context.projectId, replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
             queueCleanupArtifacts(db, context.projectId, published.map(item => item.backupPath));
+            for (const publication of workingPublications) db.prepare("UPDATE team_output_outbox SET state='completed',updated_at=? WHERE project_id=? AND fingerprint=?").run(Date.now(), String(context.projectId), publication[OUTPUT_OUTBOX].fingerprint);
             db.exec('COMMIT');
           }
           catch (error) { db.exec('ROLLBACK'); throw error; }
           await commitPublished(published);
-          for (const publication of workingPublications) await completeOutputPublication(publication);
           await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
           results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: true, photoId: item.bundle.photo.id, baseVersionId: item.base.id, personCount: detected.personCount, workTileCount: publishedTasks.length, detector: detected.detector, advancedBackend: detected.advancedBackend, fallbackReason: detected.fallbackReason });
         } catch (error) { await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
@@ -2285,6 +2317,8 @@ const retryWorkflowOutputCleanup = async (parentId, storage, context, additions 
 const reportTask = async (parentId, operationId, action, update = {}, topic = '') => hostTask(parentId, operationId, action, { title: '生成团片协作工作流', operationId, ...update }, topic);
 
 const generateWorkflowUnlocked = async (parentId, payload, context) => {
+  const preflightStorage = await hostStorage(parentId); const preflightScope = await workflowScopeForStorage(preflightStorage, context);
+  if (preflightScope.manifest?.recovery?.state === 'needs-republish') throw recoveryRequiredError('恢复的 workflow 必须先通过 team.workflow.reconcile-drain.v1 在目标项目 scope 重新发布');
   const operationId = String(payload.operationId || crypto.randomUUID());
   const key = String(context.projectId);
   const existing = workflowJobs.get(key);
