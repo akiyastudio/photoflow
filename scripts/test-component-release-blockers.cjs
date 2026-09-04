@@ -14,6 +14,28 @@ const child = pid => Object.assign(new EventEmitter(), {
   stdin: { end() {}, destroy() {} },
   kill() { throw new Error('Windows fallback must not kill only the parent'); },
 });
+const bounded = (promise, timeoutMs, label) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs);
+  timer.unref?.();
+  Promise.resolve(promise).then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+});
+const processAlive = pid => { try { process.kill(pid, 0); return true; } catch (error) { if (error?.code === 'ESRCH') return false; throw error; } };
+const cleanupWindowsFixture = async (parent, descendantPid) => {
+  const failures = [];
+  for (const [label, pid, stop] of [
+    ['grandchild', descendantPid, () => process.kill(descendantPid, 'SIGKILL')],
+    ['parent', parent?.pid, () => parent.kill('SIGKILL')],
+  ]) {
+    if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+    try { if (processAlive(pid) && stop() === false) throw new Error(`${label} refused direct termination`); }
+    catch (error) { if (error?.code !== 'ESRCH') failures.push(new Error(`Failed to clean up Windows fixture ${label} ${pid}`, { cause: error })); }
+  }
+  for (const stream of [parent?.stdin, parent?.stdout, parent?.stderr]) { try { stream?.destroy?.(); } catch (error) { failures.push(error); } }
+  if (parent && parent.exitCode === null && parent.signalCode === null) {
+    try { await bounded(new Promise(resolve => parent.once('close', resolve)), 1000, 'Windows fixture close'); } catch (error) { failures.push(error); }
+  }
+  return failures;
+};
 
 (async () => {
   const owned = child(4242); const taskkillCalls = [];
@@ -35,13 +57,21 @@ const child = pid => Object.assign(new EventEmitter(), {
   await terminateAndWait(retryable, Date.now() + 500, { platform: 'win32', rollbackSettleMs: 0, execFileImpl });
   assert.equal(attempt, 2);
 
-  if (process.platform === 'win32') {
-    const parent = spawn(process.execPath, ['-e', "const{spawn}=require('child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(child.pid);setInterval(()=>{},1000)"], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    const descendantPid = await new Promise((resolve, reject) => { let buffer = ''; parent.stdout.on('data', chunk => { buffer += chunk; const line = buffer.split(/\r?\n/)[0]; if (/^\d+$/.test(line)) resolve(Number(line)); }); parent.once('error', reject); setTimeout(() => reject(new Error('descendant PID timeout')), 3000).unref?.(); });
-    await terminateAndWait(parent, Date.now() + 5000, { rollbackSettleMs: 25 });
-    await new Promise(resolve => setTimeout(resolve, 100));
-    let descendantAlive = true; try { process.kill(descendantPid, 0); } catch (error) { if (error?.code === 'ESRCH') descendantAlive = false; else throw error; }
-    assert.equal(descendantAlive, false, 'Windows termination kills the owned component service descendant tree');
+  if (process.platform === 'win32' && process.env.PHOTOFLOW_TEST_REAL_PROCESS_TREE !== '0') {
+    let parent = null; let descendantPid = null; let primaryError = null;
+    try {
+      await bounded((async () => {
+        parent = spawn(process.execPath, ['-e', "const{spawn}=require('child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(child.pid);setInterval(()=>{},1000)"], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+        descendantPid = await bounded(new Promise((resolve, reject) => { let buffer = ''; parent.stdout.on('data', chunk => { buffer += chunk; const line = buffer.split(/\r?\n/)[0]; if (/^\d+$/.test(line)) resolve(Number(line)); }); parent.once('error', reject); }), 3000, 'descendant PID');
+        await terminateAndWait(parent, Date.now() + 5000, { rollbackSettleMs: 25 });
+        await bounded(new Promise(resolve => setTimeout(resolve, 100)), 250, 'termination settle');
+        assert.equal(processAlive(descendantPid), false, 'Windows termination kills the owned component service descendant tree');
+      })(), 6500, 'Windows process-tree fixture');
+    } catch (error) { primaryError = error; }
+    const cleanupFailures = await cleanupWindowsFixture(parent, descendantPid);
+    if (primaryError && cleanupFailures.length) throw new AggregateError([primaryError, ...cleanupFailures], `${primaryError.message}; Windows fixture cleanup also failed`, { cause: primaryError });
+    if (primaryError) throw primaryError;
+    if (cleanupFailures.length) throw new AggregateError(cleanupFailures, 'Windows fixture cleanup failed');
   }
 
   const serviceManager = new ComponentServiceManager({ registry: {}, processSupervisor: {}, capabilityBroker: {} });
