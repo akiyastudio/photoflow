@@ -41,7 +41,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
   assert.match(mainSource, /buttons:\s*\['关闭后台进程并继续退出',\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/);
   const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
-  assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续卸载'/, '卸载确认不得冒充真实应用退出按钮');
+  assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续退出'[\s\S]*?buttons:\s*\[presentation\.continueLabel,\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/, '卸载确认锁定真实退出文案与安全默认项');
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
   const mainWindow = new EventEmitter();
   mainWindow.close = () => {
