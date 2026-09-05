@@ -6,7 +6,9 @@ import sys
 
 
 def emit(payload):
-    print(json.dumps(payload, ensure_ascii=False), flush=True)
+    # The host reads UTF-8, while frozen Windows workers can default to GBK.
+    # ASCII JSON escapes preserve paths regardless of the local code page.
+    print(json.dumps(payload, ensure_ascii=True), flush=True)
 
 
 def cancelled(path):
@@ -14,7 +16,9 @@ def cancelled(path):
 
 
 def bridge(encoded):
-    payload = json.loads(base64.urlsafe_b64decode(encoded.encode('ascii')).decode('utf-8'))
+    # Older hosts send unpadded base64url; accept both versions of the bridge.
+    padded = encoded + '=' * (-len(encoded) % 4)
+    payload = json.loads(base64.urlsafe_b64decode(padded.encode('ascii')).decode('utf-8'))
     action = str(payload.get('action') or '')
     from ffmpeg_transcode import (
         probe_creation_time_values,

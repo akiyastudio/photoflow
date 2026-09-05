@@ -1,5 +1,6 @@
 const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
+const { encodeImportVideoToolRequest, importWorkerCompletionIssue, serializeImportWorkerControl } = require('../contracts/import-worker-protocol.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 const { componentDataRoot, createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
 const { createComponentTransactionService, nodeIdentity: componentPathIdentity } = require('../services/component-transaction-service.cjs');
@@ -1409,6 +1410,7 @@ const registerSystemIpc = context => {
       if (cancellable) rememberPythonTask(normalizedRequestId, invocationId, { process: pyProcess, cancelFile, pauseFile, backgroundTaskId });
       let stdoutBuffer = '';
       let importFailed = false;
+      let importCompletionIssue = '';
       let importCancelled = false;
       let importProgress = 0;
       let toolFailed = false;
@@ -1420,7 +1422,7 @@ const registerSystemIpc = context => {
       const pendingWorkerVideoTools = new Map();
       const sendWorkerControl = payload => {
         if (workerClosed || !pyProcess.stdin?.writable) return false;
-        pyProcess.stdin.write(`${JSON.stringify(payload)}\n`, error => {
+        pyProcess.stdin.write(serializeImportWorkerControl(payload), error => {
           if (error && !workerClosed) writeLog('warn', 'Unable to send Python worker resource control', { error: error.message || String(error) });
         });
         return true;
@@ -1500,7 +1502,7 @@ const registerSystemIpc = context => {
         const heartbeat = setInterval(sendHeartbeat, 5000);
         const pending = { controller, heartbeat };
         pendingWorkerVideoTools.set(requestId, pending);
-        const encoded = Buffer.from(JSON.stringify({ ...payload.payload, action }), 'utf8').toString('base64url');
+        const encoded = encodeImportVideoToolRequest(payload.payload, action);
         Promise.resolve().then(() => pluginService.runJson('video-tools', ['bridge', encoded], 4 * 60 * 60 * 1000, message => {
           const text = String(message?.message || '').slice(0, 500);
           if (text) sendWorkerControl({ type: 'video_tool_progress', requestId, message: text, progress: Math.max(0, Math.min(100, Number(message?.progress) || 0)) });
@@ -1531,6 +1533,11 @@ const registerSystemIpc = context => {
             requestWorkerVideoTool(jsonMsg.data);
             return;
           }
+          if (tracksImportTask && ['warning', 'error'].includes(jsonMsg.type)) {
+            writeLog(jsonMsg.type === 'error' ? 'error' : 'warn', 'Import worker reported a problem', {
+              stage: classifyStage, requestId, message: String(jsonMsg.message || '').slice(0, 2000),
+            });
+          }
           mainWindow.webContents.send('python-event', { ...jsonMsg, scriptName, requestId });
           if (jsonMsg.type === 'success' && Array.isArray(jsonMsg.data?.importedPaths)) {
             for (const importedPath of jsonMsg.data.importedPaths) {
@@ -1542,6 +1549,7 @@ const registerSystemIpc = context => {
             }
           }
           if (importTask && !importTask.deduplicated) {
+            importCompletionIssue = importWorkerCompletionIssue(jsonMsg, args.includes('--delete_source')) || importCompletionIssue;
             if (jsonMsg.type === 'error') importFailed = true;
             if (jsonMsg.type === 'cancelled') importCancelled = true;
             if (jsonMsg.type === 'progress' || jsonMsg.type === 'status') {
@@ -1649,6 +1657,7 @@ const registerSystemIpc = context => {
         }
         if (importTask && !importTask.deduplicated) {
           if (importCancelled || importTask.context.signal.aborted) importTask.cancelled();
+          else if (code === 0 && !importFailed && importCompletionIssue) importTask.fail(new Error(importCompletionIssue));
           else if (code === 0 && !importFailed) importTask.complete(classifyStage === 'plan' ? '素材分析完成' : '导入完成');
           else importTask.fail(new Error(code === 0 ? '导入失败' : `导入进程异常退出（代码 ${code}）`));
         }
