@@ -338,6 +338,10 @@ class ComponentViewManager {
       return this.publicInstance(existing, leaseId);
       } catch (error) { if (surface === 'application.settings') this.releaseSettings(request); throw error; }
     }
+    const replacementCapabilityClear = this.capabilityClearOperations.get(componentId);
+    if (replacementCapabilityClear) await replacementCapabilityClear;
+    else if (this.failedCapabilityClearIds.has(componentId)) await this.requestComponentCapabilityClear(componentId);
+    this.lifecycleCoordinator?.assertLaunchAllowed?.(componentId, lifecycleLease);
     const instanceId = `component-page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const selectedPreloadPath = selectComponentPreload(descriptor, { core: this.preloadPath });
     const view = new this.WebContentsView({ webPreferences: {
