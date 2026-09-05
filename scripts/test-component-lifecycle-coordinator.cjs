@@ -37,9 +37,22 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
 
   coordinator.blockPersistent('d', new Error('cleanup pending'));
   assert.throws(() => coordinator.acquireWork('d'), error => error.code === 'COMPONENT_TRANSACTION_BLOCKED');
+  const recoveryGate = coordinator.acquireRecovery('d');
+  assert.equal(coordinator.beginApplicationQuit(), false, 'filtered recovery blocks application quit before destructive work');
+  assert.throws(() => coordinator.acquireWork('d'), error => error.code === 'COMPONENT_TRANSACTION_BLOCKED');
+  recoveryGate.requestStop(); await recoveryGate.promote(); recoveryGate.release();
+  assert.throws(() => coordinator.acquireWork('d'), error => error.code === 'COMPONENT_TRANSACTION_BLOCKED', 'releasing recovery does not clear the durable blocker');
   coordinator.unblockPersistent('d');
   const recovered = coordinator.acquireWork('d');
   recovered.release();
+
+  const recoveryDrainCoordinator = new ComponentLifecycleCoordinator();
+  const oldRecoveryWork = recoveryDrainCoordinator.acquireWork('recover-drain', 'old-work');
+  recoveryDrainCoordinator.blockPersistent('recover-drain', new Error('pending journal'));
+  const drainingRecovery = recoveryDrainCoordinator.acquireRecovery('recover-drain'); drainingRecovery.requestStop();
+  let recoveryPromoted = false; const recoveryPromotion = drainingRecovery.promote().then(() => { recoveryPromoted = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(recoveryPromoted, false, 'recovery waits for pre-existing work');
+  oldRecoveryWork.release(); await recoveryPromotion; drainingRecovery.release();
 
   coordinator.beginStartupRecovery();
   assert.throws(() => coordinator.acquireWork('e'), error => error.code === 'COMPONENT_RECOVERY_PENDING');
@@ -83,6 +96,7 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
   const corruptLease = corruptCoordinator.acquireWork('hard-corrupt');
   corruptCoordinator.blockForCorruptTransaction();
   assert.throws(() => corruptCoordinator.assertLaunchAllowed('hard-corrupt', corruptLease), error => error.code === 'COMPONENT_TRANSACTION_BLOCKED');
+  assert.throws(() => corruptCoordinator.acquireRecovery('hard-corrupt'), error => error.code === 'COMPONENT_QUIESCING');
   corruptLease.release();
 
   const startupCoordinator = new ComponentLifecycleCoordinator();

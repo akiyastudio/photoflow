@@ -106,11 +106,15 @@ class ComponentLifecycleCoordinator {
   acquireRecovery(componentId) {
     const id = String(componentId || '').trim();
     if (!id) throw new Error('组件 ID 不能为空');
-    if (this.globalQuiescing || this.transitions.has(id) || this.corruptTransactionState || this.blocker(id)) throw Object.assign(new Error('组件恢复与退出或其他 transition 冲突'), { code: 'COMPONENT_QUIESCING' });
-    const state = { componentId: id, operation: '持久事务恢复', phase: 'exclusive', token: Symbol(id), recovery: true };
+    if (this.globalQuiescing || this.transitions.has(id) || this.corruptTransactionState) throw Object.assign(new Error('组件恢复与退出或其他 transition 冲突'), { code: 'COMPONENT_QUIESCING' });
+    const state = { componentId: id, operation: '持久事务恢复', phase: 'intent', token: Symbol(id), recovery: true };
     this.transitions.set(id, state);
     let released = false;
-    return { ...state, release: () => { if (!released && this.transitions.get(id)?.token === state.token) this.transitions.delete(id); released = true; } };
+    const settled = () => {
+      if (!this.work.get(id)?.size) return Promise.resolve();
+      return new Promise(resolve => { const waiters = this.workWaiters.get(id) || new Set(); waiters.add(resolve); this.workWaiters.set(id, waiters); });
+    };
+    return { ...state, settled, requestStop: () => { state.stopRequested = true; }, promote: async () => { await settled(); if (released || this.transitions.get(id)?.token !== state.token) throw Object.assign(new Error('组件恢复 intent 已失效'), { code: 'COMPONENT_QUIESCING' }); state.phase = 'exclusive'; }, release: () => { if (!released && this.transitions.get(id)?.token === state.token) this.transitions.delete(id); released = true; } };
   }
 
   beginApplicationQuit() {

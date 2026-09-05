@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { registerMainWindowQuitGuard, runApplicationQuit } = require('../electron/services/application-quit-coordinator.cjs');
 
@@ -36,6 +38,8 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
 };
 
 (async () => {
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+  assert.match(mainSource, /buttons:\s*\['关闭后台进程并继续退出',\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/);
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
   const mainWindow = new EventEmitter();
   mainWindow.close = () => {

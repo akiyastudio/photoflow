@@ -287,10 +287,12 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     try {
       const result = await window.electronAPI.installComponent({ componentId: component.id });
       if (result.cancelled) return;
-      if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
+      if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}；请重试`, 6000); return; }
       onNotice(`已安装“${component.name}”`);
       await offerPackageCleanup({ appDialog, kind: 'component', componentId: component.id, label: `“${component.name}”组件`, packageSizeBytes: result.packageSizeBytes, onNotice });
       await onComponentsChanged();
+    } catch (error) {
+      onNotice(`安装“${component.name}”失败：${error instanceof Error ? error.message : String(error || '未知错误')}；请重试`, 6000);
     } finally { setBusyId(''); setBusyAction(''); }
   };
   const uninstall = async (component: ComponentStatus) => {
@@ -320,6 +322,8 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
         ? `已卸载“${component.name}”，但部分数据未能清理：${cleanupWarning}`
         : clearUserData ? `已卸载“${component.name}”并清空用户数据和相关缓存` : `已卸载“${component.name}”，用户数据已保留`, cleanupWarning ? 7000 : 4000);
       await onComponentsChanged();
+    } catch (error) {
+      onNotice(`卸载“${component.name}”失败：${error instanceof Error ? error.message : String(error || '未知错误')}；请重试`, 6000);
     } finally { setBusyId(''); setBusyAction(''); }
   };
   const setEnabled = async (component: ComponentStatus, enabled: boolean) => {

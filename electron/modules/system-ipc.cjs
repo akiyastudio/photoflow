@@ -426,6 +426,19 @@ const registerSystemIpc = context => {
       if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw Object.assign(new Error('组件事务日志对象身份绑定删除未完全提交'), { outcomeUnknown: Boolean(deleted?.outcomeUnknown) });
     } finally { await handle.close().catch(() => undefined); }
   };
+  const deleteBoundComponentDirectory = async ({ path: directoryPath, nodeIdentity }) => {
+    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定目录删除服务不可用');
+    const stat = await fs.promises.lstat(directoryPath);
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !sameDirectoryNode(directoryNodeIdentity(stat), nodeIdentity)) throw new Error('组件事务目录身份已变化');
+    const volumeRoot = path.parse(directoryPath).root; const chainPaths = [];
+    for (let current = path.dirname(directoryPath); ; current = path.dirname(current)) { chainPaths.unshift(current); if (current === volumeRoot) break; }
+    const inspected = await componentCleanupPublicationService.inspectPathsBatch([...chainPaths, directoryPath]);
+    if (inspected.length !== chainPaths.length + 1 || inspected.some(item => !item?.success || !item.identity)) throw new Error('组件事务目录 native identity 检查不完整');
+    const finalStat = await fs.promises.lstat(directoryPath);
+    if (!finalStat.isDirectory() || finalStat.isSymbolicLink() || !sameDirectoryNode(directoryNodeIdentity(finalStat), nodeIdentity)) throw new Error('组件事务目录在 native identity 检查后被替换');
+    const result = await componentCleanupPublicationService.deleteDirectoriesBatch([{ path: directoryPath, rootPath: volumeRoot, parentChain: chainPaths.map((candidate, index) => ({ path: candidate, identity: inspected[index].identity })), identity: inspected.at(-1).identity }]);
+    if (!result?.[0]?.success || result[0].deleted !== true || result[0].outcomeUnknown) throw Object.assign(new Error('组件事务目录对象身份绑定删除未完全提交'), { outcomeUnknown: Boolean(result?.[0]?.outcomeUnknown) });
+  };
   const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath, proof }) => {
     if (!componentCleanupPublicationService.nativeAvailable()) throw new Error('对象身份绑定删除服务不可用');
     if (receipt.kind === 'file') {
@@ -749,16 +762,12 @@ const registerSystemIpc = context => {
     return steps;
   };
   const componentTransactions = createComponentTransactionService({
-    fs, path, crypto, installRoot: pluginService.installRoot, captureTreeIdentity: captureComponentTreeIdentity, verifyTreeIdentity: verifyComponentTreeIdentity,
+    fs, path, crypto, installRoot: pluginService.installRoot, preparationRoot: app.getPath('temp'), captureTreeIdentity: captureComponentTreeIdentity, verifyTreeIdentity: verifyComponentTreeIdentity,
     cleanupOwnedPath: (receipt, { persistPrepared }) => cleanupOwnedComponentPath(receipt, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared }),
     finalizeOwnedPath: receipt => finalizeComponentCleanupProof(receipt, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar, verifySidecar: verifyComponentCleanupSidecar }),
     deleteOwnedFile: deleteBoundComponentFile,
-    recoverPreparation: async receipts => {
-      const admission = await queueSystemFilesystemCleanup(receipts, '恢复组件安装临时文件');
-      if (admission?.admitted !== true) throw Object.assign(new Error('组件安装临时文件未获得持久 cleanup admission'), { cleanupPendingReceipts: receipts });
-      try { await admission.completion; }
-      catch (error) { error.cleanupPendingReceipts ||= receipts; error.cleanupPending = true; throw error; }
-    },
+    deleteOwnedDirectory: deleteBoundComponentDirectory,
+    publishNoReplace: (source, target) => componentCleanupPublicationService.moveNoReplace(source, target),
     getComponentEnabled: componentId => pluginService.list().find(item => item.id === componentId)?.enabled !== false,
     setComponentEnabled: (componentId, enabled) => pluginService.setComponentEnabled(componentId, enabled),
     clearComponentEnabledState: componentId => pluginService.clearComponentEnabledState(componentId),
@@ -774,6 +783,22 @@ const registerSystemIpc = context => {
     lifecycleCoordinator?.blockForCorruptTransaction?.();
     throw error;
   }).finally(() => lifecycleCoordinator?.completeStartupRecovery?.());
+  const recoverPendingComponentTransaction = async componentId => {
+    if (!await componentTransactions.hasPendingJournal(componentId)) return [];
+    const recoveryTransition = lifecycleCoordinator?.acquireRecovery?.(componentId);
+    const barrier = componentCapabilityBroker.blockComponent(componentId);
+    try {
+      recoveryTransition?.requestStop?.();
+      await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-transaction-recovery');
+      await componentServiceManager?.stop?.(componentId, 'component-transaction-recovery');
+      await (componentViewManager?.closeComponentAndWait?.(componentId) ?? componentViewManager?.closeComponent?.(componentId));
+      abortComponentNetworkRequests?.(componentId);
+      await barrier.drain({ timeoutMs: 7500 });
+      await recoveryTransition?.promote?.();
+      if (processSupervisor?.hasComponentOwnerProcesses?.(componentId)) throw Object.assign(new Error('组件后台进程树终止状态仍未确认'), { code: 'PROCESS_TERMINATION_FAILED' });
+      return await componentTransactions.recover(componentId);
+    } finally { barrier.release(); recoveryTransition?.release?.(); }
+  };
 
   const resolvePreparedPackage = async (packageRoot, pattern, description) => {
     await fs.promises.mkdir(packageRoot, { recursive: true });
@@ -1006,21 +1031,14 @@ const registerSystemIpc = context => {
     let installVolumeReservation = null;
     let installResponse = null;
     let packageCleanupAttempted = false;
+    let installOperationId = '';
     const installAbortController = new AbortController();
     const abortInstall = () => installAbortController.abort();
     event.sender?.once?.('destroyed', abortInstall);
     try {
       await componentTransactionReady;
       ({ componentId } = validateComponentInstallRequest(request));
-      const recoveryTransition = lifecycleCoordinator?.acquireRecovery?.(componentId);
-      let recoveredTransactions;
-      try { recoveredTransactions = await componentTransactions.recover(componentId); }
-      finally { recoveryTransition?.release?.(); }
-      const recoveredInstall = recoveredTransactions.find(result => result.kind === 'install' && result.status === 'committed');
-      if (recoveredInstall) return { success: true, recovered: true, operationId: recoveredInstall.operationId };
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
-      if (lifecycleCoordinator) { installTransitionLease = lifecycleCoordinator.acquire(componentId, '安装或更新'); releaseInstall = () => installTransitionLease.release(); }
-      else releaseInstall = acquireComponentInstall(componentId);
       const discoveredPackage = pluginService.resolvePackage(componentId);
       const archivePath = discoveredPackage.packagePath;
       const archiveStat = await fs.promises.lstat(archivePath);
@@ -1028,7 +1046,8 @@ const registerSystemIpc = context => {
       capacityReservation = await reserveComponentInstallCapacity(app.getPath('temp'), archiveStat.size + 128 * 1024 * 1024);
       const operation = { signal: installAbortController.signal, deadlineAt: Date.now() + 5 * 60 * 1000 };
       const assertInstallActive = () => { if (operation.signal.aborted) throw Object.assign(new Error('组件安装已取消'), { name: 'AbortError' }); if (Date.now() >= operation.deadlineAt) throw Object.assign(new Error('组件安装超时'), { name: 'AbortError' }); };
-      packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
+      installOperationId = crypto.randomUUID();
+      packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${componentId}-${installOperationId}`);
       packageSnapshotPath = `${packageStagePath}.zip`;
       const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath, operation);
       const packageSnapshotStat = await fs.promises.lstat(packageSnapshotPath);
@@ -1043,6 +1062,11 @@ const registerSystemIpc = context => {
       const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, packageFileName: path.basename(archivePath), packageSizeBytes, packageSha256: sourceIdentity.sha256, dialog, mainWindow });
       if (!confirmed) return installResponse = { success: false, cancelled: true };
       if (!await confirmComponentBackgroundStop({ componentId, action: 'install', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return installResponse = { success: false, cancelled: true };
+      const recoveredTransactions = await recoverPendingComponentTransaction(componentId);
+      const recoveredInstall = recoveredTransactions.find(result => result.kind === 'install' && result.status === 'committed');
+      if (recoveredInstall) return { success: true, recovered: true, operationId: recoveredInstall.operationId };
+      if (lifecycleCoordinator) { installTransitionLease = lifecycleCoordinator.acquire(componentId, '安装或更新'); releaseInstall = () => installTransitionLease.release(); }
+      else releaseInstall = acquireComponentInstall(componentId);
       capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease: installTransitionLease });
       const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath, operation);
       packageStageNodeIdentity = await readDirectoryNodeIdentity(fs, packageStagePath, '组件包展开暂存目录');
@@ -1096,7 +1120,7 @@ const registerSystemIpc = context => {
       const previous = pluginService.list().find(item => item.id === componentId);
       const transactionStagingPath = stagingPath; const transactionStagingIdentity = stagingNodeIdentity;
       const transactionResult = await componentTransactions.install({
-        componentId, container, destination, stagingPath: transactionStagingPath, stagingIdentity: transactionStagingIdentity,
+        operationId: installOperationId, componentId, container, destination, stagingPath: transactionStagingPath, stagingIdentity: transactionStagingIdentity,
         stagingTreeIdentity: componentTreeIdentity, preparationCleanup: packageCleanupPaths, previousInstalled: Boolean(previous?.installed), previousEnabled: previous ? previous.enabled !== false : false, desiredEnabled: true,
         validatePublished: target => pluginService.verifyComponentDirectoryAsync(componentId, target, true),
         commitHostState: async () => { await componentServiceManager?.stop?.(componentId, 'component-upgrade'); await configMutationService.adoptLegacySettings(); },
@@ -1155,19 +1179,18 @@ const registerSystemIpc = context => {
     try {
       await componentTransactionReady;
       const recoveryComponentId = String(componentId || '');
-      const recoveryTransition = lifecycleCoordinator?.acquireRecovery?.(recoveryComponentId);
-      let recoveredTransactions;
-      try { recoveredTransactions = await componentTransactions.recover(recoveryComponentId); }
-      finally { recoveryTransition?.release?.(); }
-      const recoveredUninstall = recoveredTransactions.find(result => result.kind === 'uninstall' && result.status === 'committed');
-      if (recoveredUninstall) return { success: true, recovered: true, dataCleared: recoveredUninstall.clearUserData, cleanupWarnings: [], operationId: recoveredUninstall.operationId };
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
       const clearUserData = options?.clearUserData === true;
+      if (clearUserData && typeof clearComponentSecretData !== 'function') throw new Error('组件私密数据清理依赖不可用');
+      const promptComponent = pluginService.list().find(item => item.id === componentId);
+      if (!await confirmComponentBackgroundStop({ componentId: recoveryComponentId, componentName: promptComponent?.name || recoveryComponentId, action: 'uninstall', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
+      const recoveredTransactions = await recoverPendingComponentTransaction(recoveryComponentId);
+      const recoveredUninstall = recoveredTransactions.find(result => result.kind === 'uninstall' && result.status === 'committed');
+      if (recoveredUninstall) return { success: true, recovered: true, dataCleared: recoveredUninstall.clearUserData, cleanupWarnings: [], operationId: recoveredUninstall.operationId };
       const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
       if (component.source !== 'user') throw new Error('此组件不在用户组件目录中，不能通过组件管理卸载');
       transitionLease = lifecycleCoordinator?.acquire?.(componentId, '卸载', { stopOnly: true });
-      if (!await confirmComponentBackgroundStop({ componentId, componentName: component.name || componentId, action: 'uninstall', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
       const installRoot = path.resolve(pluginService.installRoot);
       const componentPath = path.resolve(component.path);
       const containerPath = path.basename(componentPath) === 'runtime' ? path.dirname(componentPath) : componentPath;
