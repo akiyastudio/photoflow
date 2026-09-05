@@ -134,7 +134,7 @@ class ManagedProcess extends EventEmitter {
     return true;
   }
 
-  async recycle(reason = 'recycle-requested', { timeoutMs = this.specification.windowsJob ? 12000 : 2000, rollbackSettleMs = 25, restartPolicy = false } = {}) {
+  async recycle(reason = 'recycle-requested', { timeoutMs = 2000, rollbackSettleMs = 25, restartPolicy = false } = {}) {
     const lifecycle = this.lifecycle;
     if (!lifecycle || lifecycle.settled) return this.start();
     this._safeLog('warn', 'Managed process recycled', this.details({ reason, generation: lifecycle.generation }));
@@ -285,7 +285,7 @@ class ManagedProcess extends EventEmitter {
     return this._finalizeLifecycle(lifecycle, { error });
   }
 
-  async _onExit(lifecycle, code, signal) {
+  _onExit(lifecycle, code, signal) {
     lifecycle.exitObserved = true;
     if (lifecycle.child.__photoFlowJobManaged && !lifecycle.child.__photoFlowTreeExitConfirmed) {
       lifecycle.terminationFailed = true;
@@ -384,7 +384,7 @@ class ManagedProcess extends EventEmitter {
     return lifecycle.finalizePromise;
   }
 
-  async _onClose(lifecycle, code, signal) {
+  _onClose(lifecycle, code, signal) {
     lifecycle.closeObserved = true;
     if (lifecycle.child.__photoFlowJobManaged && !lifecycle.child.__photoFlowTreeExitConfirmed) return this._onExit(lifecycle, code, signal);
     lifecycle.terminationFailed = false;
@@ -461,8 +461,6 @@ class ProcessSupervisor {
     this.writeLog = writeLog;
     this.now = now;
     this.terminationPlatform = terminationPlatform;
-    this.nativeJobHostPath = nativeJobHostPath;
-    this.enableNativeComponentJobs = enableNativeComponentJobs;
     this.processes = new Map();
     this.stopping = false;
   }
@@ -479,10 +477,7 @@ class ProcessSupervisor {
     if (specification?.owner?.componentId) this.lifecycleCoordinator?.assertLaunchAllowed?.(specification.owner.componentId, lifecycleLease);
     const existing = this.processes.get(id);
     if (existing && !existing.released) throw new Error(`Managed process already exists: ${id}`);
-    const effectiveSpecification = this.enableNativeComponentJobs
-      ? wrapComponentJobSpecification({ ...specification, id }, { jobHostPath: this.nativeJobHostPath })
-      : { ...specification, id };
-    const managed = new ManagedProcess(this, effectiveSpecification);
+    const managed = new ManagedProcess(this, { ...specification, id });
     this.processes.set(id, managed);
     try {
       managed.start();
