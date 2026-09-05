@@ -7,6 +7,32 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Local credentials and environment configuration (keep distributable templates)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+
+# Local application databases and SQLite sidecars
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
 # JavaScript dependencies, build caches, and test output
 node_modules/
 dist-ssr/
@@ -46,6 +72,7 @@ env/
 # Local build tools, downloaded models, compiler caches, and stale cleanup remnants
 /.cache/
 /.tmp/
+/tmp/
 
 # Application build and packaging output
 /artifacts/*

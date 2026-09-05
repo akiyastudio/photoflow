@@ -4,3 +4,4 @@ node_modules/
 dist/
 *.spec
 __pycache__/
+migration-backups/
