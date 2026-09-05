@@ -355,10 +355,14 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
     if (entries.some(entry => !entry.isFile() || entry.isSymbolicLink() || !expected.has(entry.name)) || entries.length !== expected.size) throw new Error('组件事务 append-only journal 文件集合无效');
     const immutableStat = await fs.promises.lstat(receiptAt(tracking.directory)); const immutableReceiptFile = tracking.files[0];
     if (immutableStat.isSymbolicLink() || !sameNode(nodeIdentity(immutableStat), immutableReceiptFile.nodeIdentity) || immutableStat.size !== immutableReceiptFile.size || immutableStat.mtimeMs !== immutableReceiptFile.mtimeMs || immutableStat.ctimeMs !== immutableReceiptFile.ctimeMs) throw new Error('组件事务 immutable receipt 身份已变化');
-    if (tracking.generation > 0) {
-      const latestExpected = tracking.files.at(-1); const latest = await readJournal(stateAt(tracking.directory, tracking.generation), MAX_TRANSACTION_STATE_BYTES); const parsed = JSON.parse(latest.text);
-      if (!sameNode(latest.receipt.nodeIdentity, latestExpected.nodeIdentity) || latest.receipt.size !== latestExpected.size || latest.receipt.sha256 !== latestExpected.sha256 || parsed.stateHash !== tracking.lastStateHash || parsed.generation !== tracking.generation || parsed.operationId !== tracking.operationId || parsed.receiptDigest !== tracking.receiptDigest) throw new Error('组件事务 predecessor state 已变化');
+    const stateReceipts = tracking.files.filter(item => /^state-\d{8}\.json$/.test(path.basename(item.path))).sort((left, right) => left.path.localeCompare(right.path));
+    let previousStateHash = '';
+    for (let index = 0; index < stateReceipts.length; index += 1) {
+      const expectedState = stateReceipts[index]; const loaded = await readJournal(expectedState.path, MAX_TRANSACTION_STATE_BYTES); const parsed = validateStateSchema(JSON.parse(loaded.text)); const { stateHash, ...payload } = parsed;
+      if (!sameNode(loaded.receipt.nodeIdentity, expectedState.nodeIdentity) || loaded.receipt.size !== expectedState.size || loaded.receipt.sha256 !== expectedState.sha256 || stateHash !== require('node:crypto').createHash('sha256').update(JSON.stringify(payload)).digest('hex') || parsed.generation !== index + 1 || parsed.operationId !== tracking.operationId || parsed.receiptDigest !== tracking.receiptDigest || parsed.previousStateHash !== previousStateHash) throw new Error('组件事务 retained state chain 已变化');
+      previousStateHash = stateHash;
     }
+    if (stateReceipts.length !== tracking.generation || previousStateHash !== tracking.lastStateHash) throw new Error('组件事务 retained state generation 不完整');
   };
   const persist = async record => {
     await ensureRoots();
@@ -419,7 +423,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       if (!tracking.gcMode) await assertJournalFiles(tracking);
       let gcFile = tracking.files.find(item => path.basename(item.path) === 'gc.json');
       if (!gcFile) {
-        gcFile = await atomicJson({ fs, path, crypto, filePath: path.join(tracking.directory, 'gc.json'), value: { schemaVersion: 1, operationId: record.operationId, generation: record.generation, terminalStateHash: tracking.lastStateHash }, deleteOwnedFile, publishNoReplace, maxBytes: MAX_TRANSACTION_STATE_BYTES });
+        gcFile = await atomicJson({ fs, path, crypto, filePath: path.join(tracking.directory, 'gc.json'), value: { schemaVersion: 1, componentId: record.componentId, operationId: record.operationId, generation: record.generation, terminalStateHash: tracking.lastStateHash }, deleteOwnedFile, publishNoReplace, maxBytes: MAX_TRANSACTION_STATE_BYTES });
         tracking.files.push(gcFile); await syncDirectory(fs, tracking.directory);
       }
       const immutableFile = tracking.files.find(item => path.basename(item.path) === 'receipt.json');
@@ -434,6 +438,12 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       journalReceipts.delete(record.componentId);
       onUnblocked(record.componentId);
     } catch (error) {
+      if (!(await existing(fs, tracking.directory))) {
+        await syncDirectory(fs, journalRoot);
+        journalReceipts.delete(record.componentId);
+        onUnblocked(record.componentId);
+        return;
+      }
       error.code ||= 'COMPONENT_TRANSACTION_GC_PENDING'; error.gcPending = true; error.cleanupPending = true; error.outcomeUnknown = true; error.transactionRecord = record; onBlocked(record.componentId, error); throw error;
     }
   };
@@ -500,7 +510,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       return await persist({ ...record, phase, lastError: String(error?.message || error).slice(0, 4000) });
     } catch (journalError) {
       const failure = new AggregateError([error, journalError], '组件事务失败且阻断状态无法持久化');
-      failure.code = 'COMPONENT_TRANSACTION_BLOCKED'; failure.outcomeUnknown = true; failure.transactionRecord = record; failure.cleanupPending = true;
+      failure.code = 'COMPONENT_TRANSACTION_BLOCKED'; failure.outcomeUnknown = true; failure.transactionRecord = latestRecord(journalError.transactionRecord, error.transactionRecord, error.journal, record); failure.cleanupPending = true;
       throw failure;
     }
   };
@@ -532,11 +542,12 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
           await fault(`cleanup:data-complete:${item.name}`, record);
           await finalizeOwnedPath(item.receipt);
           await update('finalized');
+          await fault(`cleanup:finalized:${item.name}`, record);
         }
       }
       if (record.preparationCleanup.some(item => item.phase !== 'finalized')) throw new Error('组件安装 preparation cleanup 尚未全部 finalized');
       return record;
-    } catch (error) { error.transactionRecord = error.transactionRecord || record; error.cleanupPending = true; throw error; }
+    } catch (error) { error.transactionRecord = latestRecord(error.transactionRecord, error.journal, record); error.cleanupPending = true; throw error; }
   };
   const verifyFinalizedCleanupProofs = async record => {
     for (const item of [...record.preparationCleanup, ...record.cleanupItems]) {
@@ -700,7 +711,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       if (error?.simulateCrash === true) throw error;
       if (record?.phase === 'host-committing' && !hostCommitted) {
         error.code ||= 'COMPONENT_TRANSACTION_BLOCKED';
-        error.journal = await block(error.transactionRecord || record, error, 'host-committing');
+        error.journal = await block(record, error, 'host-committing');
         throw error;
       }
       if (hostCommitted && record) {
@@ -720,10 +731,10 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       }
       if (record?.preparationCleanup?.some(item => item.phase !== 'finalized')) {
         error.code ||= 'COMPONENT_TRANSACTION_CLEANUP_PENDING';
-        error.journal = await block(error.transactionRecord || record, error);
+        error.journal = await block(record, error);
         throw error;
       }
-      if (record) await restoreInstall(error.transactionRecord || record);
+      if (record) await restoreInstall(record);
       throw error;
     }
     finally {
@@ -864,7 +875,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       else if (record && !error.journal) {
         const sourceMissingAfterPrepared = record.phase === 'prepared' && !(await existing(fs, record.sourcePath));
         if (sourceMissingAfterPrepared) error.outcomeUnknown = true;
-        error.journal = await block(error.transactionRecord || record, error, sourceMissingAfterPrepared ? 'blocked' : 'cleanup-pending');
+        error.journal = await block(record, error, sourceMissingAfterPrepared ? 'blocked' : 'cleanup-pending');
       }
       throw error;
     }
@@ -891,19 +902,27 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
         }
         if (!COMPONENT_ID.test(hintedId) || !entry.isDirectory() || entry.isSymbolicLink()) throw new Error('组件事务 journal entry 不是合法组件目录');
         const directory = fileFor(hintedId); const directoryStat = await fs.promises.lstat(directory);
-        const names = await fs.promises.readdir(directory, { withFileTypes: true });
+        let names = await fs.promises.readdir(directory, { withFileTypes: true });
+        const unpublishedTemps = names.filter(item => item.isFile() && !item.isSymbolicLink() && /^\.(?:receipt\.json|gc\.json|state-\d{8}\.json)\.[a-f0-9-]{36}\.tmp$/.test(item.name));
+        for (const item of unpublishedTemps) await deleteOwnedFile(await captureOrphanFile(path.join(directory, item.name)));
+        if (unpublishedTemps.length) { await syncDirectory(fs, directory); names = await fs.promises.readdir(directory, { withFileTypes: true }); }
         const stateNames = names.filter(item => /^state-\d{8}\.json$/.test(item.name)).map(item => item.name).sort();
         const hasReceipt = names.some(item => item.name === 'receipt.json');
         const hasGcMarker = names.some(item => item.name === 'gc.json');
-        if (names.length === 0) { await deleteOwnedDirectory({ path: directory, nodeIdentity: nodeIdentity(directoryStat) }); await syncDirectory(fs, journalRoot); results.push({ componentId: hintedId, status: 'gc-complete' }); continue; }
+        if (names.length === 0) { await deleteOwnedDirectory({ path: directory, nodeIdentity: nodeIdentity(directoryStat) }); await syncDirectory(fs, journalRoot); journalReceipts.delete(hintedId); onUnblocked(hintedId); results.push({ componentId: hintedId, status: 'gc-complete' }); continue; }
+        if (!hasReceipt && hasGcMarker && names.length === 1) {
+          const gcLoaded = await readJournal(path.join(directory, 'gc.json'), MAX_TRANSACTION_STATE_BYTES); const marker = JSON.parse(gcLoaded.text);
+          if (!exact(marker, ['schemaVersion', 'componentId', 'operationId', 'generation', 'terminalStateHash']) || marker.schemaVersion !== 1 || marker.componentId !== hintedId || !TOKEN.test(marker.operationId) || !Number.isSafeInteger(marker.generation) || !/^[a-f0-9]{64}$/.test(marker.terminalStateHash || '')) throw new Error('组件事务独立 GC marker 无效');
+          await deleteOwnedFile(gcLoaded.receipt); await deleteOwnedDirectory({ path: directory, nodeIdentity: nodeIdentity(directoryStat) }); await syncDirectory(fs, journalRoot); journalReceipts.delete(hintedId); onUnblocked(hintedId); results.push({ componentId: hintedId, status: 'gc-complete' }); continue;
+        }
         if (!hasReceipt || names.length !== stateNames.length + 1 + (hasGcMarker ? 1 : 0) || names.some(item => !item.isFile() || item.isSymbolicLink() || !/^receipt\.json$|^gc\.json$|^state-\d{8}\.json$/.test(item.name))) throw new Error('组件事务 append-only journal 文件集合损坏');
         const receiptLoaded = await readJournal(receiptFor(hintedId)); const immutable = validateImmutableReceipt(JSON.parse(receiptLoaded.text));
         if (immutable.componentId !== hintedId || immutable.installRoot !== root || !sameNode(immutable.installRootIdentity, installRootIdentity)) throw new Error('组件事务 immutable receipt 归属无效');
         const metadata = immutableMetadata(immutable);
         const gcLoaded = hasGcMarker ? await readJournal(path.join(directory, 'gc.json'), MAX_TRANSACTION_STATE_BYTES) : null;
         const gcMarker = gcLoaded ? JSON.parse(gcLoaded.text) : null;
-        if (gcMarker && (!exact(gcMarker, ['schemaVersion', 'operationId', 'generation', 'terminalStateHash']) || gcMarker.schemaVersion !== 1 || gcMarker.operationId !== immutable.operationId || !Number.isSafeInteger(gcMarker.generation) || !/^[a-f0-9]{64}$/.test(gcMarker.terminalStateHash || ''))) throw new Error('组件事务 GC marker 无效');
-        if (stateNames.length === 0) { if (!gcLoaded) throw new Error('组件事务 receipt-only 缺少 GC marker'); await deleteOwnedFile(receiptLoaded.receipt); await deleteOwnedFile(gcLoaded.receipt); await deleteOwnedDirectory({ path: directory, nodeIdentity: nodeIdentity(directoryStat) }); await syncDirectory(fs, journalRoot); results.push({ componentId: hintedId, status: 'gc-complete' }); continue; }
+        if (gcMarker && (!exact(gcMarker, ['schemaVersion', 'componentId', 'operationId', 'generation', 'terminalStateHash']) || gcMarker.schemaVersion !== 1 || gcMarker.componentId !== hintedId || gcMarker.operationId !== immutable.operationId || !Number.isSafeInteger(gcMarker.generation) || !/^[a-f0-9]{64}$/.test(gcMarker.terminalStateHash || ''))) throw new Error('组件事务 GC marker 无效');
+        if (stateNames.length === 0) { if (!gcLoaded) throw new Error('组件事务 receipt-only 缺少 GC marker'); await deleteOwnedFile(receiptLoaded.receipt); await deleteOwnedFile(gcLoaded.receipt); await deleteOwnedDirectory({ path: directory, nodeIdentity: nodeIdentity(directoryStat) }); await syncDirectory(fs, journalRoot); journalReceipts.delete(hintedId); onUnblocked(hintedId); results.push({ componentId: hintedId, status: 'gc-complete' }); continue; }
         const receiptDigest = receiptLoaded.receipt.sha256; let previousStateHash = ''; let record = null; const files = [receiptLoaded.receipt];
         const firstGeneration = Number(/^state-(\d{8})\.json$/.exec(stateNames[0])[1]); const partialGc = firstGeneration !== 1;
         for (let index = 0; index < stateNames.length; index += 1) {
