@@ -74,6 +74,9 @@ env/
 /.tmp/
 /tmp/
 
+# Internal operating records are stored outside the source repository
+/docs/legal/internal/
+
 # Application build and packaging output
 /artifacts/*
 !/artifacts/set-version.bat
