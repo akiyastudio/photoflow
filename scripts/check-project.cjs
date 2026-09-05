@@ -53,7 +53,6 @@ const steps = [
   ['file entry interaction', ['run', 'test:file-entry-interaction']],
   ['file entry sort', ['run', 'test:file-entry-sort']],
   ['Electron security', ['run', 'test:electron-security']],
-  ['CloudBase telemetry privacy and package', ['run', 'test:cloudbase-telemetry']],
   ['filesystem native prerequisites', ['run', 'build:filesystem-native-services']],
   ['filesystem safety', ['run', 'test:filesystem-safety:prepared']],
   ['file transfer rollback', ['run', 'test:file-transfer:prepared']],

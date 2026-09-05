@@ -115,23 +115,12 @@
 
 ### 云端遥测
 
-- `services/cloudbase/telemetry-function/index.js`
-- `services/cloudbase/telemetry-function/retention-policy.js`
-- `services/cloudbase/telemetry-function/admin/app.js`
-- `services/cloudbase/telemetry-function/admin/index.html`
-- `services/cloudbase/telemetry-function/admin/styles.css`
+服务端实现、管理后台、部署脚本及服务端测试在独立私有项目中维护，不属于桌面客户端源码目录。
 
-### 云端遥测发布与行为验收
-
-- `scripts/package-cloudbase-function.py`
-- `scripts/test-cloudbase-function-package.cjs`
-- `scripts/test-cloudbase-function-package.py`
-- `services/cloudbase/telemetry-function/package.json`
-- `docs/CLOUDBASE_ANALYTICS_GUIDE.md`
-- `services/cloudbase/telemetry-function/test/logic.test.mjs`
-- `services/cloudbase/telemetry-function/test/privacy-database-integration.test.mjs`
-- `services/cloudbase/telemetry-function/test/privacy-operations.test.mjs`
-- `services/cloudbase/telemetry-function/test/release-blockers.test.mjs`
+- `docs/CLOUD_API_CONTRACT.md`：客户端与云端的接口边界。
+- `electron/cloud-config.cjs`：公开服务地址及应用标识。
+- `electron/services/telemetry-service.cjs`：客户端请求、队列、同意控制和脱敏。
+- `scripts/test-telemetry-consent.cjs`、`scripts/test-telemetry-queue.cjs`：客户端行为验收。
 
 ## 2. 工作区与项目管理系统
 

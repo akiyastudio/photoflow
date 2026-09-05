@@ -170,8 +170,8 @@ for (const [name, required] of Object.entries({
 const vendorRoot = path.join(root, 'extensions', 'video-tools', 'media-runtime', 'vendor', 'windows-x64');
 for (const repositoryPath of [
   'package.json',
-  'services/cloudbase/telemetry-function/index.js',
-  'docs/CLOUDBASE_ANALYTICS_GUIDE.md',
+  'electron/services/telemetry-service.cjs',
+  'docs/CLOUD_API_CONTRACT.md',
   'extensions/team-retouch/MODEL-SOURCE.md',
 ]) assert(fs.existsSync(path.join(root, repositoryPath)), `documented repository path is missing: ${repositoryPath}`);
 

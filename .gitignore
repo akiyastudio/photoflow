@@ -76,6 +76,11 @@ env/
 
 # Internal operating records are stored outside the source repository
 /docs/legal/internal/
+/services/cloudbase/
+/scripts/package-cloudbase-function.py
+/scripts/test-cloudbase-function-package.py
+/scripts/test-cloudbase-function-package.cjs
+/docs/CLOUDBASE_ANALYTICS_GUIDE.md
 
 # Application build and packaging output
 /artifacts/*
