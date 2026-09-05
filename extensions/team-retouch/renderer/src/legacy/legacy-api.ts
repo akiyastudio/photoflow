@@ -45,15 +45,18 @@ export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = ''
   };
 };
 export const hydrateLegacyWorkspace = (workspace: Json) => {
-  const photos = assertTeamProjectPhotos(workspace.photos || []).map((photo: Json) => {
+  const photos: Json[] = assertTeamProjectPhotos(workspace.photos || []).map((photo: Json) => {
     const reference = mediaRef('original', String(photo.photoId), String(photo.baseVersionId));
     const sourcePath = projectEntryPaths.get(normalizedRelativePath(String(photo.relativePath || ''))) || reference;
     mediaAliases.set(sourcePath, reference);
     return { ...photo, sourcePath, tasks: (photo.tasks || []).map((task: Json) => hydrateTask(task, String(photo.photoId), String(photo.baseVersionId))) };
   });
+  const photoByVersion = new Map(photos.map((photo: Json) => [`${String(photo.photoId)}\0${String(photo.baseVersionId)}`, photo]));
+  const taskBySubject = new Map<string, Json>();
+  for (const photo of photos) for (const task of photo.tasks || []) for (const member of task.members || []) taskBySubject.set(`${String(photo.photoId)}\0${String(photo.baseVersionId)}\0${Number(member.personIndex)}`, task);
   const assignments = (workspace.assignments || []).map((assignment: Json) => {
-    const photo = photos.find((item: Json) => String(item.photoId) === String(assignment.photoId) && String(item.baseVersionId) === String(assignment.baseVersionId));
-    const task = photo?.tasks?.find((item: Json) => item.members.some((member: Json) => Number(member.personIndex) === Number(assignment.personIndex)));
+    const photo = photoByVersion.get(`${String(assignment.photoId)}\0${String(assignment.baseVersionId)}`);
+    const task = photo ? taskBySubject.get(`${String(assignment.photoId)}\0${String(assignment.baseVersionId)}\0${Number(assignment.personIndex)}`) : undefined;
     return { ...assignment, ...(assignment.completed && assignment.completionKind === 'returned' && task ? { editedPatchPath: mediaRef('returned', String(assignment.photoId), String(assignment.baseVersionId), String(task.id), '', '', String(assignment.personIndex)) } : {}) };
   });
   return { ...workspace, photos, assignments };
@@ -151,7 +154,7 @@ export const legacyApi = {
     );
   },
   drainTeamWorkflowReconciles: ({ maxItems = 20, taskIds = [] }: { maxItems?: number; taskIds?: string[] } = {}) => ok('team.workflow.reconcile-drain.v1', { maxItems, ...(taskIds.length ? { taskIds } : {}) }),
-  getProgressFolders: ({ projectId, queryKey = 'all' }: { projectId: string; queryKey?: string }) => readProgressCached(projectId, queryKey),
+  getProgressFolders: ({ projectId }: { projectId: string; queryKey?: string }) => readProgressCached(projectId, 'all'),
   registerProgressWithGraph: async (request: Json) => {
     const result = await ok('team.progress.create.v1', request);
     progressQueries.clear();

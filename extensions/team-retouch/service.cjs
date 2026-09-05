@@ -1601,13 +1601,17 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   }));
   const rebuildToken = String(payload.rebuildToken || '').trim().slice(0, 120);
   const restoreGeneration = String(db.prepare('SELECT value FROM meta WHERE key=?').get(`restore_generation:${String(context.projectId)}`)?.value || '');
-  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), restoreGeneration, strategyVersion: 3, tasks: fingerprintTasks };
+  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), restoreGeneration, strategyVersion: 4, tasks: fingerprintTasks };
   if (rebuildToken) mergeFingerprintInput.rebuildToken = rebuildToken;
   const mergeFingerprint = sha256(JSON.stringify(mergeFingerprintInput));
   const operationId = `merge-${mergeFingerprint.slice(0, 32)}`;
   const mergeStage = path.join(output.mergeDirectory, '.staging', `${operationId}-${crypto.randomUUID()}`);
   const manifestPath = path.join(mergeStage, 'manifest.json');
-  const outputName = `${safeSegment(path.parse(bundle.photo?.originalName || bundle.photo?.displayName || payload.photoId).name, '素材')}_多人修图_${mergeFingerprint.slice(0, 12)}.tif`;
+  const originalName = String(bundle.photo?.originalName || base.filePath || '');
+  const originalExtension = path.extname(originalName).toLowerCase();
+  if (!mergeTasks.length && !['.jpg','.jpeg','.png','.tif','.tiff','.webp'].includes(originalExtension)) throw new Error(`无需修改的 ${originalExtension || '未知'} 原图暂不支持直接登记；请先导出为 JPEG、PNG、TIFF 或 WebP`);
+  const outputExtension = mergeTasks.length ? '.tif' : originalExtension;
+  const outputName = `${safeSegment(path.parse(originalName || payload.photoId).name, '素材')}_多人修图_${mergeFingerprint.slice(0, 12)}${outputExtension}`;
   const privateOutputPath = path.join(mergeStage, outputName);
   const outputRelativePath = [relativeDirectory, restoreGeneration ? `恢复-${restoreGeneration}` : '', outputName].filter(Boolean).join('/');
   await appendCommand(storage, { operationId, type: 'patch-merge', state: 'prepared', photoId: payload.photoId, outputRelativePath });
@@ -2347,6 +2351,7 @@ const workspaceSnapshot = async (parentId, context) => {
     return {
       success: true, photos, identities, assignments: normalizedAssignments,
       snapshotVersion: 1,
+      authoritativeGeneration: String(db.prepare('SELECT value FROM meta WHERE key=?').get(`restore_generation:${projectId}`)?.value || 'original'),
       revision: domainRevision(db, projectId),
       workflowGenerated: Boolean(manifest && Number(manifest.version) >= 2),
       workflowNeedsRegeneration: Boolean(manifest && (generatedIdentityChanged || generatedSettings && (JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)

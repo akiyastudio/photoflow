@@ -9,7 +9,7 @@ const { spawn } = require('child_process');
 const { DatabaseSync } = require('node:sqlite');
 
 const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'service.cjs'), 'utf8');
-assert(/strategyVersion:\s*3\b/.test(serviceSource), 'pixel-changing merge updates must advance the durable merge strategy version');
+assert(/strategyVersion:\s*4\b/.test(serviceSource), 'merge output format changes must advance the durable merge strategy version');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-team-mutations-'));
 const dataRoot = path.join(sandbox, 'data', 'team-retouch');
@@ -18,14 +18,14 @@ const deliveryDirectory = path.join(sandbox, 'delivery');
 const analysisDirectory = path.join(dataRoot, 'photo-1', 'version-1', 'analysis');
 const basePath = path.join(sandbox, 'base.jpg');
 const failingBasePath = path.join(sandbox, 'fail.jpg');
-const secondBasePath = path.join(sandbox, 'second.jpg');
+const secondBasePath = path.join(sandbox, 'second.png');
 const enginePath = path.join(sandbox, 'fake-engine.cjs');
 const batchCountPath = path.join(sandbox, 'batch-count.txt');
 const returnedInputPath = path.join(sandbox, 'returned-input.png');
 fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-fs.writeFileSync(basePath, 'base');
+fs.writeFileSync(basePath, Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5booor8TP1w//2Q==', 'base64'));
 fs.writeFileSync(failingBasePath, 'base');
-fs.writeFileSync(secondBasePath, 'base');
+fs.writeFileSync(secondBasePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVQIHWOsCNBgYGBgrAjQYGBgAAAQswHjiprwSgAAAABJRU5ErkJggg==', 'base64'));
 fs.writeFileSync(returnedInputPath, 'returned');
 fs.writeFileSync(enginePath, `
 const fs = require('fs'); const path = require('path');
@@ -165,6 +165,13 @@ const ready = new Promise((resolve, reject) => {
     const hydratedSnapshot = hydrateLegacyWorkspace(realSnapshot);
     const samePersonPhotos = subjectsFromWorkspace(hydratedSnapshot).filter(subject => subject.identity?.id === savedIdentity.identityId).map(subject => subject.photo).sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN'));
     assert.deepEqual(samePersonPhotos.map(photo => photo.displayName), ['Base', 'Second'], 'real team.project.get DTO hydrates and sorts two same-person photos using displayName only');
+    await invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'batch-task-0', personIndex: 1, completed: true, completionKind: 'no-retouch' });
+    currentBasePath = basePath;
+    await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2', rebuildToken: 'jpg-no-retouch-format' });
+    const jpgOutput = fs.readdirSync(path.join(projectOutputRoot, 'merged')).find(name => name.endsWith('.jpg'));
+    assert(jpgOutput, 'JPEG no-retouch output retains a .jpg extension');
+    assert.deepEqual(fs.readFileSync(path.join(projectOutputRoot, 'merged', jpgOutput)), fs.readFileSync(basePath), 'JPEG no-retouch output retains the original magic bytes');
+    const resetNoRetouchDb = new DatabaseSync(databasePath); resetNoRetouchDb.function('team_request_id', () => ''); resetNoRetouchDb.prepare("UPDATE team_patch_tasks SET status='exported',merged_version_id=NULL WHERE project_id='project-1' AND photo_id='photo-1'").run(); resetNoRetouchDb.prepare("UPDATE team_person_assignments SET completed=0,completion_kind='',completed_at=NULL WHERE project_id='project-1' AND photo_id='photo-1'").run(); resetNoRetouchDb.close();
     const beforeIdentityMaterialize = materializeCount;
     const suggested = await invoke('team.identity.suggest.v1');
     assert.equal(suggested.success, true);
@@ -201,6 +208,9 @@ const ready = new Promise((resolve, reject) => {
     currentBasePath = secondBasePath;
     const pureNoRetouch = await invoke('team.patch.merge.v1', { photoId: 'photo-2', baseVersionId: 'version-2', outputProgressId: 'progress-2' });
     assert.equal(pureNoRetouch.merge.noRetouch, true, 'pure no-retouch publishes the original baseline as a zero-modification version');
+    const pngOutput = fs.readdirSync(path.join(projectOutputRoot, 'merged')).find(name => name.endsWith('.png'));
+    assert(pngOutput, 'PNG no-retouch output retains a .png extension');
+    assert.deepEqual(fs.readFileSync(path.join(projectOutputRoot, 'merged', pngOutput)), fs.readFileSync(secondBasePath), 'PNG no-retouch output retains the original magic bytes');
     const emptyDb = new DatabaseSync(databasePath); emptyDb.function('team_request_id', () => ''); emptyDb.prepare("UPDATE team_patch_tasks SET is_deleted=1 WHERE project_id='project-1' AND photo_id='photo-2' AND base_version_id='version-2'").run(); emptyDb.close();
     await assert.rejects(invoke('team.patch.merge.v1', { photoId: 'photo-2', baseVersionId: 'version-2', outputProgressId: 'progress-2' }), /没有可合成的当前任务/, 'a registered photo with zero active tasks cannot publish a merge');
     const mergeOutputsBeforeMixed = [...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length;

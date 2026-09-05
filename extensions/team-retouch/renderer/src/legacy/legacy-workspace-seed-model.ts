@@ -1,4 +1,5 @@
-export const workspaceSeedScopeKey = (workspacePath: string, project: { id?: string; name?: string; status?: string }) => [workspacePath, project.id || '', project.name || '', project.status || ''].join('\0');
+export const workspaceSeedScopeKey = (workspacePath: string, project: { id?: string }, workspace?: { authoritativeGeneration?: unknown }) =>
+  [workspacePath, project.id || '', String(workspace?.authoritativeGeneration || 'original')].join('\0');
 
 export const isUsableWorkspaceSeed = (value: unknown): value is { success?: boolean; photos: unknown[]; identities: unknown[]; assignments: unknown[] } => {
   const seed = value as Record<string, unknown> | null;

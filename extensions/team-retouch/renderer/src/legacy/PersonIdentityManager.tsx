@@ -15,13 +15,14 @@ import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputP
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 import { beginWorkflowReturnProgress, isPhotoMergeComplete, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, workflowStageSummaries, WORKFLOW_STAGES, type WorkflowReturnProgressState } from '../interaction-model';
-import { isUsableWorkspaceSeed } from './legacy-workspace-seed-model';
+import { isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 import { IdentityPickerPanel } from './IdentityPickerPanel';
 import { prepareAndOpenWorkflowTaskFolder } from './legacy-task-folder-model';
 import { matchesCurrentEvent } from './event-scope-model';
 import { idleWorkflowGeneration, reduceWorkflowGeneration } from './workflow-generation-model';
 import { runSequentialMergeBatch } from './sequential-merge-batch';
+import { createWorkspaceScopeController } from './workspace-state-model';
 
 type Props = {
   componentActive?: boolean;
@@ -429,6 +430,8 @@ const MergeReviewSurface = ({ workspace, subjects, mergeablePhotos, mergeReport,
 export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, historyIssue, onRetryHistory, cacheConfig, componentActive = true, activeStep, onStepChange, onBlockedStage, onNotice, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
+  const managerScope = workspaceSeedScopeKey(workspacePath, project, initialSeed);
+  const workspaceScopeRef = useRef(createWorkspaceScopeController<TeamIdentityWorkspace>(managerScope, initialSeed));
   const [workspace, setWorkspace] = useState<TeamIdentityWorkspace>(() => initialSeed || { success: true, photos: [], identities: [], assignments: [] });
   const [loading, setLoading] = useState(!initialSeed);
   const [workspaceLoadError, setWorkspaceLoadError] = useState('');
@@ -489,6 +492,9 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const workflowReturnVisibleTaskIdsRef = useRef(new Set<string>());
   const workflowGenerationVisibleTaskIdsRef = useRef(new Set<string>());
   const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress>(() => idleWorkflowGeneration(project.id));
+  const workflowGenerationScope = `${workspacePath}\0${project.id}`;
+  const workflowGenerationContextRef = useRef({ projectId: project.id, onNotice });
+  workflowGenerationContextRef.current = { projectId: project.id, onNotice };
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [subjectPageSize, setSubjectPageSize] = useState(18);
   const [relayChainsOpen, setRelayChainsOpen] = useState(false);
@@ -498,13 +504,15 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const peopleScrollRef = useRef<HTMLElement>(null);
   const pendingPeopleScrollAnchorRef = useRef<{ key: string; top: number; scrollTop: number } | null>(null);
   const load = async (showLoading = true) => {
+    const requestScope = managerScope;
+    if (!workspaceScopeRef.current.beginLoad(requestScope)) return;
     const sequence = ++workspaceLoadSequenceRef.current;
     if (showLoading) setLoading(true);
     setWorkspaceLoadError('');
     try {
       const result = await legacyApi.getTeamProjectWorkspace();
       if (!result.success) throw new Error(result.error || '未知错误');
-      if (sequence !== workspaceLoadSequenceRef.current) return;
+      if (sequence !== workspaceLoadSequenceRef.current || !workspaceScopeRef.current.accept(requestScope, result)) return;
       setWorkspace(result);
       if (result.workflowNodeCreated) onProjectChanged();
     } catch (error) {
@@ -513,11 +521,29 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       setWorkspaceLoadError(message); onNotice(`读取人物识别失败：${message}`, 'error');
     } finally { if (showLoading && sequence === workspaceLoadSequenceRef.current) setLoading(false); }
   };
+  const mutateWorkspace = async <T extends { success?: boolean }>(action: () => Promise<T>) => {
+    const mutationScope = managerScope;
+    if (!workspaceScopeRef.current.canMutate(mutationScope) || !workspaceScopeRef.current.beginMutation(mutationScope)) throw new Error('项目数据尚未完成首次同步，请稍后重试');
+    let succeeded = false;
+    try {
+      const result = await action();
+      succeeded = result.success !== false;
+      if (succeeded) await load(false);
+      return result;
+    } finally {
+      const settled = workspaceScopeRef.current.settleMutation(mutationScope, succeeded);
+      if (workspaceScopeRef.current.isCurrent(mutationScope) && settled.snapshot) setWorkspace(settled.snapshot);
+    }
+  };
   useEffect(() => {
+    const transition = workspaceScopeRef.current.setScope(managerScope);
+    if (transition.changed) {
+      workspaceLoadSequenceRef.current += 1; setWorkspace({ success: true, photos: [], identities: [], assignments: [] }); setLoading(true); setWorkspaceLoadError(''); setBusy(''); setPendingResources(new Set()); setAssigningSubject(null); setWorkflowReturnResult(null); setWorkflowReturnReviewOpen(false); setWorkflowReturnProgress(null); setSimilarities([]);
+    }
     if (initialWorkspacePending) return () => { workspaceLoadSequenceRef.current += 1; };
-    if (isUsableWorkspaceSeed(initialWorkspace)) { setWorkspace(current => Number(initialWorkspace.revision) >= Number(current.revision || -1) ? initialWorkspace : current); setWorkspaceLoadError(''); setLoading(false); return () => { workspaceLoadSequenceRef.current += 1; }; }
+    if (isUsableWorkspaceSeed(initialWorkspace) && workspaceScopeRef.current.accept(managerScope, initialWorkspace)) { setWorkspace(initialWorkspace); setWorkspaceLoadError(''); setLoading(false); return () => { workspaceLoadSequenceRef.current += 1; }; }
     void load(true); return () => { workspaceLoadSequenceRef.current += 1; };
-  }, [workspacePath, project.id, project.name, project.status, initialWorkspace, initialWorkspacePending]);
+  }, [managerScope, initialWorkspace, initialWorkspacePending]);
   useEffect(() => {
     let active = true;
     setWorkflowReturnResult(null);
@@ -536,9 +562,9 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         setWorkflowReturnResult(result.review);
         setWorkflowReturnReviewOpen(true);
       }
-    });
+    }).catch(error => { if (active) onNotice(`恢复未确认返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); });
     return () => { active = false; };
-  }, [workspacePath, project.name, project.status]);
+  }, [managerScope]);
   useEffect(() => legacyApi.onTeamPatchReturnBatchProgress(value => {
     if (matchesCurrentEvent(value, { projectId: project.id, operationId: workflowReturnProgress?.operationId }, Boolean(workflowReturnProgress?.operationId))) {
       if (value.operationId) workflowReturnVisibleTaskIdsRef.current.add(value.operationId);
@@ -546,23 +572,29 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     }
   }), [project.id, workflowReturnProgress?.operationId]);
   useEffect(() => {
+    setWorkflowGeneration(idleWorkflowGeneration(workflowGenerationContextRef.current.projectId));
+    workflowGenerationVisibleTaskIdsRef.current.clear();
+  }, [workflowGenerationScope]);
+  useEffect(() => {
     let active = true;
-    setWorkflowGeneration(idleWorkflowGeneration(project.id));
+    const { projectId: scopedProjectId, onNotice: scopedNotice } = workflowGenerationContextRef.current;
     const unsubscribe = legacyApi.onTeamWorkflowGenerationProgress(value => {
-      if (workflowGeneration.operationId && matchesCurrentEvent(value, { projectId: project.id, operationId: workflowGeneration.operationId }, true)) {
-        if (value.operationId) workflowGenerationVisibleTaskIdsRef.current.add(value.operationId);
-        setWorkflowGeneration(current => reduceWorkflowGeneration(current, value, 'event'));
-      }
+      setWorkflowGeneration(current => {
+        if (!current.operationId || !matchesCurrentEvent(value, { projectId: scopedProjectId, operationId: current.operationId }, true)) return current;
+        workflowGenerationVisibleTaskIdsRef.current.add(current.operationId);
+        return reduceWorkflowGeneration(current, value, 'event');
+      });
     });
     void legacyApi.getTeamWorkflowGenerationStatus().then(result => {
-      if (active && result.success && result.job && matchesCurrentEvent(result.job, { projectId: project.id })) setWorkflowGeneration(current => reduceWorkflowGeneration(current, result.job, 'status'));
-    });
+      if (active && result.success && result.job && matchesCurrentEvent(result.job, { projectId: scopedProjectId })) setWorkflowGeneration(current => reduceWorkflowGeneration(current, result.job, 'status'));
+    }).catch(error => { if (active) scopedNotice(`恢复协作流程生成状态失败：${error instanceof Error ? error.message : String(error)}`, 'error'); });
     return () => { active = false; unsubscribe(); };
-  }, [workspacePath, project.id, project.status, project.name, workflowGeneration.operationId]);
+  }, [workflowGenerationScope]);
   const subjects = useMemo(() => subjectsFromWorkspace(workspace), [workspace]);
   const similarityByPair = useMemo(() => new Map(similarities.map(item => [similarityPairKey(item.leftKey, item.rightKey), item])), [similarities]);
   const similarityFor = (left: string, right: string) => similarityByPair.get(similarityPairKey(left, right));
   useEffect(() => {
+    let active = true;
     const handlePick = async (event: Event) => {
       const key = (event as CustomEvent<{ key?: string }>).detail?.key;
       const subject = subjects.find(item => item.key === key);
@@ -573,14 +605,17 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         }
         setAssigningSubject(subject);
         if (!similarities.length) {
-          const result = await legacyApi.getTeamIdentitySimilarities();
-          if (result.success) setSimilarities(result.similarities);
+          try {
+            const requestScope = managerScope;
+            const result = await legacyApi.getTeamIdentitySimilarities();
+            if (active && workspaceScopeRef.current.isCurrent(requestScope) && result.success) setSimilarities(result.similarities);
+          } catch (error) { if (active && workspaceScopeRef.current.isCurrent(managerScope)) onNotice(`读取人物相似度失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
         }
       }
     };
     window.addEventListener('photoflow-team-person-pick', handlePick);
-    return () => window.removeEventListener('photoflow-team-person-pick', handlePick);
-  }, [subjects, tab, similarities, workspacePath, project.name, onNotice]);
+    return () => { active = false; window.removeEventListener('photoflow-team-person-pick', handlePick); };
+  }, [subjects, tab, similarities, managerScope, onNotice]);
   const workflowIdentityOptions = useMemo(() => workspace.identities.filter(identity => subjects.some(subject => subject.identity?.id === identity.id)), [subjects, workspace.identities]);
   const preferredIdentityOrder = useMemo(() => {
     const storedOrder = workspace.workflowSettings?.preferredIdentityOrder?.length
@@ -698,7 +733,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!await ensureFaceRecognitionConsent(appDialog)) return;
     setBusy('suggest');
     try {
-      const result = await legacyApi.suggestTeamIdentities();
+      const result = await mutateWorkspace(() => legacyApi.suggestTeamIdentities());
       if (!result.success) { onNotice(`自动人物分组失败：${result.error || '未知错误'}`, 'error'); return; }
       setSimilarities([]);
       setWorkspace({ ...result, similarities: undefined, workflowSettings: workspace.workflowSettings });
@@ -712,7 +747,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!answer?.trim()) return;
     setBusy('identity-create');
     try {
-      const result = await legacyApi.saveTeamIdentity({ name: answer.trim() });
+      const result = await mutateWorkspace(() => legacyApi.saveTeamIdentity({ name: answer.trim() }));
       if (!result.success) throw new Error(result.error || '未知错误');
       setWorkspace(current => ({ ...current, identities: [...current.identities, { id: result.identityId, name: answer.trim(), color: '#2563eb', createdAt: Date.now(), updatedAt: Date.now() }] }));
     } catch (error) { onNotice(`新建人物失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
@@ -722,7 +757,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!name.trim() || name.trim() === identity.name) return;
     setBusy('identity-rename');
     try {
-      const result = await legacyApi.saveTeamIdentity({ identityId: identity.id, name: name.trim() });
+      const result = await mutateWorkspace(() => legacyApi.saveTeamIdentity({ identityId: identity.id, name: name.trim() }));
       if (!result.success) throw new Error(result.error || '未知错误');
       setWorkspace(current => ({ ...current, identities: current.identities.map(item => item.id === identity.id ? { ...item, name: name.trim(), updatedAt: Date.now() } : item) })); onNotice('人物姓名已更新', 'success');
     } catch (error) { onNotice(`保存姓名失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
@@ -753,7 +788,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setWorkspace(current => replaceAssignment(current, optimisticAssignment));
     setResourcePending(subject.key, true);
     try {
-      const result = await legacyApi.assignTeamIdentity({ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, identityId: nextIdentityId, source: 'manual', confidence: 1, completed });
+      const result = await mutateWorkspace(() => legacyApi.assignTeamIdentity({ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, identityId: nextIdentityId, source: 'manual', confidence: 1, completed }));
       if (!result.success) throw new Error(result.error || '未知错误');
       setAssigningSubject(null);
       if (previousAssignment?.identityId && previousAssignment.identityId !== nextIdentityId) {
@@ -783,7 +818,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!answer?.trim()) return;
     setResourcePending(subject.key, true);
     try {
-      const result = await legacyApi.saveTeamIdentity({ name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] });
+      const result = await mutateWorkspace(() => legacyApi.saveTeamIdentity({ name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] }));
       if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error'); else {
         setAssigningSubject(null);
         void load(false);
@@ -797,7 +832,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!answer) return;
     setBusy('identity-delete');
     try {
-      const result = await legacyApi.deleteTeamIdentity({ identityId: identity.id });
+      const result = await mutateWorkspace(() => legacyApi.deleteTeamIdentity({ identityId: identity.id }));
       if (!result.success) throw new Error(result.error || '未知错误');
       setWorkspace(current => ({ ...current, identities: current.identities.filter(item => item.id !== identity.id), assignments: current.assignments.map(item => item.identityId === identity.id ? { ...item, identityId: undefined, completed: false, updatedAt: Date.now() } : item) }));
     } catch (error) { onNotice(`删除人物失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
@@ -812,7 +847,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const nextSameWeekIdentityIds = [...new Set(requestedSameWeekIdentityIds)].filter(identityId => nextOrder.slice(1).includes(identityId));
     setBusy('workflow-settings');
     try {
-      const result = await legacyApi.saveTeamWorkflowSettings({ preferredIdentityOrder: nextOrder, sameWeekIdentityIds: nextSameWeekIdentityIds });
+      const result = await mutateWorkspace(() => legacyApi.saveTeamWorkflowSettings({ preferredIdentityOrder: nextOrder, sameWeekIdentityIds: nextSameWeekIdentityIds }));
       if (!result.success) { onNotice(`保存开工顺序失败：${result.error || '未知错误'}`, 'error'); return; }
       setWorkspace(current => ({ ...current, workflowNeedsRegeneration: Boolean(current.workflowGenerated), workflowSettings: result.workflowSettings || { ...current.workflowSettings, preferredIdentityOrder: nextOrder, preferredIdentityId: nextOrder[0], sameWeekIdentityIds: nextSameWeekIdentityIds } }));
       onNotice(successMessage, 'success');
@@ -901,7 +936,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (pendingResources.has(item.key)) return;
     setResourcePending(item.key, true);
     try {
-      const result = await legacyApi.completeTeamIdentity({ photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed, completionKind: completed ? 'no-retouch' : '', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex) });
+      const result = await mutateWorkspace(() => legacyApi.completeTeamIdentity({ photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed, completionKind: completed ? 'no-retouch' : '', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex) }));
       if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`, 'error');
       else {
         const reconciliation = await drainTaskChains([item.task.id]);
@@ -931,7 +966,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const worker = async () => {
         while (!errorMessage && cursor < pending.length) {
           const item = pending[cursor++];
-          const result = await legacyApi.completeTeamIdentity({ photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed: true, completionKind: 'no-retouch', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex) });
+          const result = await mutateWorkspace(() => legacyApi.completeTeamIdentity({ photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed: true, completionKind: 'no-retouch', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex) }));
           if (!result.success) { errorMessage = result.error || '未知错误'; return; }
           completedTaskIds.push(item.task.id);
           completedCount += 1;
@@ -953,7 +988,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (pendingResources.has(item.key)) return;
     setResourcePending(item.key, true);
     try {
-      const result = await legacyApi.uploadTeamPatch({ photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex });
+      const result = await mutateWorkspace(() => legacyApi.uploadTeamPatch({ photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex }));
       if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`, 'error');
       else if (!result.cancelled) {
         const reconciliation = await drainTaskChains([item.task.id]);
@@ -969,7 +1004,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (pendingResources.has(item.key)) return;
     setResourcePending(item.key, true);
     try {
-      const result = await legacyApi.removeTeamPatchUpload({ photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex });
+      const result = await mutateWorkspace(() => legacyApi.removeTeamPatchUpload({ photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex }));
       if (!result.success) onNotice(`删除返图失败：${result.error || '未知错误'}`, 'error');
       else {
         const reconciliation = await drainTaskChains([item.task.id]);

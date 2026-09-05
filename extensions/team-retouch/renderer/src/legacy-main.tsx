@@ -86,8 +86,8 @@ const App = () => {
   }, [entriesLoaded, historyLoadInFlight, loadError]);
   const performLoadEntries = useCallback(async (hostContext: ComponentContext) => {
     setHistoryLoadInFlight(true);
-    const managerScopeKey = workspaceSeedScopeKey(hostContext.projectId, { id: hostContext.projectId, name: hostContext.projectName, status: hostContext.projectStatus });
-    setManagerWorkspaceLoadingScopeKey(managerScopeKey);
+    const loadingScopeKey = workspaceSeedScopeKey(hostContext.projectId, { id: hostContext.projectId });
+    setManagerWorkspaceLoadingScopeKey(loadingScopeKey);
     const requestId = loadGuardRef.current.begin();
     if (!entriesLoadedRef.current) setInitialLoading(true);
     setLoadError(''); setHistoryPathWarning('');
@@ -116,12 +116,14 @@ const App = () => {
       if (resolution.missingHistoryCount) warnings.push(`${resolution.missingHistoryCount} 张图片缺少可用路径，已保留为“缺失 / 需重新关联”卡片`);
       setHistoryPathWarning(warnings.join('；'));
       legacyApi.setProjectEntries(resolution.entries); entriesRef.current = resolution.entries; setEntries(resolution.entries);
-      setManagerWorkspaceSeed({ scopeKey: managerScopeKey, workspace: hydrateLegacyWorkspace(workspace) });
+      const hydratedWorkspace: TeamIdentityWorkspace = hydrateLegacyWorkspace(workspace);
+      const managerScopeKey = workspaceSeedScopeKey(hostContext.projectId, { id: hostContext.projectId }, hydratedWorkspace);
+      setManagerWorkspaceSeed({ scopeKey: managerScopeKey, workspace: hydratedWorkspace });
       entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
     } catch (error) {
       if (!loadGuardRef.current.isCurrent(requestId)) return;
       setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error));
-    } finally { setManagerWorkspaceLoadingScopeKey(current => current === managerScopeKey ? '' : current); setHistoryLoadInFlight(false); }
+    } finally { setManagerWorkspaceLoadingScopeKey(current => current === loadingScopeKey ? '' : current); setHistoryLoadInFlight(false); }
   }, []);
   if (!loadCoordinatorRef.current) loadCoordinatorRef.current = createHistoryContextLoadCoordinator(performLoadEntries);
   const loadEntries = useCallback((hostContext: ComponentContext, options: { force?: boolean } = {}) => loadCoordinatorRef.current!.request(hostContext, options), []);
@@ -163,7 +165,7 @@ const App = () => {
     setStep(latestWorkflowStage(workspaceSnapshot));
   }, [context?.projectId, entriesLoaded, workspaceSnapshot]);
   const project = { id: context?.projectId || '', name: context?.projectName || '', status: context?.projectStatus || '', path: '' };
-  const currentManagerScopeKey = workspaceSeedScopeKey(context?.projectId || '', project);
+  const currentManagerScopeKey = workspaceSeedScopeKey(context?.projectId || '', project, managerWorkspaceSeed?.workspace);
   const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);
   const changeStep = (next: WorkflowStage) => {
     if (operationBusy) { notify('当前操作正在处理，请完成后再切换步骤', 'warning'); return; }
@@ -179,7 +181,7 @@ const App = () => {
     void window.photoFlowComponent.getContext().then(nextContext => { contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme); void loadEntries(nextContext); }).catch(error => { setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error)); });
   };
   return <LegacyDialogProvider><div className="legacy-root pf-canvas">
-    {!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step !== 'detect' ? <PersonIdentityManager {...common} onClose={common.onOpenSettings} activeStep={step} historyIssue={loadError || historyPathWarning} onRetryHistory={retryHistory}/> : <TeamRetouchManager {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} historyIssue={loadError || historyPathWarning} onRetryHistory={retryHistory}/>}
+    {!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step !== 'detect' ? <PersonIdentityManager key={`people:${currentManagerScopeKey}`} {...common} onClose={common.onOpenSettings} activeStep={step} historyIssue={loadError || historyPathWarning} onRetryHistory={retryHistory}/> : <TeamRetouchManager key={`retouch:${currentManagerScopeKey}`} {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} historyIssue={loadError || historyPathWarning} onRetryHistory={retryHistory}/>}
     {settingsOpen && <TeamSettingsDialog state={settingsState} patch={settingsController.patch} retry={() => void settingsController.refresh()} close={() => setSettingsOpen(false)} notice={notify}/>}
   </div></LegacyDialogProvider>;
 };
