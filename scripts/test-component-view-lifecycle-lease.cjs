@@ -4,6 +4,7 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
 const { ComponentViewManager } = require('../electron/services/component-view-manager.cjs');
 
 const loadGates = [];
+let asyncDestroyNextClose = false;
 class WebContents extends EventEmitter {
   constructor() {
     super();
@@ -21,7 +22,11 @@ class WebContents extends EventEmitter {
     loadGates.push({ release });
     return promise;
   }
-  close() { if (!this.destroyed) { this.destroyed = true; this.emit('destroyed'); } }
+  close() {
+    if (this.destroyed) return;
+    const destroy = () => { if (!this.destroyed) { this.destroyed = true; this.emit('destroyed'); } };
+    if (asyncDestroyNextClose) { asyncDestroyNextClose = false; setImmediate(destroy); } else destroy();
+  }
 }
 class WebContentsView {
   constructor() { this.webContents = new WebContents(); }
@@ -32,7 +37,7 @@ class WebContentsView {
 (async () => {
   const componentId = 'fixture.component';
   const coordinator = new ComponentLifecycleCoordinator();
-  const descriptor = {
+  let descriptor = {
     componentId, componentVersion: '1', componentRoot: __dirname, contractVersion: 2,
     fullPage: { id: 'main', title: 'Fixture', entry: __filename }, service: { permissions: [], events: [] },
   };
@@ -118,6 +123,19 @@ class WebContentsView {
   await manager.closeAllAndWait();
   assert.equal(manager.failedCapabilityClearIds.has(componentId), false, 'application-wide close retries remembered passive failures');
   assert.equal(capabilityClearAttempts, attemptsBeforeRememberedFailure + 2, 'remembered failure is retried exactly once');
+
+  descriptor = { ...descriptor, componentVersion: '1' };
+  const originalForReplacement = manager.openSurface(request, 'component.fullPage');
+  while (!loadGates[4]) await new Promise(resolve => setImmediate(resolve));
+  loadGates[4].release(); await originalForReplacement;
+  const gatesBeforeReplacement = loadGates.length; const attemptsBeforeReplacement = capabilityClearAttempts;
+  asyncDestroyNextClose = true; descriptor = { ...descriptor, componentVersion: '2' };
+  const replacementOpen = manager.openSurface({ ...request, componentVersion: '2' }, 'component.fullPage');
+  assert.equal(loadGates.length, gatesBeforeReplacement, 'replacement renderer is not created before async destroyed cleanup is registered');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(capabilityClearAttempts, attemptsBeforeReplacement + 1, 'replacement waits for old renderer destruction before clearing capability state');
+  while (loadGates.length === gatesBeforeReplacement) await new Promise(resolve => setImmediate(resolve));
+  loadGates.at(-1).release(); await replacementOpen; await manager.closeComponentAndWait(componentId);
 
   console.log('Component view lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

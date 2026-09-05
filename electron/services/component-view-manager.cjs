@@ -569,6 +569,9 @@ class ComponentViewManager {
   close(instanceId) {
     const instance = this.instancesById.get(instanceId);
     if (!instance) return false;
+    const componentId = instance.descriptor.componentId;
+    const lastComponentView = ![...this.senderBindings.values()].some(bound => bound !== instance && bound.context.componentId === componentId);
+    if (lastComponentView) void this.requestComponentCapabilityClear(componentId, [instance.view.webContents]);
     clearTimeout(instance.settingsCloseTimer);
     instance.settingsCloseTimer = null;
     if (this.instances.get(instance.key) === instance) this.instances.delete(instance.key);
