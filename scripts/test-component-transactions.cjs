@@ -3,7 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { captureComponentTreeIdentity, componentCleanupIntentPaths, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
+const { captureComponentTreeIdentity, componentCleanupIntentPaths, componentTreeIdentityDigest, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 const { createComponentTransactionService, nodeIdentity } = require('../electron/services/component-transaction-service.cjs');
 
 const writeTree = async (root, value) => {
@@ -11,6 +11,20 @@ const writeTree = async (root, value) => {
   await fs.promises.writeFile(path.join(root, 'component.json'), JSON.stringify({ value }), 'utf8');
 };
 const readValue = async root => JSON.parse(await fs.promises.readFile(path.join(root, 'component.json'), 'utf8')).value;
+const journalDirectory = state => path.join(state.installRoot, '.transactions', state.componentId);
+const readLatestJournal = async state => {
+  const directory = journalDirectory(state);
+  const names = (await fs.promises.readdir(directory)).filter(name => /^state-\d{8}\.json$/.test(name)).sort();
+  const statePath = path.join(directory, names.at(-1));
+  const mutable = JSON.parse(await fs.promises.readFile(statePath, 'utf8'));
+  const receipt = JSON.parse(await fs.promises.readFile(path.join(directory, 'receipt.json'), 'utf8'));
+  return { journal: { ...receipt, ...mutable }, mutable, statePath, directory };
+};
+const writeStateWithHash = async (statePath, mutable) => {
+  const { stateHash: _stateHash, ...payload } = mutable;
+  const stateHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  await fs.promises.writeFile(statePath, `${JSON.stringify({ ...payload, stateHash })}\n`, 'utf8');
+};
 const crash = message => Object.assign(new Error(message), { simulateCrash: true, code: 'SIMULATED_CRASH' });
 
 const fixture = async () => {
@@ -21,10 +35,10 @@ const fixture = async () => {
   const destination = path.join(container, 'runtime');
   await fs.promises.mkdir(container, { recursive: true });
   const enabled = new Map([[componentId, true]]);
-  const makeService = ({ fault = async () => undefined, cleanupFault = async () => undefined, trashFault = null, blocked = new Set(), onTrash = () => undefined } = {}) => createComponentTransactionService({
-    fs, path, crypto, installRoot,
-    captureTreeIdentity: captureComponentTreeIdentity,
-    verifyTreeIdentity: verifyComponentTreeIdentity,
+  const makeService = ({ fault = async () => undefined, cleanupFault = async () => undefined, trashFault = null, blocked = new Set(), onTrash = () => undefined, onPublish = () => undefined, preparationRoot = '', verifyTreeIdentityOverride = verifyComponentTreeIdentity, captureTreeIdentityOverride = captureComponentTreeIdentity } = {}) => createComponentTransactionService({
+    fs, path, crypto, installRoot, preparationRoot,
+    captureTreeIdentity: captureTreeIdentityOverride,
+    verifyTreeIdentity: verifyTreeIdentityOverride,
     cleanupOwnedPath: async (receipt, { persistPrepared }) => {
       const sidecars = componentCleanupIntentPaths(receipt);
       const preparedReceipt = { ...receipt, cleanupPhase: 'prepared', sidecarReceipts: [['intent', sidecars.intentPath], ['proof', sidecars.proofPath], ['verified', sidecars.verifiedPath]].map(([role, sidecarPath]) => ({ path: sidecarPath, role, size: 1, sha256: 'a'.repeat(64), nativeIdentity: `native:${role}` })) };
@@ -43,6 +57,16 @@ const fixture = async () => {
       const digest = crypto.createHash('sha256').update(content).digest('hex');
       if (stat.isSymbolicLink() || stat.dev !== receipt.nodeIdentity.dev || stat.ino !== receipt.nodeIdentity.ino || stat.birthtimeMs !== receipt.nodeIdentity.birthtimeMs || stat.size !== receipt.size || digest !== receipt.sha256) throw new Error('bound file replacement');
       await fs.promises.unlink(receipt.path);
+    },
+    deleteOwnedDirectory: async receipt => {
+      const stat = await fs.promises.lstat(receipt.path);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== receipt.nodeIdentity.dev || stat.ino !== receipt.nodeIdentity.ino || stat.birthtimeMs !== receipt.nodeIdentity.birthtimeMs) throw new Error('bound directory replacement');
+      await fs.promises.rmdir(receipt.path);
+    },
+    publishNoReplace: async (source, target) => {
+      if (await fs.promises.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error))) throw Object.assign(new Error('target exists'), { code: 'EEXIST' });
+      await onPublish(source, target);
+      await fs.promises.rename(source, target);
     },
     getComponentEnabled: id => enabled.get(id) !== false,
     setComponentEnabled: (id, value) => enabled.set(id, value),
@@ -196,7 +220,7 @@ const journalFaultMatrix = async () => {
         assert.equal(await readValue(state.destination), phase === 'committed' ? 'new' : 'old', `${code} install ${phase}`);
       } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
     }
-    for (const phase of ['prepared', 'quarantined', 'cleanup-pending', 'committed']) {
+    for (const phase of ['prepared', 'quarantined', 'cleanup-pending', 'finalized']) {
       const state = await fixture();
       try {
         await writeTree(state.destination, 'installed');
@@ -232,7 +256,7 @@ const partialCleanupRecovery = async () => {
         targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)),
         targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
       }), error => error.simulateCrash === true);
-      const journal = JSON.parse(await fs.promises.readFile(path.join(state.installRoot, '.transactions', `${state.componentId}.json`), 'utf8'));
+      const { journal } = await readLatestJournal(state);
       assert.equal(journal.cleanupItems.find(item => item.name === 'uninstall-runtime').phase, phase === 'after-delete' ? 'prepared' : phase);
       const recovered = await state.makeService().recover();
       assert.equal(recovered[0].status, 'committed', phase);
@@ -240,6 +264,63 @@ const partialCleanupRecovery = async () => {
       assert.equal(state.enabled.has(state.componentId), false, phase);
     } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
   }
+};
+
+const uninstallLayoutMatrix = async () => {
+  for (const layout of ['legacy', 'runtime']) for (const clearUserData of [false, true]) {
+    const state = await fixture();
+    try {
+      const destination = layout === 'legacy' ? state.container : state.destination;
+      await writeTree(destination, 'installed');
+      const targetPath = layout === 'legacy' || clearUserData ? state.container : state.destination;
+      const result = await state.makeService().uninstall({ componentId: state.componentId, container: state.container, destination, targetPath, targetIdentity: nodeIdentity(await fs.promises.lstat(targetPath)), targetTreeIdentity: await captureComponentTreeIdentity(targetPath), clearUserData, previousEnabled: true });
+      assert.equal(result.status, 'committed', `${layout}/${clearUserData}`);
+      assert.equal(fs.existsSync(targetPath), false, `${layout}/${clearUserData}`);
+    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+  }
+};
+
+const transactionOwnedPackagePreparation = async () => {
+  for (const validationFails of [false, true]) {
+    const state = await fixture();
+    try {
+      await writeTree(state.destination, 'old');
+      const staged = await state.stage('new'); const operationId = crypto.randomUUID(); const preparationRoot = path.join(state.sandbox, 'temp');
+      await fs.promises.mkdir(preparationRoot);
+      const packageStage = path.join(preparationRoot, `photoflow-component-package-${state.componentId}-${operationId}`); const snapshot = `${packageStage}.zip`;
+      await writeTree(packageStage, 'package'); await fs.promises.writeFile(snapshot, 'zip');
+      const packageStageStat = await fs.promises.lstat(packageStage); const packageTree = await captureComponentTreeIdentity(packageStage); const snapshotStat = await fs.promises.lstat(snapshot);
+      const preparationCleanup = [
+        { path: packageStage, kind: 'directory', nodeIdentity: nodeIdentity(packageStageStat), treeDigest: componentTreeIdentityDigest(packageTree) },
+        { path: snapshot, kind: 'file', nodeIdentity: nodeIdentity(snapshotStat), size: snapshotStat.size, sha256: crypto.createHash('sha256').update('zip').digest('hex'), mode: snapshotStat.mode & 0o777 },
+      ];
+      const result = state.makeService({ preparationRoot }).install({ operationId, componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, preparationCleanup, validatePublished: async () => { assert.equal(fs.existsSync(packageStage), false); assert.equal(fs.existsSync(snapshot), false); if (validationFails) throw new Error('validation failed'); }, commitHostState: async () => undefined });
+      if (validationFails) await assert.rejects(result, /validation failed/); else await result;
+      assert.equal(await readValue(state.destination), validationFails ? 'old' : 'new');
+      assert.equal(fs.existsSync(staged.target), false, 'transaction owns runtime staging after durable admission');
+    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+  }
+};
+
+const largeReceiptUsesSmallAppendOnlyStates = async () => {
+  const state = await fixture();
+  try {
+    state.enabled.delete(state.componentId);
+    const staged = await state.stage('new');
+    const largeTree = Array.from({ length: 20000 }, (_, index) => ({ path: `tree/${String(index).padStart(5, '0')}.bin`, kind: 'file', size: index, sha256: 'b'.repeat(64), node: { dev: 1, ino: index + 1, birthtimeMs: index + 0.5 }, mode: 0o600 }));
+    const publishedBytes = [];
+    await state.makeService({ verifyTreeIdentityOverride: async () => true, onPublish: async source => { const stat = await fs.promises.lstat(source); if (stat.isFile()) publishedBytes.push({ name: path.basename(source), size: stat.size }); } }).install({
+      componentId: state.componentId, container: state.container, destination: state.destination,
+      stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: largeTree,
+      previousInstalled: false, previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined,
+    });
+    const receiptBytes = Math.max(...publishedBytes.filter(item => item.name.includes('receipt')).map(item => item.size));
+    const stateBytes = publishedBytes.filter(item => item.name.includes('state-')).map(item => item.size);
+    assert(receiptBytes > 2 * 1024 * 1024, '20k immutable tree receipt exercises the large-receipt path');
+    assert(stateBytes.length >= 3 && Math.max(...stateBytes) < 64 * 1024, 'phase states stay small and never rewrite the tree receipt');
+    assert(stateBytes.reduce((sum, size) => sum + size, 0) < receiptBytes / 10, 'all mutable phase I/O is sublinear versus the immutable tree');
+    console.log(`20k transaction receipt: ${receiptBytes} bytes immutable once; ${stateBytes.reduce((sum, size) => sum + size, 0)} bytes across ${stateBytes.length} mutable states; max state ${Math.max(...stateBytes)} bytes`);
+  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
 };
 
 const installCleanupRoleCrashRecovery = async () => {
@@ -261,8 +342,7 @@ const installCleanupRoleCrashRecovery = async () => {
         stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
         previousEnabled: false, desiredEnabled: true, validatePublished, commitHostState: async () => undefined,
       }));
-      const journalPath = path.join(state.installRoot, '.transactions', `${state.componentId}.json`);
-      const journal = JSON.parse(await fs.promises.readFile(journalPath, 'utf8'));
+      const { journal } = await readLatestJournal(state);
       assert.equal(journal.cleanupItems.find(item => item.name === role).phase, 'prepared', `${role} persists prepared before native deletion`);
       const recovered = await state.makeService().recover();
       assert.equal(recovered[0].status, role === 'committed-backup' ? 'committed' : 'rolled-back');
@@ -284,7 +364,7 @@ const committedCleanupKeepsLatestPreparedRecord = async () => {
       stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
       previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined,
     }), error => Boolean(error.journal));
-    const journal = JSON.parse(await fs.promises.readFile(path.join(state.installRoot, '.transactions', `${state.componentId}.json`), 'utf8'));
+    const { journal } = await readLatestJournal(state);
     assert.equal(journal.phase, 'committed', 'forward-only cleanup failure never regresses to host-committing');
     assert.equal(journal.cleanupItems.find(item => item.name === 'committed-backup').phase, 'prepared', 'latest prepared receipt survives outer error handling');
     assert.equal(state.enabled.get(state.componentId), false, 'desired enablement waits for cleanup finalization');
@@ -305,16 +385,45 @@ const cleanupReceiptTamperIsBlocked = async () => {
       targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)),
       targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
     }), error => error.simulateCrash === true);
-    const journalPath = path.join(state.installRoot, '.transactions', `${state.componentId}.json`);
-    const journal = JSON.parse(await fs.promises.readFile(journalPath, 'utf8'));
-    journal.cleanupItems[0].receipt.path = path.join(state.sandbox, 'outside-owned-root');
-    await fs.promises.writeFile(journalPath, `${JSON.stringify(journal)}\n`, 'utf8');
+    const loaded = await readLatestJournal(state); const journal = loaded.journal;
+    loaded.mutable.cleanupItems[0].receipt.path = path.join(state.sandbox, 'outside-owned-root');
+    await writeStateWithHash(loaded.statePath, loaded.mutable);
     let nativeDeletes = 0;
     const recovered = await state.makeService({ onTrash: () => { nativeDeletes += 1; } }).recover();
     assert.equal(recovered[0].status, 'blocked');
     assert.equal(nativeDeletes, 0, 'forged cleanup receipt must be rejected before native deletion');
     assert.equal(await readValue(journal.quarantinePath), 'installed');
-    assert.equal(fs.existsSync(journalPath), true, 'corrupt journal remains durably blocked for inspection');
+    assert.equal(fs.existsSync(loaded.directory), true, 'corrupt journal remains durably blocked for inspection');
+  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+};
+
+const cleanupPlanTamperMatrix = async () => {
+  const variants = [
+    ['empty', () => []], ['subset', steps => steps.slice(0, 1)], ['reorder', steps => [...steps].reverse()],
+    ['duplicate', steps => [...steps, steps[0]]], ['extra', steps => [...steps, { name: 'extra', state: 'pending' }]],
+  ];
+  for (const [label, mutate] of variants) {
+    const state = await fixture();
+    try {
+      await writeTree(state.destination, 'installed'); let fired = false;
+      await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'uninstall:quarantine') { fired = true; throw crash(point); } } }).uninstall({
+        componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.container,
+        targetIdentity: nodeIdentity(await fs.promises.lstat(state.container)), targetTreeIdentity: await captureComponentTreeIdentity(state.container), clearUserData: true, previousEnabled: true,
+      }), error => error.simulateCrash === true);
+      const loaded = await readLatestJournal(state); loaded.mutable.cleanupSteps = mutate(loaded.mutable.cleanupSteps); await writeStateWithHash(loaded.statePath, loaded.mutable);
+      let mutations = 0; const recovered = await state.makeService({ onTrash: () => { mutations += 1; } }).recover();
+      assert.equal(recovered[0].status, 'blocked', label); assert.equal(mutations, 0, label); assert.equal(await readValue(state.destination), 'installed', label);
+    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+  }
+  const state = await fixture();
+  try {
+    await writeTree(state.destination, 'installed'); let fired = false;
+    await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'uninstall:quarantine') { fired = true; throw crash(point); } } }).uninstall({
+      componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.destination,
+      targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)), targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
+    }), error => error.simulateCrash === true);
+    const loaded = await readLatestJournal(state); loaded.mutable.cleanupSteps = [{ name: 'settings', state: 'pending' }]; await writeStateWithHash(loaded.statePath, loaded.mutable);
+    const recovered = await state.makeService().recover(); assert.equal(recovered[0].status, 'blocked', 'clear=false+steps'); assert.equal(await readValue(state.destination), 'installed');
   } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
 };
 
@@ -340,8 +449,7 @@ const missingCleanupTargetsFailClosed = async () => {
           validatePublished: async () => undefined, commitHostState: async () => undefined,
         }), error => error.simulateCrash === true);
       }
-      const journalPath = path.join(state.installRoot, '.transactions', `${state.componentId}.json`);
-      const journal = JSON.parse(await fs.promises.readFile(journalPath, 'utf8'));
+      const loaded = await readLatestJournal(state); const journalPath = loaded.directory; const journal = loaded.journal;
       cleanupTarget = role === 'rollback-runtime' ? journal.destination : journal.quarantinePath;
       await fs.promises.rm(cleanupTarget, { recursive: true, force: true });
       let nativeDeletes = 0;
@@ -385,7 +493,7 @@ const replacementsBeforeCommitStayDisabled = async () => {
       assert.equal(replaced, true, mode);
       assert.equal(await readValue(state.destination), 'competitor', `${mode} preserves replacement runtime`);
       assert.equal(state.enabled.get(state.componentId), false, `${mode} never enables or clears disabled state after replacement`);
-      assert.equal(fs.existsSync(path.join(state.installRoot, '.transactions', `${state.componentId}.json`)), true, `${mode} remains durably blocked`);
+      assert.equal(fs.existsSync(journalDirectory(state)), true, `${mode} remains durably blocked`);
     } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
   }
 };
@@ -518,16 +626,20 @@ const recoveryDoesNotCrossActiveUninstall = async () => {
 (async () => {
   await installCrashRecovery();
   await committedCleanupRecovery();
+  await transactionOwnedPackagePreparation();
+  await largeReceiptUsesSmallAppendOnlyStates();
   await committedCleanupKeepsLatestPreparedRecord();
   await preJournalFailureRetainsCallerOwnership();
   await firstInstallRollbackIsAbsent();
   await uninstallRecovery();
   await runtimeTrashRetry();
+  await uninstallLayoutMatrix();
   await competitorIsNeverDeleted();
   await journalFaultMatrix();
   await partialCleanupRecovery();
   await installCleanupRoleCrashRecovery();
   await cleanupReceiptTamperIsBlocked();
+  await cleanupPlanTamperMatrix();
   await missingCleanupTargetsFailClosed();
   await replacementsBeforeCommitStayDisabled();
   await concurrentRecoveryIsSingleFlight();
