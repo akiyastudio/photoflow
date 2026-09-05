@@ -159,7 +159,23 @@ internal static class JobObjectLauncher
 
     private static Task RelayInput(IntPtr destination)
     {
-        return Task.Factory.StartNew(() => { using (var output = new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(destination,true),FileAccess.Write,4096,false)) { try { Console.OpenStandardInput().CopyTo(output); } catch { } } }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        return Task.Factory.StartNew(() => {
+            using (var input = Console.OpenStandardInput())
+            using (var output = new FileStream(new Microsoft.Win32.SafeHandles.SafeFileHandle(destination,true),FileAccess.Write,4096,false)) {
+                try {
+                    var buffer = new byte[16 * 1024];
+                    while (true) {
+                        int count = input.Read(buffer,0,buffer.Length);
+                        if (count == 0) break;
+                        output.Write(buffer,0,count);
+                        // Component RPC frames are commonly much smaller than
+                        // FileStream's buffer. Flush each source read so an
+                        // interactive target observes every request promptly.
+                        output.Flush();
+                    }
+                } catch { }
+            }
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
     }
 
     private static uint ActiveProcessCount()

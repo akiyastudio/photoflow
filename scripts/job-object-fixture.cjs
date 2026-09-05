@@ -10,6 +10,15 @@ if (mode === 'natural') {
 } else if (mode === 'stdin-eof') {
   process.stdin.resume(); process.stdin.once('end', () => write({ type: 'stdin-eof', pid: process.pid }));
   setTimeout(() => { process.stderr.write('stdin did not reach EOF'); process.exit(9); }, 3000).unref();
+} else if (mode === 'interactive') {
+  const readline = require('readline');
+  write({ type: 'interactive-ready', pid: process.pid });
+  const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  input.on('line', line => {
+    const request = JSON.parse(line);
+    write({ type: 'interactive-response', id: request.id, size: String(request.payload || '').length });
+  });
+  input.once('close', () => write({ type: 'interactive-eof', pid: process.pid }));
 } else if (mode === 'wait') {
   write({ type: 'wait', pid: process.pid });
   setInterval(() => undefined, 1000);

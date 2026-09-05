@@ -15,6 +15,19 @@ const waitDead = async (pid, timeoutMs = 5000) => { const deadline = Date.now() 
 const stillOwnedFixture = pid => { const script = `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" -ErrorAction SilentlyContinue;if($p){$p.CommandLine}`; const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }); const commandLine = String(result.stdout || ''); return commandLine.includes('job-object-launcher') || commandLine.includes(path.basename(fixture)); };
 const watchdog = (promise, timeoutMs, label) => { let timer; return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} watchdog expired`)), timeoutMs); })]).finally(() => clearTimeout(timer)); };
 const collect = child => { let stdout = ''; child.stdout?.on('data', chunk => { stdout += chunk; }); return () => stdout; };
+const collectLines = child => {
+  const values = []; const waiters = []; let buffer = '';
+  child.stdout.on('data', chunk => {
+    buffer += chunk.toString();
+    const lines = buffer.split(/\r?\n/); buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line) continue;
+      values.push(JSON.parse(line));
+      while (waiters.length && values.length >= waiters[0].count) waiters.shift().resolve(values);
+    }
+  });
+  return { values, waitFor: (count, timeoutMs = 5000) => values.length >= count ? Promise.resolve(values) : watchdog(new Promise(resolve => waiters.push({ count, resolve })), timeoutMs, `interactive stdout line ${count}`) };
+};
 const launch = (mode, extra = [], stdio = ['ignore', 'pipe', 'pipe']) => {
   const child = launchWindowsJobProcess(process.execPath, [fixture, mode, ...extra], { stdio }); known.add(child.pid);
   void child.ready.then(({ targetPid }) => known.add(targetPid)); return child;
@@ -49,6 +62,22 @@ const main = async () => {
 
   const eof = launch('jsonl-eof'); const eofOutput = collect(eof); await eof.ready; await eof.treeExit; await closeOf(eof); assert.equal(JSON.parse(eofOutput()).type, 'tail', 'unterminated JSONL tail must drain before close');
   const ignoredInput = launch('stdin-eof'); const ignoredInputOutput = collect(ignoredInput); await ignoredInput.ready; await ignoredInput.treeExit; assert.equal((await closeOf(ignoredInput)).code, 0); assert.equal(JSON.parse(ignoredInputOutput().trim()).type, 'stdin-eof', 'ignored target stdin must receive EOF without inheriting the helper control/stdin handle');
+
+  const interactive = launch('interactive', [], ['pipe', 'pipe', 'pipe']); const interactiveLines = collectLines(interactive); await interactive.ready; await interactiveLines.waitFor(1);
+  interactive.stdin.write(`${JSON.stringify({ id: 'small', payload: 'first' })}\n`);
+  await interactiveLines.waitFor(2);
+  const longPayload = 'x'.repeat(256 * 1024);
+  interactive.stdin.write(`${JSON.stringify({ id: 'long', payload: longPayload })}\n`);
+  await interactiveLines.waitFor(3);
+  assert.deepEqual(interactiveLines.values.slice(1, 3).map(value => [value.id, value.size]), [['small', 5], ['long', longPayload.length]], 'Job stdin/stdout proxy must preserve multiple interactive requests including a long frame');
+  interactive.stdin.end();
+  await interactiveLines.waitFor(4);
+  await interactive.treeExit; assert.equal((await closeOf(interactive)).code, 0); assert.equal(interactiveLines.values[3].type, 'interactive-eof', 'ending proxy stdin must deliver EOF to the target');
+
+  const interactiveTerminated = launch('interactive', [], ['pipe', 'pipe', 'pipe']); const terminatedLines = collectLines(interactiveTerminated); const terminatedReady = await interactiveTerminated.ready; await terminatedLines.waitFor(1);
+  interactiveTerminated.stdin.write(`${JSON.stringify({ id: 'before-terminate', payload: 'visible' })}\n`); await terminatedLines.waitFor(2);
+  await interactiveTerminated.terminateJob(Date.now() + 5000); await interactiveTerminated.treeExit; await closeOf(interactiveTerminated); await waitDead(terminatedReady.targetPid);
+  assert.equal(terminatedLines.values[1].id, 'before-terminate', 'interactive response must drain before explicit Job termination');
 
   const secret = `secret-${Date.now()}-not-on-helper-command-line`; const secretChild = launch('natural', ['0', secret]); const secretOutput = collect(secretChild); await secretChild.ready;
   assert(!secretChild.spawnargs.join(' ').includes(secret), 'target arguments must not appear on the helper command line'); await secretChild.treeExit; await closeOf(secretChild); assert.equal(JSON.parse(secretOutput().trim()).value, secret);
