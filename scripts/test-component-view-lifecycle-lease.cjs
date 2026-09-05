@@ -80,17 +80,44 @@ class WebContentsView {
   const delayedContents = new EventEmitter(); delayedContents.destroyed = false; delayedContents.isDestroyed = () => delayedContents.destroyed;
   const attemptsBeforeDelayedDestroy = capabilityClearAttempts;
   const delayedClear = manager.requestComponentCapabilityClear(componentId, [delayedContents], 1000);
+  const reopenedAfterClear = manager.openSurface(request, 'component.fullPage');
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(capabilityClearAttempts, attemptsBeforeDelayedDestroy, 'capability state remains intact while target renderer is alive');
+  assert.equal(loadGates.length, 2, 'reopen does not create a renderer while prior capability clear is pending');
   delayedContents.destroyed = true; delayedContents.emit('destroyed'); await delayedClear;
   assert.equal(capabilityClearAttempts, attemptsBeforeDelayedDestroy + 1, 'destroyed prerequisite triggers exactly one clear');
+  while (!loadGates[2]) await new Promise(resolve => setImmediate(resolve));
+  loadGates[2].release(); await reopenedAfterClear; await manager.closeComponentAndWait(componentId);
 
+  const transitionDelayedContents = new EventEmitter(); transitionDelayedContents.destroyed = false; transitionDelayedContents.isDestroyed = () => transitionDelayedContents.destroyed;
+  const transitionDelayedClear = manager.requestComponentCapabilityClear(componentId, [transitionDelayedContents], 1000);
+  const blockedReopen = manager.openSurface(request, 'component.fullPage');
+  await new Promise(resolve => setImmediate(resolve));
+  const blockingIntent = coordinator.acquire(componentId, 'disable', { stopOnly: true }); blockingIntent.requestStop();
+  const closeDuringClear = manager.closeComponentAndWait(componentId); const blockedPromotion = blockingIntent.promote();
+  transitionDelayedContents.destroyed = true; transitionDelayedContents.emit('destroyed'); await transitionDelayedClear;
+  await assert.rejects(blockedReopen, error => error.code === 'COMPONENT_QUIESCING');
+  await closeDuringClear; await blockedPromotion;
+  assert.equal(manager.instances.size, 0, 'requestStop recheck prevents a view from escaping a pending clear barrier');
+  blockingIntent.release();
+
+  const cancelledDelayedContents = new EventEmitter(); cancelledDelayedContents.destroyed = false; cancelledDelayedContents.isDestroyed = () => cancelledDelayedContents.destroyed;
+  const cancelledDelayedClear = manager.requestComponentCapabilityClear(componentId, [cancelledDelayedContents], 1000);
+  const allowedReopen = manager.openSurface(request, 'component.fullPage');
+  await new Promise(resolve => setImmediate(resolve));
+  const cancelledClearIntent = coordinator.acquire(componentId, 'disable', { stopOnly: true }); cancelledClearIntent.release();
+  cancelledDelayedContents.destroyed = true; cancelledDelayedContents.emit('destroyed'); await cancelledDelayedClear;
+  while (!loadGates[3]) await new Promise(resolve => setImmediate(resolve));
+  loadGates[3].release(); await allowedReopen; await manager.closeComponentAndWait(componentId);
+  assert.equal(manager.instances.size, 0, 'cancelled intent permits a safe reopen after clear completion');
+
+  const attemptsBeforeRememberedFailure = capabilityClearAttempts;
   failCapabilityClear = true;
   await assert.rejects(manager.requestComponentCapabilityClear(componentId), /capability clear failed/);
   assert.equal(manager.failedCapabilityClearIds.has(componentId), true, 'passive clear failure remains visible after its promise settles');
   await manager.closeAllAndWait();
   assert.equal(manager.failedCapabilityClearIds.has(componentId), false, 'application-wide close retries remembered passive failures');
-  assert.equal(capabilityClearAttempts, attemptsBeforeDelayedDestroy + 3, 'remembered failure is retried exactly once');
+  assert.equal(capabilityClearAttempts, attemptsBeforeRememberedFailure + 2, 'remembered failure is retried exactly once');
 
   console.log('Component view lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

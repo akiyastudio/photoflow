@@ -290,6 +290,10 @@ class ComponentViewManager {
     const settingsPage = declaredSettingsPage || (settingsFormCustomPage ? { ...settingsFormCustomPage, id: String(request.pageId) } : null); const contribution = request.contribution || null;
     const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
     if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
+    const pendingCapabilityClear = this.capabilityClearOperations.get(componentId);
+    if (pendingCapabilityClear) await pendingCapabilityClear;
+    else if (this.failedCapabilityClearIds.has(componentId)) await this.requestComponentCapabilityClear(componentId);
+    this.lifecycleCoordinator?.assertLaunchAllowed?.(componentId, lifecycleLease);
     const retainedSettings = settingsKey ? this.instances.get(settingsKey) : null;
     if (retainedSettings?.context.surface === 'application.settings') {
       if (retainedSettings.descriptor.componentVersion !== descriptor.componentVersion || retainedSettings.page.entry !== page.entry) this.close(retainedSettings.instanceId);

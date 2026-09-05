@@ -63,7 +63,7 @@ const enteredBarrier = await enterComponentInstallTransition({
   abortComponentNetworkRequests: () => transitionEvents.push('abort-network'),
 });
 assert.equal(enteredBarrier, transitionBarrier);
-assert.deepEqual(transitionEvents, ['block', 'stop-tree', 'stop-service', 'close-view', 'abort-network', 'drain']);
+assert.deepEqual(transitionEvents, ['block', 'stop-service', 'stop-tree', 'close-view', 'abort-network', 'drain']);
 enteredBarrier.release();
 let failedBarrierReleased = false;
 await assert.rejects(enterComponentInstallTransition({
@@ -121,7 +121,7 @@ promptDialog.showMessageBox = async (_window, options) => {
 };
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
 promptDialog.showMessageBox = async (_window, options) => {
-  assert.deepEqual(options.buttons, ['关闭后台进程并继续退出', '取消']);
+  assert.deepEqual(options.buttons, ['关闭后台进程并继续卸载', '取消']);
   return { response: 0 };
 };
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
