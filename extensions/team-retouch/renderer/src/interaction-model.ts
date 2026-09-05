@@ -260,7 +260,7 @@ export const workflowGroups = (workspace: Json, preferredIdentityOrder: string[]
   const entries: Array<WorkflowScheduleEntry & Json> = subjectsFromWorkspace(workspace).flatMap((subject: Json) => {
     const identity = subject.assignment?.identityId ? identities.get(String(subject.assignment.identityId)) as Json | undefined : undefined;
     if (!identity || /^待确认人物\s+\d+$/.test(String(identity.name || ''))) return [];
-    return [{ key: subject.key, taskId: String(subject.task.id), personIndex: subject.personIndex, identityId: String(identity.id), identityName: String(identity.name), photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, photoName: subject.photo.name || subject.photo.displayName || subject.photo.photoId }];
+    return [{ key: subject.key, taskId: String(subject.task.id), personIndex: subject.personIndex, identityId: String(identity.id), identityName: String(identity.name), photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, photoName: subject.photo.displayName }];
   });
   const scheduled = scheduleWorkflowWeeks(entries, { preferredIdentityOrder });
   const groups = new Map<string, Json>();

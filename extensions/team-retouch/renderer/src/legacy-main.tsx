@@ -24,18 +24,6 @@ import './legacy-style.css';
 
 type Json = Record<string, any>;
 const assertSuccess = (value: Json, fallback: string) => { if (value?.success === false) throw new Error(value.error || fallback); return value; };
-const TRUSTED_SNAPSHOT_VERSION = 1;
-const trustedSnapshotKey = (projectId: string) => `photoflow:team-retouch:trusted-workspace:v${TRUSTED_SNAPSHOT_VERSION}:${projectId}`;
-const readTrustedSnapshot = (projectId: string): Json | undefined => {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(trustedSnapshotKey(projectId)) || 'null');
-    return value?.version === TRUSTED_SNAPSHOT_VERSION && value?.projectId === projectId && value?.workspace?.success !== false ? value.workspace : undefined;
-  } catch { return undefined; }
-};
-const writeTrustedSnapshot = (projectId: string, workspace: Json) => {
-  if (workspace?.snapshotVersion !== TRUSTED_SNAPSHOT_VERSION) return;
-  try { window.localStorage.setItem(trustedSnapshotKey(projectId), JSON.stringify({ version: TRUSTED_SNAPSHOT_VERSION, projectId, storedAt: Date.now(), workspace })); } catch { /* Display cache is optional. */ }
-};
 const applyResolvedTheme = (resolvedTheme: 'light' | 'dark') => {
   // This renderer owns its isolated document. Scoping the body keeps every
   // createPortal surface on the same contract without leaking into Host DOM.
@@ -72,6 +60,7 @@ const App = () => {
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<Json>(() => normalizeWorkspace(undefined));
   const [managerWorkspaceSeed, setManagerWorkspaceSeed] = useState<{ scopeKey: string; workspace: TeamIdentityWorkspace }>();
   const [managerWorkspaceLoadingScopeKey, setManagerWorkspaceLoadingScopeKey] = useState('');
+  const [operationBusy, setOperationBusy] = useState(false);
   const contextRef = useRef<ComponentContext>();
   const entriesRef = useRef<Json[]>([]);
   const entriesLoadedRef = useRef(false);
@@ -105,12 +94,19 @@ const App = () => {
     try {
       let workspace = assertSuccess(await teamProjectRpc<Json>('team.project.get.v1'), '无法读取团片协作历史');
       if (!loadGuardRef.current.isCurrent(requestId)) return;
+      if (workspace.recoveryRequired?.required) {
+        notify('检测到恢复后的协作输出，正在当前项目内受控校准；完成前不会开放编辑', 'info');
+        const reconciliation = await legacyApi.drainTeamWorkflowReconciles({ maxItems: 20 });
+        if (!loadGuardRef.current.isCurrent(requestId)) return;
+        if (reconciliation.success === false || reconciliation.state === 'failed') throw new Error(reconciliation.error || '恢复后的协作输出尚未校准，已阻止使用旧状态');
+        workspace = assertSuccess(await teamProjectRpc<Json>('team.project.get.v1'), '无法刷新恢复后的团片协作历史');
+        if (workspace.recoveryRequired?.required) throw new Error('恢复后的协作输出仍需校准，已阻止使用旧状态');
+      }
       const selectedRelativePaths = hostContext.selectedRelativePaths || [];
       if (selectedRelativePaths.length) {
         workspace = assertSuccess(await teamProjectRpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
         if (!loadGuardRef.current.isCurrent(requestId)) return;
       }
-      writeTrustedSnapshot(hostContext.projectId, workspace);
       setWorkspaceSnapshot(normalizeWorkspace(workspace));
       const knownPaths = entriesRef.current.filter(entry => !entry.teamHistoryMissing).map(entry => String(entry.relativePath || '')).filter(Boolean);
       const resolution = resolveTeamRetouchEntriesForOpen(workspace, [...knownPaths, ...selectedRelativePaths]);
@@ -150,15 +146,6 @@ const App = () => {
       }
       legacyApi.setMediaAuthorizationScope(nextContext.projectId);
       contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme);
-      const trusted = readTrustedSnapshot(nextContext.projectId);
-      if (trusted) {
-        const resolution = resolveTeamRetouchEntriesForOpen(trusted, []);
-        legacyApi.setProjectEntries(resolution.entries); entriesRef.current = resolution.entries; setEntries(resolution.entries);
-        setWorkspaceSnapshot(normalizeWorkspace(trusted));
-        setManagerWorkspaceSeed({ scopeKey: workspaceSeedScopeKey(nextContext.projectId, { id: nextContext.projectId, name: nextContext.projectName, status: nextContext.projectStatus }), workspace: hydrateLegacyWorkspace(trusted) });
-        setHistoryRecordCount(resolution.historyPhotoCount); setHistoryOwnershipPendingCount(resolution.ownershipPendingCount);
-        entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
-      }
       void loadEntries(nextContext);
     };
     void window.photoFlowComponent.getContext().then(acceptContext).catch(error => { if (mounted) { setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error)); } });
@@ -179,12 +166,13 @@ const App = () => {
   const currentManagerScopeKey = workspaceSeedScopeKey(context?.projectId || '', project);
   const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);
   const changeStep = (next: WorkflowStage) => {
+    if (operationBusy) { notify('当前操作正在处理，请完成后再切换步骤', 'warning'); return; }
     const guard = canEnterWorkflowStage(workspaceSnapshot, next);
     if (!guard.allowed) { notify(guard.reason, 'warning'); return; }
     setStep(next);
   };
   const openSettings = () => { setSettingsOpen(true); void settingsController.refresh(); };
-  const common = { workspacePath: context?.projectId || '', project, initialWorkspace: managerWorkspaceSeed?.scopeKey === currentManagerScopeKey ? managerWorkspaceSeed.workspace : undefined, initialWorkspacePending: managerWorkspaceLoadingScopeKey === currentManagerScopeKey, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: (reason: string) => notify(reason, 'warning'), onClose: () => undefined, onOpenSettings: openSettings, onNotice: notify, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
+  const common = { workspacePath: context?.projectId || '', project, initialWorkspace: managerWorkspaceSeed?.scopeKey === currentManagerScopeKey ? managerWorkspaceSeed.workspace : undefined, initialWorkspacePending: managerWorkspaceLoadingScopeKey === currentManagerScopeKey, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: (reason: string) => notify(reason, 'warning'), onClose: () => undefined, onOpenSettings: openSettings, onNotice: notify, onBusyChange: setOperationBusy, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
   const retryHistory = () => {
     if (contextRef.current) { void loadEntries(contextRef.current, { force: true }); return; }
     setInitialLoading(true); setLoadError('');

@@ -1,0 +1,3 @@
+export type PhotoLoadIdentity = { projectId: string; photoId: string; baseVersionId: string; relativePath: string; revision: string | number };
+export const photoLoadKey = (value: PhotoLoadIdentity) => [value.projectId, value.photoId, value.baseVersionId, value.relativePath, value.revision].join('\0');
+export const createPhotoLoadToken = () => { let current = ''; let generation = 0; return { begin(value: PhotoLoadIdentity) { current = photoLoadKey(value); generation += 1; return { key: current, generation }; }, isCurrent(token: { key: string; generation: number }) { return token.key === current && token.generation === generation; }, invalidate() { generation += 1; current = ''; } }; };

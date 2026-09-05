@@ -32,6 +32,7 @@ const fs = require('fs'); const path = require('path');
 const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1];
 if (args[0] === 'match-batch') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); const returned = manifest.returned[0]; const candidate = manifest.candidates[0]; console.log(JSON.stringify({ type: 'progress', progress: 12, message: '读取返图 1/1' })); console.log(JSON.stringify({ type: 'progress', progress: 67, message: '比对图片 1/1' })); console.log(JSON.stringify({ matches: [{ ...returned, ...candidate, confidence: 'high', matchConfidence: 'high', editEvidence: { reallyModified: true }, returnWarnings: [] }] })); process.exit(0); }
 if (args[0] === 'merge') { fs.mkdirSync(path.dirname(value('--output')), { recursive: true }); fs.writeFileSync(value('--output'), 'merged'); console.log(JSON.stringify({ mergedCount: 1, conflictPixels: 0, seamScore: 1, width: 100, height: 100, metrics: [] })); process.exit(0); }
+if (args[0] === 'restore') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); const outputs = manifest.tasks.map(task => { fs.mkdirSync(path.dirname(task.patchPath), { recursive: true }); fs.writeFileSync(task.patchPath, 'recropped-large-source'); return { id: task.id, width: 6000, height: 6000, digest: require('crypto').createHash('sha256').update(fs.readFileSync(task.patchPath)).digest('hex') }; }); console.log(JSON.stringify({ outputs })); process.exit(0); }
 if (args[0] === 'identify') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); console.log(JSON.stringify({ clusters: [], similarities: [], unmatchedCount: manifest.subjects.length, method: 'fixture' })); process.exit(0); }
 if (args[0] === 'detect-batch') {
   console.log(JSON.stringify({ type: 'progress', progress: 35, message: 'batch-progress' }));
@@ -125,6 +126,21 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(fs.existsSync(path.join(dataRoot, 'inputs')), true);
     assert.equal(fs.readdirSync(path.join(dataRoot, 'inputs')).length, 0, 'operation-scoped detection inputs are cleaned');
     assert(!JSON.stringify(detected).includes(deliveryDirectory), 'service responses must not disclose authorized host paths');
+    let recropDb = new DatabaseSync(databasePath); recropDb.function('team_request_id', () => '');
+    recropDb.prepare("UPDATE team_patch_tasks SET generation_json=? WHERE project_id='project-1' AND id='task-1'").run(JSON.stringify({ version: 2, sourceWidth: 10000, sourceHeight: 6000, workWidth: 6000, workHeight: 3600 })); recropDb.close();
+    await invoke('team.patch.update.v1', { photoId: 'photo-1', taskId: 'task-1', crop: { x: 500, y: 250, width: 8000, height: 5500 } });
+    recropDb = new DatabaseSync(databasePath); const recropGeneration = JSON.parse(recropDb.prepare("SELECT generation_json FROM team_patch_tasks WHERE project_id='project-1' AND id='task-1'").get().generation_json); recropDb.close();
+    assert.deepEqual(recropGeneration.sourceCrop, { x: 500, y: 250, width: 8000, height: 5500 }, '>40MP source recrop persists the authoritative source crop');
+    assert.deepEqual([recropGeneration.workWidth, recropGeneration.workHeight], [6000, 6000]);
+    assert.match(recropGeneration.digest, /^[a-f0-9]{64}$/, '>40MP source recrop persists the generated file digest');
+    const savedIdentity = await invoke('team.identity.save.v1', { name: '原子标签', assignments: [{ photoId: 'photo-1', baseVersionId: 'version-1', personIndex: 1 }] });
+    let labelDb = new DatabaseSync(databasePath);
+    assert.equal(labelDb.prepare("SELECT person_name FROM team_patch_tasks WHERE project_id='project-1' AND id='task-1'").get().person_name, '原子标签', 'identity save updates task labels in the same service transaction');
+    labelDb.close();
+    await invoke('team.identity.save.v1', { identityId: savedIdentity.identityId, name: '原子标签已改名', assignments: [] });
+    labelDb = new DatabaseSync(databasePath);
+    assert.equal(labelDb.prepare("SELECT person_name FROM team_patch_tasks WHERE project_id='project-1' AND id='task-1'").get().person_name, '原子标签已改名', 'identity rename updates every task with one set-based service mutation');
+    labelDb.close();
     currentBasePath = failingBasePath;
     await assert.rejects(invoke('team.patch.detect.v1', { photoId: 'photo-1', baseVersionId: 'version-1' }), /退出/);
     const db = new DatabaseSync(databasePath);
@@ -141,6 +157,14 @@ const ready = new Promise((resolve, reject) => {
     const replacementsBeforeRepeat = controlledReplacementWrites;
     await invoke('team.patch.detect-batch.v1', { relativePaths: ['one.jpg', 'two.jpg'] });
     assert.equal(controlledReplacementWrites - replacementsBeforeRepeat, 2, 'regenerated working images use Host Host controlled replacement ownership');
+    await invoke('team.identity.assign.v1', { photoId: 'photo-1', baseVersionId: 'version-1', personIndex: 1, identityId: savedIdentity.identityId });
+    await invoke('team.identity.assign.v1', { photoId: 'photo-2', baseVersionId: 'version-2', personIndex: 1, identityId: savedIdentity.identityId });
+    const realSnapshot = await invoke('team.project.get.v1');
+    const { hydrateLegacyWorkspace } = await import('../renderer/src/legacy/legacy-api.ts');
+    const { subjectsFromWorkspace } = await import('../renderer/src/interaction-model.ts');
+    const hydratedSnapshot = hydrateLegacyWorkspace(realSnapshot);
+    const samePersonPhotos = subjectsFromWorkspace(hydratedSnapshot).filter(subject => subject.identity?.id === savedIdentity.identityId).map(subject => subject.photo).sort((left, right) => left.displayName.localeCompare(right.displayName, 'zh-CN'));
+    assert.deepEqual(samePersonPhotos.map(photo => photo.displayName), ['Base', 'Second'], 'real team.project.get DTO hydrates and sorts two same-person photos using displayName only');
     const beforeIdentityMaterialize = materializeCount;
     const suggested = await invoke('team.identity.suggest.v1');
     assert.equal(suggested.success, true);

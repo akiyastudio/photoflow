@@ -1,6 +1,8 @@
 import { rpc, type ComponentContext } from '../sdk.ts';
 import { expireLegacyMedia, scheduleLegacyMedia } from './legacy-media-scheduler.ts';
 import { createTeamRevisionCoordinator, retryOnceAfterRevisionConflict } from './legacy-revision-model.ts';
+import { createScopedPromiseCache } from './scoped-promise-cache.ts';
+import { assertTeamProjectPhotos } from './team-project-photo.ts';
 
 type Json = Record<string, any>;
 type MediaKind = 'original' | 'working' | 'returned' | 'review-return';
@@ -43,7 +45,7 @@ export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = ''
   };
 };
 export const hydrateLegacyWorkspace = (workspace: Json) => {
-  const photos = (workspace.photos || []).map((photo: Json) => {
+  const photos = assertTeamProjectPhotos(workspace.photos || []).map((photo: Json) => {
     const reference = mediaRef('original', String(photo.photoId), String(photo.baseVersionId));
     const sourcePath = projectEntryPaths.get(normalizedRelativePath(String(photo.relativePath || ''))) || reference;
     mediaAliases.set(sourcePath, reference);
@@ -78,13 +80,8 @@ const missingMediaResult = (kind: 'thumbnail' | 'original') => ({
   error: kind === 'thumbnail' ? '历史预览文件缺失或引用已失效，可重新识别或关联原图' : '历史原图缺失或引用已失效，可重新关联后重试',
 });
 const event = (topic: string, callback: (value: any) => void) => window.photoFlowComponent.onEvent(topic, callback);
-let progressQuery: { expiresAt: number; promise: Promise<Json> } | undefined;
-const readProgressCached = () => {
-  if (progressQuery && progressQuery.expiresAt > Date.now()) return progressQuery.promise;
-  const promise = ok('team.progress.list.v1').catch(error => { progressQuery = undefined; throw error; });
-  progressQuery = { expiresAt: Date.now() + 2_000, promise };
-  return promise;
-};
+const progressQueries = createScopedPromiseCache<Json>(2_000);
+const readProgressCached = (projectId: string, queryKey = 'all') => progressQueries.get(queryKey, () => ok('team.progress.list.v1', { projectId, queryKey }));
 const authorizeMedia = async (ref: LegacyMediaReference, variant: 'preview' | 'original', priority: number) => {
   const scope = mediaAuthorizationScope; const generation = mediaAuthorizationGeneration;
   const result = await scheduleLegacyMedia(`${scope}:${JSON.stringify(ref)}:${variant}`, async () => {
@@ -112,7 +109,7 @@ export const legacyApi = {
   setMediaAuthorizationScope: (scope: string) => {
     const next = String(scope || '');
     if (next === mediaAuthorizationScope) return;
-    mediaAuthorizationGeneration += 1; expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next; revisionCoordinator.setScope(next);
+    mediaAuthorizationGeneration += 1; expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next; revisionCoordinator.setScope(next); progressQueries.setScope(next);
   },
   getMediaAuthorizationScope: () => mediaAuthorizationScope,
   getTeamPatches: async (request: { relativePath: string; baseVersionId: string }) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: request.relativePath }), request.baseVersionId),
@@ -154,10 +151,10 @@ export const legacyApi = {
     );
   },
   drainTeamWorkflowReconciles: ({ maxItems = 20, taskIds = [] }: { maxItems?: number; taskIds?: string[] } = {}) => ok('team.workflow.reconcile-drain.v1', { maxItems, ...(taskIds.length ? { taskIds } : {}) }),
-  getProgressFolders: () => readProgressCached(),
+  getProgressFolders: ({ projectId, queryKey = 'all' }: { projectId: string; queryKey?: string }) => readProgressCached(projectId, queryKey),
   registerProgressWithGraph: async (request: Json) => {
     const result = await ok('team.progress.create.v1', request);
-    progressQuery = undefined;
+    progressQueries.clear();
     return result;
   },
   openTeamPatch: async ({ reference }: { reference: string }) => { const ref = parseLegacyMediaRef(reference); return ref?.kind === 'working' ? ok('team.patch.open.v1', ref) : { success: false, error: '工作图引用已失效' }; },

@@ -15,8 +15,10 @@ import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { isIdentityConfirmed, WORKFLOW_STAGES, workingImageMetrics } from '../interaction-model';
 import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
-import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
+import { isUsableWorkspaceSeed } from './legacy-workspace-seed-model';
 import { IdentityPickerPanel } from './IdentityPickerPanel';
+import { matchesCurrentEvent } from './event-scope-model';
+import { createPhotoLoadToken } from './photo-load-token';
 
 type Props = {
   componentActive?: boolean;
@@ -123,8 +125,8 @@ const bundleFromWorkspacePhoto = (photo: TeamProjectPhoto): TeamPatchBundle => (
     id: photo.photoId,
     projectId: '',
     mediaType: 'image',
-    originalName: photo.name,
-    displayName: photo.name,
+    originalName: photo.displayName,
+    displayName: photo.displayName,
     currentVersionId: photo.baseVersionId,
     originalFilePath: photo.sourcePath,
     createdAt: 0,
@@ -231,8 +233,8 @@ const IdentitySubjectThumb = ({ subject, cacheConfig, compact = false }: { subje
   const viewY = Math.max(0, Math.min(subject.task.crop.height - viewHeight, centerY - viewHeight / 2));
   return <><div className="relative aspect-[4/3] overflow-hidden rounded-lg bg-slate-950">
     {preview.url ? <svg className="block h-full w-full" viewBox={`${viewX} ${viewY} ${viewWidth} ${viewHeight}`} preserveAspectRatio="xMidYMid meet"><image href={preview.url} width={subject.task.crop.width} height={subject.task.crop.height}/><rect x={x} y={y} width={boxWidth} height={boxHeight} fill="none" stroke="#facc15" strokeWidth={Math.max(3, viewWidth / 180)}/></svg> : <div className="absolute inset-0 flex items-center justify-center"><LazyPreviewPlaceholder failed={preview.status === 'failed'} error={preview.error} onRetry={preview.retry}/></div>}
-    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 py-1 pl-2 pr-11 text-[10px] font-bold text-white">{subject.photo.name} · 人物 {subject.personIndex}</span><ImageZoomButton disabled={!preview.url} onClick={() => setFullscreen(true)}/>
-  </div>{fullscreen && preview.url && <FullscreenImageViewer url={preview.url} filePath={subject.task.patchPath} cacheConfig={cacheConfig} title={`${subject.photo.name} · 人物 ${subject.personIndex}`} details={`${Math.round(subject.task.crop.width)} × ${Math.round(subject.task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
+    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 py-1 pl-2 pr-11 text-[10px] font-bold text-white">{subject.photo.displayName} · 人物 {subject.personIndex}</span><ImageZoomButton disabled={!preview.url} onClick={() => setFullscreen(true)}/>
+  </div>{fullscreen && preview.url && <FullscreenImageViewer url={preview.url} filePath={subject.task.patchPath} cacheConfig={cacheConfig} title={`${subject.photo.displayName} · 人物 ${subject.personIndex}`} details={`${Math.round(subject.task.crop.width)} × ${Math.round(subject.task.crop.height)} px`} onClose={() => setFullscreen(false)}/>}</>;
 };
 
 const IdentityPicker = ({ subject, candidates, allSubjects, identities, includedKeys, cacheConfig, busy, busyLabel, onToggleCandidate, onOnlyCurrent, onConfirm, onCreate, onClear, onExclude, onRename, onDelete, onClose }: {
@@ -380,17 +382,19 @@ type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange'> & {
   initialPhoto?: TeamProjectPhoto;
 };
 
-const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = true, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange }: PhotoCardProps) => {
+const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = true, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange, onBusyChange }: PhotoCardProps) => {
   const appDialog = useAppDialog();
   const [bundle, setBundle] = useState<TeamPatchBundle>(() => initialPhoto ? bundleFromWorkspacePhoto(initialPhoto) : { success: true, versions: [], tasks: [] });
   const [loading, setLoading] = useState(!initialPhoto);
+  const [loadError, setLoadError] = useState('');
   const [busy, setBusy] = useState('');
+  useEffect(() => { onBusyChange?.(Boolean(busy)); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   const [cropEditor, setCropEditor] = useState<{ task: TeamPatchTask; crop: Crop } | null>(null);
   useEscapeLayer(Boolean(cropEditor), () => setCropEditor(null), !busy.startsWith('crop:'));
   const [detectionProgress, setDetectionProgress] = useState({ progress: 0, message: '等待识别操作' });
   const [sourceFullscreen, setSourceFullscreen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
-  const initialWorkspaceBundleRef = useRef(Boolean(initialPhoto));
+  const photoLoadTokenRef = useRef(createPhotoLoadToken());
   const [previewEnabled, setPreviewEnabled] = useState(false);
 
   useEffect(() => {
@@ -407,17 +411,25 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
   }, [componentActive]);
 
   const load = async () => {
+    const token = photoLoadTokenRef.current.begin({ projectId: project.id, photoId: initialPhoto?.photoId || String(bundle.photo?.id || entry.teamHistoryPhotoId || ''), baseVersionId: initialPhoto?.baseVersionId || entry.teamHistoryBaseVersionId || '', relativePath: entry.relativePath, revision: identityState.revision || 0 });
     setLoading(true);
-    const result = await legacyApi.getTeamPatches({ relativePath: entry.relativePath, baseVersionId: initialPhoto?.baseVersionId || entry.teamHistoryBaseVersionId || '' });
-    setLoading(false);
-    if (!result.success) { onNotice(`打开团片协作失败：${result.error || '未知错误'}`, 'error'); return; }
-    setBundle(normalizeBundle(result));
+    setLoadError('');
+    try {
+      const result = await legacyApi.getTeamPatches({ relativePath: entry.relativePath, baseVersionId: initialPhoto?.baseVersionId || entry.teamHistoryBaseVersionId || '' });
+      if (!photoLoadTokenRef.current.isCurrent(token)) return;
+      if (!result.success) throw new Error(result.error || '未知错误');
+      setBundle(normalizeBundle(result));
+    } catch (error) {
+      if (!photoLoadTokenRef.current.isCurrent(token)) return;
+      const message = error instanceof Error ? error.message : String(error); setLoadError(message); onNotice(`打开团片协作失败：${message}`, 'error');
+    } finally { if (photoLoadTokenRef.current.isCurrent(token)) setLoading(false); }
   };
   useEffect(() => {
-    if (initialWorkspaceBundleRef.current) { initialWorkspaceBundleRef.current = false; return; }
+    if (initialPhoto) { setBundle(bundleFromWorkspacePhoto(initialPhoto)); setLoading(false); setLoadError(''); }
     if (!previewEnabled) return;
     void load();
-  }, [entry.path, entry.updatedAt, refreshToken, previewEnabled]);
+    return () => photoLoadTokenRef.current.invalidate();
+  }, [project.id, entry.path, entry.relativePath, entry.updatedAt, initialPhoto?.photoId, initialPhoto?.baseVersionId, identityState.revision, refreshToken, previewEnabled]);
 
   const baseVersion = useMemo<MediaVersion | undefined>(() => bundle.versions.find(version => version.id === bundle.photo?.currentVersionId) || bundle.versions.find(version => version.isCurrent) || bundle.versions.at(-1), [bundle.versions, bundle.photo?.currentVersionId]);
   const tasks = useMemo(() => bundle.tasks.filter(task => task.baseVersionId === baseVersion?.id), [bundle.tasks, baseVersion?.id]);
@@ -434,7 +446,7 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
   }, [tasks]);
 
   useEffect(() => legacyApi.onTeamPatchDetectionProgress(value => {
-    if ((!value.projectId || value.projectId === project.id) && value.photoId === bundle.photo?.id && value.baseVersionId === baseVersion?.id) setDetectionProgress({ progress: value.progress, message: value.message });
+    if (matchesCurrentEvent(value, { projectId: project.id }) && value.photoId === bundle.photo?.id && value.baseVersionId === baseVersion?.id) setDetectionProgress({ progress: value.progress, message: value.message });
   }), [bundle.photo?.id, baseVersion?.id]);
 
   const detect = async (restoreExcluded = false) => {
@@ -512,7 +524,7 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
     {visibleProcessingMessage && <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-200/85 backdrop-grayscale"><div className="flex max-w-sm items-center gap-3 rounded-xl border border-slate-300 bg-white px-5 py-4 text-sm font-bold text-slate-700 shadow-xl"><Loader2 size={18} className="shrink-0 animate-spin text-blue-600"/><span>{visibleProcessingMessage}</span></div></div>}
     <header className="flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><div className="min-w-0"><h3 className="truncate font-bold text-slate-900">{bundle.photo?.displayName || entry.name}</h3><p className="mt-0.5 text-xs text-slate-500">{tasks.length} 张工作图 · {identifiedCount}/{personCount} 个人物已标记{tasks.some(task => task.needsReview) ? ` · ${tasks.filter(task => task.needsReview).length} 张建议检查` : ''}{excludedPersonCount ? ` · 已排除 ${excludedPersonCount} 个误识别` : ''}</p></div><div className="ml-auto flex flex-wrap items-center gap-2"><button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect()} className="dialog-secondary inline-flex items-center gap-2">{busy === 'detect' ? <Loader2 size={15} className="animate-spin"/> : tasks.length ? <RefreshCw size={15}/> : <ScanFace size={15}/>} {tasks.length ? '重新识别本图' : '识别本图'}</button>{excludedPersonCount > 0 && <button disabled={!baseVersion || Boolean(busy)} onClick={() => void detect(true)} className="dialog-secondary inline-flex items-center gap-2"><RefreshCw size={15}/>恢复已排除（{excludedPersonCount}）</button>}{baseVersion && <button disabled={Boolean(busy)} onClick={() => void removeFromProject()} title="从项目团片协作中删除这张图片" className="rounded-md border border-red-200 p-2 text-red-600 hover:bg-red-50"><Trash2 size={15}/></button>}</div></header>
     {busy === 'detect' && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{detectionProgress.message}</span><span>{Math.round(detectionProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${detectionProgress.progress}%` }}/></div></div>}
-    {loading ? <div className="flex min-h-64 items-center justify-center gap-2 text-slate-500"><Loader2 className="animate-spin"/>正在读取人物数据…</div> : <div className="team-photo-layout grid grid-cols-[minmax(320px,.9fr)_minmax(440px,1.1fr)]">
+    {loadError && <div role="alert" className="flex items-center gap-2 border-b border-red-100 bg-red-50 px-5 py-2 text-xs font-bold text-red-700">刷新失败，仍显示上次成功内容：{loadError}<button type="button" className="dialog-secondary ml-auto" onClick={() => void load()}>重试</button></div>}{loading && bundle.versions.length ? <div role="status" className="border-b border-blue-100 bg-blue-50 px-5 py-2 text-xs font-bold text-blue-700"><Loader2 size={13} className="mr-1.5 inline animate-spin"/>正在刷新…</div> : null}{loading && !bundle.versions.length ? <div className="flex min-h-64 items-center justify-center gap-2 text-slate-500"><Loader2 className="animate-spin"/>正在读取人物数据…</div> : <div className="team-photo-layout grid grid-cols-[minmax(320px,.9fr)_minmax(440px,1.1fr)]">
       <section className="border-r border-slate-200 bg-slate-950 p-4"><div className="relative mx-auto flex min-h-[500px] items-center justify-center overflow-hidden rounded-xl bg-black">{sourcePreview.url ? <svg className="max-h-[calc(100vh-190px)] w-full" viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet"><image href={sourcePreview.url} width={imageSize.width} height={imageSize.height} onLoad={() => { if (tasks.length) return; const image = new Image(); image.onload = () => setImageSize({ width: image.naturalWidth || 1, height: image.naturalHeight || 1 }); image.src = sourcePreview.url; }}/>{tasks.map((task, index) => <g key={task.id}><rect x={task.crop.x} y={task.crop.y} width={task.crop.width} height={task.crop.height} fill="rgba(59,130,246,.06)" stroke={task.needsReview ? '#fb923c' : '#60a5fa'} strokeWidth={Math.max(3, imageSize.width / 900)}/>{membersOf(task).map(member => { const color = personColor(member.personIndex); const fontSize = Math.max(20, imageSize.width / 100); return <g key={member.personIndex}><rect x={member.bbox.x} y={member.bbox.y} width={member.bbox.width} height={member.bbox.height} fill={`${color}0d`} stroke={color} strokeWidth={Math.max(2, imageSize.width / 1300)}/><text x={member.bbox.x + fontSize * .25} y={Math.max(fontSize, member.bbox.y - fontSize * .25)} fill={color} fontSize={fontSize} fontWeight="800" paintOrder="stroke" stroke="rgba(0,0,0,.85)" strokeWidth="5">人物 {member.personIndex}</text></g>; })}<text x={task.crop.x + 10} y={task.crop.y + 28} fill="white" fontSize={Math.max(20, imageSize.width / 85)} fontWeight="700" paintOrder="stroke" stroke="rgba(0,0,0,.75)" strokeWidth="5">工作图 {index + 1}</text></g>)}</svg> : <LazyPreviewPlaceholder failed={sourcePreview.status === 'failed'} error={sourcePreview.error} onRetry={sourcePreview.retry}/>}<ImageZoomButton disabled={!sourcePreview.url} onClick={() => setSourceFullscreen(true)}/></div><p className="mt-3 text-xs leading-5 text-slate-400">蓝框是工作图范围；人物颜色和编号与右侧对应。橙框表示需要检查。</p>{sourceFullscreen && sourcePreview.url && <FullscreenImageViewer url={sourcePreview.url} filePath={baseVersion?.filePath} cacheConfig={cacheConfig} title={bundle.photo?.displayName || entry.name} details={`${imageSize.width} × ${imageSize.height} px`} onClose={() => setSourceFullscreen(false)}/>}</section>
       <section className="p-5">{!tasks.length ? <div className="team-card pf-card flex min-h-96 flex-col items-center justify-center border-dashed p-8 text-center"><ScanFace size={34} className="text-violet-500"/><h4 className="mt-3 font-bold text-slate-800">识别人物并生成工作图</h4><p className="mt-2 text-sm text-slate-500">此步骤只识别、裁图和标记人物。</p><button onClick={() => void detect()} className="dialog-primary mt-4">开始识别</button></div> : <div className="grid gap-4 xl:grid-cols-2">{tasks.map((task, taskIndex) => {
         const names = taskIdentityNames(task, task.photoId, task.baseVersionId, assignments, identities);
@@ -539,18 +551,6 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
   </div>;
 };
 
-const syncTaskLabels = async (workspacePath: string, workspace: TeamIdentityWorkspace) => {
-  const assignments = new Map(workspace.assignments.map(item => [assignmentKey(item.photoId, item.baseVersionId, item.personIndex), item]));
-  const identities = new Map(workspace.identities.map(item => [item.id, item]));
-  await Promise.all(workspace.photos.flatMap(photo => photo.tasks.map(async task => {
-    const names = taskIdentityNames(task, photo.photoId, photo.baseVersionId, assignments, identities);
-    const personName = names.length ? names.join('、') : membersOf(task).map(member => `人物 ${member.personIndex}`).join('、');
-    const assignee = names.join('、');
-    if (task.personName === personName && task.assignee === assignee) return;
-    await legacyApi.updateTeamPatch({ photoId: photo.photoId, taskId: task.id, personName, assignee });
-  })));
-};
-
 const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [running, setRunning] = useState(false);
@@ -559,8 +559,6 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
   const [refreshToken, setRefreshToken] = useState(0);
   const [visiblePhotoCount, setVisiblePhotoCount] = useState(24);
   const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
-  const seedScopeKey = workspaceSeedScopeKey(workspacePath, project);
-  const workspaceSeedGateRef = useRef(createWorkspaceSeedGate(seedScopeKey, Boolean(initialSeed)));
   const [identityLoading, setIdentityLoading] = useState(!initialSeed);
   const [identityLoadError, setIdentityLoadError] = useState('');
   const [identityState, setIdentityState] = useState<IdentityState>(() => initialSeed || { success: true, photos: [], identities: [], assignments: [] });
@@ -570,6 +568,11 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
   const [identityPickerBusyLabel, setIdentityPickerBusyLabel] = useState('正在保存整组人物标记…');
   const [photoRefreshTokens, setPhotoRefreshTokens] = useState<Record<string, number>>({});
   const [photoProcessingMessages, setPhotoProcessingMessages] = useState<Record<string, string>>({});
+  const [photoBusyKeys, setPhotoBusyKeys] = useState<Set<string>>(new Set());
+  const photoBusyCallbacks = useMemo(() => new Map(entries.map(entry => [entry.relativePath, (pending: boolean) => setPhotoBusyKeys(current => {
+    const has = current.has(entry.relativePath); if (has === pending) return current;
+    const next = new Set(current); if (pending) next.add(entry.relativePath); else next.delete(entry.relativePath); return next;
+  })])), [entries.map(entry => entry.relativePath).join('\0')]);
   const teamGraph = useTeamOutputProgress(teamWorkflowSourcePaths(identityState.photos), workspacePath, project, onNotice);
   const identifyingRef = useRef(false);
   const batchTaskVisibleRef = useRef(false);
@@ -578,8 +581,8 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
   const onBusyChangeRef = useRef(onBusyChange);
   onBusyChangeRef.current = onBusyChange;
   useEffect(() => {
-    onBusyChangeRef.current?.(running || Boolean(identityState.identifying) || identityPickerBusy);
-  }, [identityPickerBusy, identityState.identifying, running]);
+    onBusyChangeRef.current?.(running || Boolean(identityState.identifying) || identityPickerBusy || photoBusyKeys.size > 0 || Object.keys(photoProcessingMessages).length > 0);
+  }, [identityPickerBusy, identityState.identifying, photoBusyKeys, photoProcessingMessages, running]);
   useEffect(() => () => onBusyChangeRef.current?.(false), []);
   const identitySubjects = useMemo(() => identitySubjectsFromWorkspace(identityState), [identityState]);
   const unrecognizedPaths = useMemo(() => entries
@@ -597,13 +600,12 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     return [selectedIdentitySubject, ...candidates.filter(subject => subject.key !== selectedIdentitySubject.key).sort((left, right) => (right.assignment?.confidence || 0) - (left.assignment?.confidence || 0))];
   }, [selectedIdentitySubject, identitySubjects]);
 
-  const loadIdentities = async (syncLabels = false) => {
+  const loadIdentities = async () => {
     const sequence = ++identityLoadSequenceRef.current;
     setIdentityLoadError('');
     try {
       const result = await legacyApi.getTeamProjectWorkspace();
       if (!result.success) throw new Error(result.error || '未知错误');
-      if (syncLabels) await syncTaskLabels(workspacePath, result);
       if (sequence === identityLoadSequenceRef.current) setIdentityState(result);
       if (result.workflowNodeCreated) onProjectChanged?.();
     } catch (error) {
@@ -617,15 +619,14 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     }
   };
   useEffect(() => {
-    if (workspaceSeedGateRef.current.isSeeded(seedScopeKey)) { setIdentityLoading(false); return () => { identityLoadSequenceRef.current += 1; }; }
     if (initialWorkspacePending) return () => { identityLoadSequenceRef.current += 1; };
-    if (workspaceSeedGateRef.current.consume(seedScopeKey, isUsableWorkspaceSeed(initialWorkspace))) { setIdentityState(initialWorkspace); setIdentityLoadError(''); setIdentityLoading(false); return () => { identityLoadSequenceRef.current += 1; }; }
+    if (isUsableWorkspaceSeed(initialWorkspace)) { setIdentityState(current => Number(initialWorkspace.revision) >= Number(current.revision || -1) ? initialWorkspace : current); setIdentityLoadError(''); setIdentityLoading(false); return () => { identityLoadSequenceRef.current += 1; }; }
     setIdentityLoading(true);
     void loadIdentities();
     return () => { identityLoadSequenceRef.current += 1; };
   }, [workspacePath, project.id, project.name, project.status, initialWorkspace, initialWorkspacePending]);
   useEffect(() => legacyApi.onTeamPatchBatchProgress(value => {
-    if (!value.projectId || value.projectId === project.id) {
+    if (matchesCurrentEvent(value, { projectId: project.id })) {
       batchTaskVisibleRef.current = true;
       setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message });
     }
@@ -672,24 +673,17 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     }));
     setIdentityPickerBusyLabel('正在保存整组人物标记…');
     setIdentityPickerBusy(true);
-    const result = await legacyApi.confirmTeamIdentityGroup({
-      anchorSubjectKey: selectedIdentitySubject.key,
-      identityId,
-      name,
-      assignments,
-    });
-    setIdentityPickerBusy(false);
-    if (!result.success) { onNotice(`整组标记人物失败：${result.error || '未知错误'}`, 'error'); return; }
-    setIdentityState(result);
-    setIdentityPickerKey('');
-    setIncludedIdentityKeys(new Set());
-    void syncTaskLabels(workspacePath, result).catch(() => undefined);
-    onProjectChanged?.();
-    const identity = result.identities.find(item => item.id === result.identityId);
-    const releaseNote = result.autoReleasedCount ? `；同图中 ${result.autoReleasedCount} 个自动候选已让位` : '';
-    const skippedDuplicates = Math.max(duplicateCount, result.duplicateSkippedCount || 0);
-    const duplicateNote = skippedDuplicates ? `；已自动取消 ${skippedDuplicates} 张同图重复候选` : '';
-    onNotice(identity ? `已将 ${result.updatedCount || assignments.length} 个人物实例标记为“${identity.name}”${releaseNote}${duplicateNote}` : `已将 ${result.updatedCount || assignments.length} 个人物实例设为未标记${duplicateNote}`, result.warning ? 'warning' : 'success');
+    try {
+      const result = await legacyApi.confirmTeamIdentityGroup({ anchorSubjectKey: selectedIdentitySubject.key, identityId, name, assignments });
+      if (!result.success) throw new Error(result.error || '未知错误');
+      setIdentityState(result); setIdentityPickerKey(''); setIncludedIdentityKeys(new Set()); onProjectChanged?.();
+      const identity = result.identities.find(item => item.id === result.identityId);
+      const releaseNote = result.autoReleasedCount ? `；同图中 ${result.autoReleasedCount} 个自动候选已让位` : '';
+      const skippedDuplicates = Math.max(duplicateCount, result.duplicateSkippedCount || 0);
+      const duplicateNote = skippedDuplicates ? `；已自动取消 ${skippedDuplicates} 张同图重复候选` : '';
+      onNotice(identity ? `已将 ${result.updatedCount || assignments.length} 个人物实例标记为“${identity.name}”${releaseNote}${duplicateNote}` : `已将 ${result.updatedCount || assignments.length} 个人物实例设为未标记${duplicateNote}`, result.warning ? 'warning' : 'success');
+    } catch (error) { onNotice(`整组标记人物失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setIdentityPickerBusy(false); }
   };
 
   const toggleIdentityCandidate = (key: string) => {
@@ -729,38 +723,33 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     const name = answer?.trim();
     if (!name || name === identity.name) return;
     setIdentityPickerBusy(true);
-    const result = await legacyApi.saveTeamIdentity({ identityId: identity.id, name });
-    setIdentityPickerBusy(false);
-    if (!result.success) { onNotice(`修改人物姓名失败：${result.error || '未知错误'}`, 'error'); return; }
-    const nextState = { ...identityState, identities: identityState.identities.map(item => item.id === identity.id ? { ...item, name, updatedAt: Date.now() } : item) };
-    setIdentityState(nextState);
-    void syncTaskLabels(workspacePath, nextState).catch(() => undefined);
-    onNotice(`人物姓名已修改为“${name}”`, 'success');
+    try {
+      const result = await legacyApi.saveTeamIdentity({ identityId: identity.id, name });
+      if (!result.success) throw new Error(result.error || '未知错误');
+      setIdentityState(current => ({ ...current, identities: current.identities.map(item => item.id === identity.id ? { ...item, name, updatedAt: Date.now() } : item) }));
+      onNotice(`人物姓名已修改为“${name}”`, 'success');
+    } catch (error) { onNotice(`修改人物姓名失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setIdentityPickerBusy(false); }
   };
 
   const deleteIdentityFromPicker = async (identity: TeamIdentity) => {
     const confirmed = await appDialog.confirm({ title: `删除人物“${identity.name}”？`, message: '会取消该人物全部实例的身份与完成状态，不会删除照片或工作图。', confirmLabel: '删除人物', tone: 'danger' });
     if (!confirmed) return;
     setIdentityPickerBusy(true);
-    const result = await legacyApi.deleteTeamIdentity({ identityId: identity.id });
-    setIdentityPickerBusy(false);
-    if (!result.success) { onNotice(`删除人物失败：${result.error || '未知错误'}`, 'error'); return; }
-    const nextState = {
-      ...identityState,
-      identities: identityState.identities.filter(item => item.id !== identity.id),
-      assignments: identityState.assignments.map(item => item.identityId === identity.id ? { ...item, identityId: undefined, completed: false, updatedAt: Date.now() } : item),
-    };
-    setIdentityState(nextState);
-    setIdentityPickerKey('');
-    void syncTaskLabels(workspacePath, nextState).catch(() => undefined);
-    onNotice(`已删除人物“${identity.name}”`, 'success');
+    try {
+      const result = await legacyApi.deleteTeamIdentity({ identityId: identity.id });
+      if (!result.success) throw new Error(result.error || '未知错误');
+      setIdentityState(current => ({ ...current, identities: current.identities.filter(item => item.id !== identity.id), assignments: current.assignments.map(item => item.identityId === identity.id ? { ...item, identityId: undefined, completed: false, updatedAt: Date.now() } : item) }));
+      setIdentityPickerKey(''); onNotice(`已删除人物“${identity.name}”`, 'success');
+    } catch (error) { onNotice(`删除人物失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setIdentityPickerBusy(false); }
   };
 
   const excludeSubjectFromPicker = async () => {
     if (!selectedIdentitySubject) return;
     const subject = selectedIdentitySubject;
     const confirmed = await appDialog.confirm({
-      title: `移除“${subject.photo.name}”中的人物 ${subject.personIndex}？`,
+      title: `移除“${subject.photo.displayName}”中的人物 ${subject.personIndex}？`,
       message: '这会把当前人物记为误识别，重新计算这张图片的工作图，并保留其他人物已有的身份标记。不会删除原照片，也不会删除人物身份。',
       confirmLabel: '移除误识别人物',
       tone: 'danger',
@@ -770,18 +759,13 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     setIdentityPickerKey('');
     setIncludedIdentityKeys(new Set());
     setPhotoProcessingMessages(current => ({ ...current, [photoId]: '正在移除误识别人物并重新计算工作图…' }));
-    const result = await legacyApi.excludeTeamPerson({
-      photoId,
-      baseVersionId: subject.photo.baseVersionId,
-      personIndex: subject.personIndex,
-    });
-    setPhotoProcessingMessages(current => { const next = { ...current }; delete next[photoId]; return next; });
-    if (!result.success) { onNotice(`移除误识别人物失败：${result.error || '未知错误'}`, 'error'); return; }
-    setIdentityState(result);
-    setPhotoRefreshTokens(current => ({ ...current, [photoId]: (current[photoId] || 0) + 1 }));
-    void syncTaskLabels(workspacePath, result).catch(() => undefined);
-    onProjectChanged?.();
-    onNotice(result.warning || `已移除误识别人物，并重新计算当前图片的工作图；其他人物标记已保留${result.workflowRefreshCount ? `，同步更新 ${result.workflowRefreshCount} 个任务文件` : ''}`, result.warning ? 'warning' : 'success');
+    try {
+      const result = await legacyApi.excludeTeamPerson({ photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex });
+      if (!result.success) throw new Error(result.error || '未知错误');
+      setIdentityState(result); setPhotoRefreshTokens(current => ({ ...current, [photoId]: (current[photoId] || 0) + 1 })); onProjectChanged?.();
+      onNotice(result.warning || `已移除误识别人物，并重新计算当前图片的工作图；其他人物标记已保留${result.workflowRefreshCount ? `，同步更新 ${result.workflowRefreshCount} 个任务文件` : ''}`, result.warning ? 'warning' : 'success');
+    } catch (error) { onNotice(`移除误识别人物失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setPhotoProcessingMessages(current => { const next = { ...current }; delete next[photoId]; return next; }); }
   };
 
   const identifyAndSync = async () => {
@@ -792,7 +776,6 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     try {
       const result = await legacyApi.suggestTeamIdentities();
       if (!result.success) { onNotice(`人物自动标记失败：${result.error || '未知错误'}`, 'error'); return; }
-      await syncTaskLabels(workspacePath, result);
       setIdentityState({ ...result, identifying: false });
     } catch (error) { onNotice(`人物自动标记失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { identifyingRef.current = false; setIdentityState(current => ({ ...current, identifying: false })); }
@@ -838,7 +821,7 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
         const initialPhoto = workspacePhotoForEntry(identityState.photos, entry);
         const photoId = initialPhoto?.photoId || '';
         if (entry.teamHistoryMissing) return <section key={entry.relativePath} className="team-card pf-card p-5"><div className="flex items-start gap-3"><AlertTriangle size={22} className="mt-0.5 shrink-0 text-amber-500"/><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-800">{entry.name || '团片历史图片'} · 缺失 / 需重新关联</h3><p className="mt-1 text-xs leading-5 text-slate-500">{entry.teamHistoryMissingReason || '历史记录暂时无法恢复项目内路径。'} 已保留该记录，不会删除人物、任务或版本数据。</p><div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-500"><span className="rounded-full bg-slate-100 px-2.5 py-1">Photo ID：{entry.teamHistoryPhotoId || '未知'}</span><span className="rounded-full bg-slate-100 px-2.5 py-1">版本：{entry.teamHistoryBaseVersionId || '未知'}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">关联任务 {entry.teamHistoryTaskCount || 0}</span></div><button type="button" className="dialog-secondary mt-4" onClick={() => onProjectChanged?.()}>重新读取并关联</button></div></div></section>;
-        return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities(true)} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
+        return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onBusyChange={photoBusyCallbacks.get(entry.relativePath)} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities()} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
         })}{!identityLoading && !identityLoadError && visiblePhotoCount < entries.length && <button type="button" className="dialog-secondary mx-auto block" aria-label="加载更多团片照片" onClick={() => setVisiblePhotoCount(current => current + 24)}>再加载 24 张（剩余 {entries.length - visiblePhotoCount}）</button>}{!identityLoading && !identityLoadError && <footer className="team-next-step flex justify-center pt-5"><button type="button" disabled={!stageOneReady || running} onClick={() => onStepChange('assignment')} className="dialog-primary inline-flex items-center gap-2" title={stageOneReady ? '进入任务分配' : '需先完成识别、裁剪复核和人物标记'}>下一步：{WORKFLOW_STAGES.find(stage => stage.id === 'assignment')?.label}<ArrowRight size={15}/></button></footer>}</div></main>
     {selectedIdentitySubject && <IdentityPicker
       subject={selectedIdentitySubject}

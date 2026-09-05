@@ -1364,8 +1364,8 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
     }
     db.exec('BEGIN IMMEDIATE');
     try {
-      const generation = crop ? { ...parseJson(row.generation_json, {}), version: 2, strategy: 'manual', workWidth: Number(restoredWork?.width), workHeight: Number(restoredWork?.height), sourceCropWidth: crop.width, sourceCropHeight: crop.height, fileDigest: String(restoredWork?.digest || ''), requiresManualCrop: false, reason: '人工调整工作图范围' } : null;
-      if (crop && (!Number.isInteger(generation.workWidth) || !Number.isInteger(generation.workHeight) || generation.workWidth * generation.workHeight > 40_000_000 || !/^[a-f0-9]{64}$/.test(generation.fileDigest))) throw new Error('重新裁切工作图返回了无效尺寸或摘要');
+      const generation = crop ? { ...parseJson(row.generation_json, {}), version: 2, strategy: 'manual', sourceCrop: crop, workWidth: Number(restoredWork?.width), workHeight: Number(restoredWork?.height), sourceCropWidth: crop.width, sourceCropHeight: crop.height, digest: String(restoredWork?.digest || ''), fileDigest: String(restoredWork?.digest || ''), requiresManualCrop: false, reason: '人工调整工作图范围' } : null;
+      if (crop && (!Number.isInteger(generation.workWidth) || !Number.isInteger(generation.workHeight) || generation.workWidth * generation.workHeight > 40_000_000 || !/^[a-f0-9]{64}$/.test(generation.digest))) throw new Error('重新裁切工作图返回了无效尺寸或摘要');
       db.prepare(`UPDATE team_patch_tasks SET person_name=COALESCE(?,person_name),assignee=COALESCE(?,assignee),crop_json=COALESCE(?,crop_json),generation_json=COALESCE(?,generation_json),needs_review=COALESCE(?,needs_review),review_reason=COALESCE(?,review_reason),updated_at=? WHERE project_id=? AND id=? AND is_deleted=0`).run(payload.personName === undefined ? null : String(payload.personName).trim().slice(0, 80) || '未命名人物', payload.assignee === undefined ? null : String(payload.assignee).trim().slice(0, 80), crop ? JSON.stringify(crop) : null, generation ? JSON.stringify(generation) : null, payload.needsReview === undefined ? null : payload.needsReview ? 1 : 0, payload.reviewReason === undefined ? null : String(payload.reviewReason).trim().slice(0, 300), Date.now(), String(context.projectId), row.id);
       if (backupPath) queueCleanupArtifacts(db, context.projectId, [backupPath]);
       db.exec('COMMIT');
@@ -1760,6 +1760,35 @@ const upsertAssignmentSql = `INSERT INTO team_person_assignments(project_id,phot
   return_missing_since=CASE WHEN excluded.completed=1 THEN team_person_assignments.return_missing_since ELSE NULL END,
   completed_at=CASE WHEN excluded.completed=1 THEN team_person_assignments.completed_at ELSE NULL END,updated_at=excluded.updated_at`;
 
+// Identity mutations keep denormalized task labels consistent inside the same
+// database transaction. This is one set-based SQL update, never renderer RPC
+// fanout, and the revision guard therefore advances the project only once.
+const refreshTaskIdentityLabels = (db, projectId, { identityIds = [], subjects = [], taskIds = [] } = {}) => {
+  const identities = uniqueText(identityIds); const tasks = uniqueText(taskIds);
+  const subjectJson = JSON.stringify((subjects || []).map(item => ({ photoId: String(item.photoId), baseVersionId: String(item.baseVersionId), personIndex: Number(item.personIndex) })));
+  const predicates = [];
+  const targetArgs = [];
+  if (identities.length) { predicates.push(`EXISTS(SELECT 1 FROM json_each(task.members_json) member JOIN team_person_assignments target_assignment ON target_assignment.project_id=task.project_id AND target_assignment.photo_id=task.photo_id AND target_assignment.base_version_id=task.base_version_id AND target_assignment.person_index=CAST(json_extract(member.value,'$.personIndex') AS INTEGER) WHERE target_assignment.identity_id IN (${identities.map(() => '?').join(',')}))`); targetArgs.push(...identities); }
+  if (subjects?.length) { predicates.push(`EXISTS(SELECT 1 FROM json_each(?) target_subject JOIN json_each(task.members_json) member WHERE json_extract(target_subject.value,'$.photoId')=task.photo_id AND json_extract(target_subject.value,'$.baseVersionId')=task.base_version_id AND CAST(json_extract(target_subject.value,'$.personIndex') AS INTEGER)=CAST(json_extract(member.value,'$.personIndex') AS INTEGER))`); targetArgs.push(subjectJson); }
+  if (tasks.length) { predicates.push(`task.id IN (${tasks.map(() => '?').join(',')})`); targetArgs.push(...tasks); }
+  if (!predicates.length) return { changes: 0 };
+  return db.prepare(`UPDATE team_patch_tasks AS task SET
+  person_name=COALESCE((SELECT group_concat(label,'、') FROM (
+    SELECT COALESCE(identity.name,'人物 '||CAST(json_extract(member.value,'$.personIndex') AS INTEGER)) AS label
+    FROM json_each(task.members_json) AS member
+    LEFT JOIN team_person_assignments assignment ON assignment.project_id=task.project_id AND assignment.photo_id=task.photo_id AND assignment.base_version_id=task.base_version_id AND assignment.person_index=CAST(json_extract(member.value,'$.personIndex') AS INTEGER)
+    LEFT JOIN team_person_identities identity ON identity.project_id=assignment.project_id AND identity.id=assignment.identity_id
+    ORDER BY CAST(json_extract(member.value,'$.personIndex') AS INTEGER)
+  )),person_name),
+  assignee=COALESCE((SELECT group_concat(name,'、') FROM (
+    SELECT identity.name AS name
+    FROM json_each(task.members_json) AS member
+    JOIN team_person_assignments assignment ON assignment.project_id=task.project_id AND assignment.photo_id=task.photo_id AND assignment.base_version_id=task.base_version_id AND assignment.person_index=CAST(json_extract(member.value,'$.personIndex') AS INTEGER)
+    JOIN team_person_identities identity ON identity.project_id=assignment.project_id AND identity.id=assignment.identity_id
+    ORDER BY CAST(json_extract(member.value,'$.personIndex') AS INTEGER)
+  )),''),updated_at=? WHERE task.project_id=? AND task.is_deleted=0 AND (${predicates.join(' OR ')})`).run(Date.now(), String(projectId), ...targetArgs);
+};
+
 const saveIdentity = async (parentId, payload, context) => {
   const assignments = Array.isArray(payload.assignments) ? payload.assignments : [];
   await assertOwnedSubjects(parentId, context.projectId, assignments);
@@ -1784,6 +1813,7 @@ const saveIdentity = async (parentId, payload, context) => {
         const completed = previous?.identity_id === identityId ? Boolean(previous.completed) : false;
         upsert.run(projectId, String(item.photoId), String(item.baseVersionId), Number(item.personIndex), identityId, Number(item.confidence ?? 1), 'manual', completed ? 1 : 0, now);
       }
+      refreshTaskIdentityLabels(db, projectId, { identityIds: existing ? [identityId] : [], subjects: assignments });
       db.exec('COMMIT');
       return { success: true, identityId };
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -1803,6 +1833,7 @@ const assignIdentity = async (parentId, payload, context) => {
       assertOwnedSubjectsInDb(db, projectId, [payload]);
       db.prepare(upsertAssignmentSql).run(projectId, String(payload.photoId), String(payload.baseVersionId), Number(payload.personIndex), identityId, Number(payload.confidence ?? 1), 'manual', completed ? 1 : 0, Date.now());
       if (previous?.identity_id && previous.identity_id !== identityId) cleanupGeneratedIdentities(db, projectId);
+      refreshTaskIdentityLabels(db, projectId, { subjects: [payload] });
       db.exec('COMMIT');
       return { success: true };
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -1876,6 +1907,7 @@ const confirmIdentityGroup = async (parentId, payload, context) => {
         upsert.run(projectId, item.photoId, item.baseVersionId, item.personIndex, identityId, item.confidence, item.key === anchor ? 'manual' : 'manual-group', previous?.identity_id === identityId && previous.completed ? 1 : 0, now);
       }
       cleanupGeneratedIdentities(db, projectId);
+      refreshTaskIdentityLabels(db, projectId, { identityIds: identityId ? [identityId] : [], subjects: [...assignments, ...clearAssignments] });
       db.exec('COMMIT');
       return { identityId, updatedCount: assignments.length };
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -1887,6 +1919,9 @@ const deleteIdentity = (parentId, payload, context) => withDomain(parentId, db =
   const projectId = String(context.projectId);
   const identityId = String(payload.identityId || '');
   const affectedTasks = db.prepare('SELECT DISTINCT task_id,photo_id FROM team_person_assignments WHERE project_id=? AND identity_id=? AND task_id IS NOT NULL').all(projectId, identityId);
+  const affectedLabelTaskIds = db.prepare(`SELECT DISTINCT task.id FROM team_patch_tasks task JOIN json_each(task.members_json) member
+    JOIN team_person_assignments assignment ON assignment.project_id=task.project_id AND assignment.photo_id=task.photo_id AND assignment.base_version_id=task.base_version_id AND assignment.person_index=CAST(json_extract(member.value,'$.personIndex') AS INTEGER)
+    WHERE task.project_id=? AND task.is_deleted=0 AND assignment.identity_id=?`).all(projectId, identityId).map(task => task.id);
   db.exec('BEGIN IMMEDIATE');
   try {
     db.prepare(`UPDATE team_person_assignments SET identity_id=NULL,confidence=0,source='',completed=0,completion_kind='',edited_patch_path=NULL,return_missing=0,return_missing_since=NULL,completed_at=NULL,updated_at=? WHERE identity_id=? AND project_id=?`).run(Date.now(), identityId, projectId);
@@ -1898,6 +1933,7 @@ const deleteIdentity = (parentId, payload, context) => withDomain(parentId, db =
       const sameWeekIdentityIds = uniqueText(settings.sameWeekIdentityIds).filter(id => id !== identityId && preferredIdentityOrder.includes(id));
       db.prepare('UPDATE team_workflow_settings SET settings_json=?,updated_at=? WHERE project_id=?').run(JSON.stringify({ ...settings, preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds }), Date.now(), projectId);
     }
+    refreshTaskIdentityLabels(db, projectId, { taskIds: affectedLabelTaskIds });
     for (const task of affectedTasks) markWorkflowReconcilePending(db, { taskId: task.task_id, photoId: task.photo_id }, new Error('人物身份已删除，等待工作流失效重建'));
     db.exec('COMMIT');
     return { success: true, workflowNeedsRegeneration: affectedTasks.length > 0, reconcilePendingCount: affectedTasks.length };
@@ -2385,7 +2421,7 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
   let hostPublicationCommitted = false;
   try {
     await retryWorkflowOutputCleanup(parentId, jobStorage, context).catch(() => undefined);
-    await reportTask(parentId, operationId, 'start', { message: job.message, checkpoint: { projectId: context.projectId, operationId } }, 'workflow.progress');
+    await reportTask(parentId, operationId, 'start', { projectId: String(context.projectId), operationId, state: 'running', phase: 'preparing', progress: 0, message: job.message, checkpoint: { projectId: context.projectId, operationId } }, 'workflow.progress');
     const scope = await readWorkflowManifest(parentId, context);
     const previousManifest = scope.manifest;
     if ((fs.existsSync(scope.outputDirectory) || previousManifest) && !payload.replace) {

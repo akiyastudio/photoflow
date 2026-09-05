@@ -34,6 +34,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   const [folders, setFolders] = useState<ProgressFolder[]>([]);
   const [sourceProgressIds, setSourceProgressIds] = useState<string[]>([]);
   const [targetProgressId, setTargetProgressIdState] = useState('__new__');
+  const scopeToken = useMemo(() => ({ projectId: project.id }), [project.id]);
   const sourceProgressKey = sourceProgressIds.join('|') || sourcePathKey;
   const storageKey = `photoflow:team-retouch-output:${workspacePath}|${project.name}|${sourceProgressKey}`;
 
@@ -45,7 +46,9 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   }, [sourceProgressKey]);
 
   const refresh = useCallback(async () => {
-    const result = normalizeLegacyProgressResult(await legacyApi.getProgressFolders());
+    const scope = scopeToken;
+    const result = normalizeLegacyProgressResult(await legacyApi.getProgressFolders({ projectId: project.id, queryKey: sourcePathKey }));
+    if (scope !== scopeToken || legacyApi.getMediaAuthorizationScope() !== scope.projectId) throw new Error('项目已切换，旧进度读取已取消');
     if (!result.success) throw new Error(result.error || '无法读取项目进度');
     const { progressFolders, graphEdges } = result;
     const sources = resolveTeamSourceProgressIds(normalizedSourcePaths, progressFolders);
@@ -64,10 +67,11 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
       return remembered?.id || related?.id || '__new__';
     });
     return { ...result, progressFolders, graphEdges, sourceProgressIds: sources };
-  }, [workspacePath, project.name, sourcePathKey]);
+  }, [workspacePath, project.id, project.name, sourcePathKey, scopeToken]);
 
   useEffect(() => {
     let active = true;
+    setFolders([]); setSourceProgressIds([]); setTargetProgressIdState('__new__');
     void refresh().catch(error => {
       if (active) onNotice(`读取合成目标失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     });
@@ -84,16 +88,22 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
 
   const ensureWorkflowInputs = useCallback(async (workflowProgressId?: string) => {
     if (!workflowProgressId) return;
+    const scope = scopeToken;
     const latest = await refresh();
+    if (scope !== scopeToken || legacyApi.getMediaAuthorizationScope() !== scope.projectId) throw new Error('项目已切换，已取消旧项目来源登记');
     const registered = await legacyApi.registerProgressWithGraph({
+      projectId: project.id,
       progress: { progressId: workflowProgressId },
       workflowInputProgressIds: latest.sourceProgressIds,
     });
     if (!registered.success) throw new Error(registered.error || '无法登记团片来源关系');
-  }, [refresh]);
+    if (scope !== scopeToken || legacyApi.getMediaAuthorizationScope() !== scope.projectId) throw new Error('项目已切换，已忽略旧项目来源登记结果');
+  }, [refresh, project.id, scopeToken]);
 
   const ensureTargetProgress = async (workflowProgressId?: string) => {
+    const scope = scopeToken;
     const latest = await refresh();
+    if (scope !== scopeToken || legacyApi.getMediaAuthorizationScope() !== scope.projectId) throw new Error('项目已切换，已取消旧项目输出登记');
     const resolvedWorkflowProgressId = resolveLegacyTeamWorkflowProgressId(latest.progressFolders, workflowProgressId);
     if (!resolvedWorkflowProgressId) throw new Error('团片协作工作流节点尚未建立');
     const selected = latest.progressFolders.find(folder => folder.id === targetProgressId && isTeamProgressCandidate(folder) && !latest.sourceProgressIds.includes(folder.id));
@@ -116,10 +126,12 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
         displayName: '团片协作合并',
       };
     const registered = await legacyApi.registerProgressWithGraph({
+      projectId: project.id,
       progress: requestProgress,
       workflowInputProgressIds: [resolvedWorkflowProgressId],
     });
     if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法提交团片输出进度关系');
+    if (scope !== scopeToken || legacyApi.getMediaAuthorizationScope() !== scope.projectId) throw new Error('项目已切换，已忽略旧项目输出登记结果');
     setFolders(current => current.some(folder => folder.id === registered.progressFolder!.id)
       ? current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder)
       : [...current, registered.progressFolder!]);
