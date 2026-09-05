@@ -100,8 +100,30 @@ class ComponentViewManager {
     this.activeInstanceId = '';
     this.activationGeneration = 0;
     this.partitionSessions = new Map();
+    this.capabilityClearOperations = new Map();
+    this.failedCapabilityClearIds = new Set();
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
     this.registerComponentSdkIpc();
+  }
+
+  requestComponentCapabilityClear(componentId, contents = [], timeoutMs = 2000) {
+    const normalizedId = String(componentId || '');
+    componentPartition(normalizedId);
+    const pending = this.capabilityClearOperations.get(normalizedId);
+    if (pending) return pending;
+    const destroyed = Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+    const operation = destroyed.then(() => this.clearComponentCapabilityState?.(normalizedId)).then(result => {
+      this.failedCapabilityClearIds.delete(normalizedId);
+      return result;
+    }, error => {
+      this.failedCapabilityClearIds.add(normalizedId);
+      throw error;
+    }).finally(() => {
+      if (this.capabilityClearOperations.get(normalizedId) === operation) this.capabilityClearOperations.delete(normalizedId);
+    });
+    this.capabilityClearOperations.set(normalizedId, operation);
+    void operation.catch(error => this.writeLog('warn', 'Unable to clear component capability state', { componentId: normalizedId, error: error?.message || String(error) }));
+    return operation;
   }
 
   registerComponentSdkIpc() {
@@ -406,7 +428,7 @@ class ComponentViewManager {
       this.senderBindings.delete(senderId);
       if (this.instances.get(key) === instance) this.instances.delete(key);
       if (this.instancesById.get(instanceId) === instance) this.instancesById.delete(instanceId);
-      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); void Promise.resolve(this.clearComponentCapabilityState?.(descriptor.componentId)).catch(error=>this.writeLog('warn','Unable to clear component capability state',{componentId:descriptor.componentId,error:error?.message||String(error)})); }
+      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); void this.requestComponentCapabilityClear(descriptor.componentId); }
     });
     this.mainWindow.contentView.addChildView(view);
     this.onViewStackChanged();
@@ -560,29 +582,28 @@ class ComponentViewManager {
   closeComponent(componentId) {
     const normalizedId = componentId;
     componentPartition(normalizedId);
-    const ids = [...this.instances.values()]
-      .filter(instance => instance.descriptor.componentId === normalizedId)
-      .map(instance => instance.instanceId);
-    ids.forEach(id => this.close(id));
+    const instances = [...this.instances.values()].filter(instance => instance.descriptor.componentId === normalizedId);
+    const capabilityClear = this.requestComponentCapabilityClear(normalizedId, instances.map(instance => instance.view.webContents));
+    instances.forEach(instance => this.close(instance.instanceId));
     this.notificationService?.clearComponent?.(normalizedId);
-    void Promise.resolve(this.clearComponentCapabilityState?.(normalizedId)).catch(error=>this.writeLog('warn','Unable to clear component capability state',{componentId:normalizedId,error:error?.message||String(error)}));
-    return ids.length;
+    void capabilityClear;
+    return instances.length;
   }
 
   async closeComponentAndWait(componentId, timeoutMs = 2000) {
     componentPartition(componentId);
     const contents = [...this.instances.values()].filter(instance => instance.descriptor.componentId === componentId).map(instance => instance.view.webContents);
+    const capabilityClear = this.requestComponentCapabilityClear(componentId, contents, timeoutMs);
     this.closeComponent(componentId);
     await Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+    await capabilityClear;
     return contents.length;
   }
 
   async clearComponentPartitionStorage(componentId) {
     const normalizedId = componentId;
     componentPartition(normalizedId);
-    const closingContents = [...this.instances.values()].filter(instance => instance.descriptor.componentId === normalizedId).map(instance => instance.view.webContents);
-    this.closeComponent(normalizedId);
-    await Promise.all(closingContents.map(webContents => waitForWebContentsDestroyed(webContents)));
+    await this.closeComponentAndWait(normalizedId);
     const session = this.partitionSessions.get(normalizedId) || this.partitionSessionProvider?.(componentPartition(normalizedId));
     if (!session) throw new Error(`Component partition session is unavailable: ${componentPartition(normalizedId)}`);
     const failures = [];
@@ -598,13 +619,16 @@ class ComponentViewManager {
   async closeAllAndWait(timeoutMs = 2000) {
     const instances = [...this.instances.values()];
     const contents = instances.map(instance => instance.view.webContents);
+    const pendingAtStart = [...this.capabilityClearOperations.values()];
+    const componentIds = [...new Set([...instances.map(instance => instance.descriptor.componentId), ...this.failedCapabilityClearIds])];
+    const capabilityClears = componentIds.map(componentId => this.requestComponentCapabilityClear(componentId, instances.filter(instance => instance.descriptor.componentId === componentId).map(instance => instance.view.webContents), timeoutMs));
     for (const instance of instances) this.close(instance.instanceId);
     await Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+    await Promise.all([...pendingAtStart, ...capabilityClears, ...this.capabilityClearOperations.values()]);
   }
   async destroyAndWait(timeoutMs = 2000) {
-    const contents = [...this.instances.values()].map(instance => instance.view.webContents);
-    this.destroy();
-    await Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+    await this.closeAllAndWait(timeoutMs);
+    this.notificationService?.destroy?.();
   }
 }
 

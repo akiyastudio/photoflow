@@ -36,11 +36,13 @@ class WebContentsView {
     componentId, componentVersion: '1', componentRoot: __dirname, contractVersion: 2,
     fullPage: { id: 'main', title: 'Fixture', entry: __filename }, service: { permissions: [], events: [] },
   };
+  let capabilityClearAttempts = 0; let failCapabilityClear = false;
   const manager = new ComponentViewManager({
     WebContentsView,
     mainWindow: { isDestroyed: () => false, webContents: { send() {} }, contentView: { addChildView() {}, removeChildView() {} } },
     registry: { resolve: id => id === componentId ? descriptor : null, list: () => [descriptor] },
     preloadPath: __filename, ipcMain: { handle() {} }, lifecycleCoordinator: coordinator,
+    clearComponentCapabilityState: async () => { capabilityClearAttempts += 1; if (failCapabilityClear) { failCapabilityClear = false; throw new Error('capability clear failed'); } },
   });
   const request = { componentId, componentVersion: '1', pageId: 'main', workspacePath: __dirname, projectId: 'project', projectName: 'Project', projectStatus: 'active' };
 
@@ -54,6 +56,7 @@ class WebContentsView {
   assert.equal(first.componentId, componentId, 'cancelled transition lets the admitted view finish');
   assert.equal(coordinator.hasWork(componentId), false);
   await manager.closeComponentAndWait(componentId);
+  assert.equal(capabilityClearAttempts, 1, 'component close waits for capability cleanup');
 
   const continuedOpen = manager.openSurface(request, 'component.fullPage');
   while (!loadGates[1]) await new Promise(resolve => setImmediate(resolve));
@@ -66,9 +69,28 @@ class WebContentsView {
   loadGates[1].release();
   await continuedOpen;
   await promotion;
+  failCapabilityClear = true;
+  await assert.rejects(manager.closeComponentAndWait(componentId), /capability clear failed/);
+  assert.equal(manager.instances.size, 0, 'failed async cleanup still closes the unsafe renderer');
   await manager.closeComponentAndWait(componentId);
+  assert.equal(capabilityClearAttempts, 3, 'failed capability cleanup is retryable even after views are closed');
   assert.equal(manager.instances.size, 0);
   continuedIntent.release();
+
+  const delayedContents = new EventEmitter(); delayedContents.destroyed = false; delayedContents.isDestroyed = () => delayedContents.destroyed;
+  const attemptsBeforeDelayedDestroy = capabilityClearAttempts;
+  const delayedClear = manager.requestComponentCapabilityClear(componentId, [delayedContents], 1000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(capabilityClearAttempts, attemptsBeforeDelayedDestroy, 'capability state remains intact while target renderer is alive');
+  delayedContents.destroyed = true; delayedContents.emit('destroyed'); await delayedClear;
+  assert.equal(capabilityClearAttempts, attemptsBeforeDelayedDestroy + 1, 'destroyed prerequisite triggers exactly one clear');
+
+  failCapabilityClear = true;
+  await assert.rejects(manager.requestComponentCapabilityClear(componentId), /capability clear failed/);
+  assert.equal(manager.failedCapabilityClearIds.has(componentId), true, 'passive clear failure remains visible after its promise settles');
+  await manager.closeAllAndWait();
+  assert.equal(manager.failedCapabilityClearIds.has(componentId), false, 'application-wide close retries remembered passive failures');
+  assert.equal(capabilityClearAttempts, attemptsBeforeDelayedDestroy + 3, 'remembered failure is retried exactly once');
 
   console.log('Component view lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
