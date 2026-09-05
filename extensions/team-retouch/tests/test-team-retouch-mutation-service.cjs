@@ -19,6 +19,9 @@ const analysisDirectory = path.join(dataRoot, 'photo-1', 'version-1', 'analysis'
 const basePath = path.join(sandbox, 'base.jpg');
 const failingBasePath = path.join(sandbox, 'fail.jpg');
 const secondBasePath = path.join(sandbox, 'second.png');
+const heicBasePath = path.join(sandbox, 'passthrough.heic');
+const dngBasePath = path.join(sandbox, 'passthrough.dng');
+const unknownBasePath = path.join(sandbox, 'passthrough.xyz');
 const enginePath = path.join(sandbox, 'fake-engine.cjs');
 const batchCountPath = path.join(sandbox, 'batch-count.txt');
 const returnedInputPath = path.join(sandbox, 'returned-input.png');
@@ -26,6 +29,9 @@ fs.mkdirSync(path.dirname(databasePath), { recursive: true });
 fs.writeFileSync(basePath, Buffer.from('/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAACAAIDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5booor8TP1w//2Q==', 'base64'));
 fs.writeFileSync(failingBasePath, 'base');
 fs.writeFileSync(secondBasePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVQIHWOsCNBgYGBgrAjQYGBgAAAQswHjiprwSgAAAABJRU5ErkJggg==', 'base64'));
+fs.writeFileSync(heicBasePath, Buffer.from('0000001866747970686569630000000068656963', 'hex'));
+fs.writeFileSync(dngBasePath, Buffer.from('49492a000800000000000000', 'hex'));
+fs.writeFileSync(unknownBasePath, 'unknown-format');
 fs.writeFileSync(returnedInputPath, 'returned');
 fs.writeFileSync(enginePath, `
 const fs = require('fs'); const path = require('path');
@@ -171,6 +177,19 @@ const ready = new Promise((resolve, reject) => {
     const jpgOutput = fs.readdirSync(path.join(projectOutputRoot, 'merged')).find(name => name.endsWith('.jpg'));
     assert(jpgOutput, 'JPEG no-retouch output retains a .jpg extension');
     assert.deepEqual(fs.readFileSync(path.join(projectOutputRoot, 'merged', jpgOutput)), fs.readFileSync(basePath), 'JPEG no-retouch output retains the original magic bytes');
+    for (const [sourcePath, extension] of [[heicBasePath, '.heic'], [dngBasePath, '.dng']]) {
+      currentBasePath = sourcePath;
+      await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2', rebuildToken: `passthrough-${extension}` });
+      const passthroughOutput = fs.readdirSync(path.join(projectOutputRoot, 'merged')).find(name => name.endsWith(extension));
+      assert(passthroughOutput, `${extension} no-retouch output retains its Host-supported extension`);
+      assert.deepEqual(fs.readFileSync(path.join(projectOutputRoot, 'merged', passthroughOutput)), fs.readFileSync(sourcePath), `${extension} no-retouch output is a byte-for-byte copy`);
+    }
+    const policyDb = new DatabaseSync(databasePath); policyDb.function('team_request_id', () => ''); policyDb.prepare("UPDATE team_retouch_photos SET relative_path='passthrough.xyz' WHERE project_id='project-1' AND photo_id='photo-1'").run(); policyDb.close();
+    const unsupportedWorkspace = await invoke('team.project.get.v1');
+    assert.equal(unsupportedWorkspace.photos.find(photo => photo.photoId === 'photo-1').noRetouchOutputSupported, false, 'unknown no-retouch formats are rejected in the authoritative workspace before merge');
+    currentBasePath = unknownBasePath;
+    await assert.rejects(invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2', rebuildToken: 'unknown-no-retouch-format' }), /不能作为项目图片版本原样输出/, 'unknown extensions are rejected with a conversion instruction');
+    const restorePolicyDb = new DatabaseSync(databasePath); restorePolicyDb.function('team_request_id', () => ''); restorePolicyDb.prepare("UPDATE team_retouch_photos SET relative_path='one.jpg' WHERE project_id='project-1' AND photo_id='photo-1'").run(); restorePolicyDb.close();
     const resetNoRetouchDb = new DatabaseSync(databasePath); resetNoRetouchDb.function('team_request_id', () => ''); resetNoRetouchDb.prepare("UPDATE team_patch_tasks SET status='exported',merged_version_id=NULL WHERE project_id='project-1' AND photo_id='photo-1'").run(); resetNoRetouchDb.prepare("UPDATE team_person_assignments SET completed=0,completion_kind='',completed_at=NULL WHERE project_id='project-1' AND photo_id='photo-1'").run(); resetNoRetouchDb.close();
     const beforeIdentityMaterialize = materializeCount;
     const suggested = await invoke('team.identity.suggest.v1');

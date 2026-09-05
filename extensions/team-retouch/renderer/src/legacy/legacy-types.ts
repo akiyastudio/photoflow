@@ -19,6 +19,8 @@ export type TeamProjectPhoto = {
   mediaRef?: LegacyJson;
   tasks: TeamPatchTask[];
   excludedPersonCount?: number;
+  noRetouchOutputSupported?: boolean;
+  noRetouchOutputError?: string;
 };
 export type TeamPatchReturnBatchResult = LegacyJson;
 export type TeamPatchReturnMatch = LegacyJson;

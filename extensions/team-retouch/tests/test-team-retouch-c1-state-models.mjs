@@ -3,7 +3,7 @@ import { hydrateLegacyWorkspace } from '../renderer/src/legacy/legacy-api.ts';
 import { subjectsFromWorkspace } from '../renderer/src/interaction-model.ts';
 import { acceptWorkspaceSnapshot, beginWorkspaceMutation, createWorkspaceScopeController, createWorkspaceState, settleWorkspaceMutation, switchWorkspaceScope } from '../renderer/src/legacy/workspace-state-model.ts';
 import { createScopedPromiseCache } from '../renderer/src/legacy/scoped-promise-cache.ts';
-import { idleWorkflowGeneration, reduceWorkflowGeneration } from '../renderer/src/legacy/workflow-generation-model.ts';
+import { createWorkflowStatusController, idleWorkflowGeneration, reduceWorkflowGeneration } from '../renderer/src/legacy/workflow-generation-model.ts';
 import { createScopedAsyncController } from '../renderer/src/legacy/scoped-async-action.ts';
 import { runSequentialMergeBatch } from '../renderer/src/legacy/sequential-merge-batch.ts';
 import { matchesCurrentEvent } from '../renderer/src/legacy/event-scope-model.ts';
@@ -74,6 +74,16 @@ workflow = reduceWorkflowGeneration(workflow, { projectId: 'A', operationId: 'ot
 assert.equal(workflow.state, 'running');
 workflow = reduceWorkflowGeneration(workflow, { projectId: 'A', operationId: 'op', requiresConfirmation: true }, 'rpc'); assert.equal(workflow.state, 'awaiting-confirmation');
 workflow = reduceWorkflowGeneration(workflow, { projectId: 'A', operationId: 'op', cancelled: true }, 'rpc'); assert.equal(workflow.state, 'cancelled');
+const statusController = createWorkflowStatusController('workspace\0A');
+const oldStatusToken = statusController.begin(); let releaseOldStatus;
+const oldStatus = new Promise(resolve => { releaseOldStatus = resolve; }).then(job => {
+  if (statusController.accepts(oldStatusToken, workflow, job)) workflow = reduceWorkflowGeneration(workflow, job, 'status');
+});
+statusController.invalidate(); workflow = reduceWorkflowGeneration(idleWorkflowGeneration('A'), { projectId: 'A', operationId: 'op-new', state: 'running' }, 'start');
+releaseOldStatus({ projectId: 'A', operationId: 'op-old', state: 'running' }); await oldStatus;
+assert.equal(workflow.operationId, 'op-new', 'a deferred initial status cannot replace a newly started operation');
+workflow = reduceWorkflowGeneration(workflow, { projectId: 'A', operationId: 'op-new', state: 'running', progress: 37 }, 'event');
+assert.equal(workflow.progress, 37, 'events for the new operation remain visible after stale status rejection');
 
 const asyncController = createScopedAsyncController('A'); let finalized = 0; let oldSuccess = 0; let release;
 const pending = asyncController.run(() => new Promise(resolve => { release = resolve; }), { success: () => { oldSuccess += 1; }, finally: () => { finalized += 1; } });

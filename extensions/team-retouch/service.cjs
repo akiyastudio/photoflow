@@ -12,6 +12,15 @@ const { restoreProjectBundle, restoreWorkspaceBundle, selectRestoreSource, loadR
 const MAX_ITEMS = 2000;
 const DB_BUSY_TIMEOUT_MS = 750;
 const RETURN_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp']);
+// Keep this aligned with Host IMAGE_EXTENSIONS + RAW_EXTENSIONS. No-retouch
+// outputs are byte-for-byte copies and therefore do not require plugin decode.
+const NO_RETOUCH_PASSTHROUGH_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif', '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+const noRetouchOutputPolicy = value => {
+  const extension = path.extname(String(value || '')).toLowerCase();
+  return NO_RETOUCH_PASSTHROUGH_EXTENSIONS.has(extension)
+    ? { supported: true, extension }
+    : { supported: false, extension, error: `原图格式 ${extension || '未知'} 不能作为项目图片版本原样输出；请先转换为 JPEG、PNG、TIFF、HEIC/AVIF 或受支持的 RAW 格式` };
+};
 const pendingCapabilities = new Map();
 const activeAlgorithms = new Set();
 const unconfirmedAlgorithmTrees = new Set();
@@ -1608,8 +1617,9 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   const mergeStage = path.join(output.mergeDirectory, '.staging', `${operationId}-${crypto.randomUUID()}`);
   const manifestPath = path.join(mergeStage, 'manifest.json');
   const originalName = String(bundle.photo?.originalName || base.filePath || '');
-  const originalExtension = path.extname(originalName).toLowerCase();
-  if (!mergeTasks.length && !['.jpg','.jpeg','.png','.tif','.tiff','.webp'].includes(originalExtension)) throw new Error(`无需修改的 ${originalExtension || '未知'} 原图暂不支持直接登记；请先导出为 JPEG、PNG、TIFF 或 WebP`);
+  const noRetouchPolicy = noRetouchOutputPolicy(originalName);
+  const originalExtension = noRetouchPolicy.extension;
+  if (!mergeTasks.length && !noRetouchPolicy.supported) throw new Error(noRetouchPolicy.error);
   const outputExtension = mergeTasks.length ? '.tif' : originalExtension;
   const outputName = `${safeSegment(path.parse(originalName || payload.photoId).name, '素材')}_多人修图_${mergeFingerprint.slice(0, 12)}${outputExtension}`;
   const privateOutputPath = path.join(mergeStage, outputName);
@@ -2308,11 +2318,14 @@ const workspaceSnapshot = async (parentId, context) => {
       if (!baseVersionId) baseVersionId = String(versionByPhoto.get(photoId) || [...grouped.keys()].at(-1) || '');
       if (!baseVersionId) continue;
       const relativePath = String(registration?.relative_path || '');
+      const noRetouchPolicy = noRetouchOutputPolicy(relativePath);
       photos.push({
         photoId, baseVersionId, displayName: String(registration?.display_name || path.parse(relativePath).name || photoId),
         relativePath, relativePathState: String(registration?.relative_path_state || 'unresolvable'), fileMissing: Boolean(registration?.file_missing), mediaRef: { photoId, versionId: baseVersionId, relativePath },
         tasks: (grouped.get(baseVersionId) || []).map(serializeTask),
         excludedPersonCount: excludedByVersion.get(`${photoId}\0${baseVersionId}`) || 0,
+        noRetouchOutputSupported: noRetouchPolicy.supported,
+        noRetouchOutputError: noRetouchPolicy.supported ? '' : noRetouchPolicy.error,
       });
     }
     const identities = db.prepare('SELECT id,name,color,created_at AS createdAt,updated_at AS updatedAt FROM team_person_identities WHERE project_id=? ORDER BY created_at').all(projectId);

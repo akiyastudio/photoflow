@@ -6,6 +6,19 @@ export type WorkflowGenerationModel = {
 
 export const idleWorkflowGeneration = (projectId = ''): WorkflowGenerationModel => ({ projectId, operationId: '', state: 'idle', phase: 'idle', progress: 0, message: '', completedFiles: 0, totalFiles: 0 });
 
+export const createWorkflowStatusController = (initialScope = '') => {
+  let scope = initialScope; let generation = 0;
+  return {
+    setScope(nextScope: string) { if (nextScope !== scope) { scope = nextScope; generation += 1; } },
+    begin() { return { scope, generation }; },
+    invalidate() { generation += 1; },
+    accepts(token: { scope: string; generation: number }, current: { operationId?: unknown }, job: { operationId?: unknown }) {
+      const currentOperationId = String(current.operationId || ''); const jobOperationId = String(job.operationId || '');
+      return token.scope === scope && token.generation === generation && Boolean(jobOperationId) && (!currentOperationId || currentOperationId === jobOperationId);
+    },
+  };
+};
+
 const stateOf = (value: Record<string, unknown>): WorkflowGenerationState => {
   if (value.requiresConfirmation || value.state === 'awaiting-confirmation' || value.phase === 'confirmation') return 'awaiting-confirmation';
   if (value.cancelled || value.state === 'cancelled') return 'cancelled';

@@ -20,7 +20,7 @@ import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 import { IdentityPickerPanel } from './IdentityPickerPanel';
 import { prepareAndOpenWorkflowTaskFolder } from './legacy-task-folder-model';
 import { matchesCurrentEvent } from './event-scope-model';
-import { idleWorkflowGeneration, reduceWorkflowGeneration } from './workflow-generation-model';
+import { createWorkflowStatusController, idleWorkflowGeneration, reduceWorkflowGeneration } from './workflow-generation-model';
 import { runSequentialMergeBatch } from './sequential-merge-batch';
 import { createWorkspaceScopeController } from './workspace-state-model';
 
@@ -396,11 +396,13 @@ const MergeReviewSurface = ({ workspace, subjects, mergeablePhotos, mergeReport,
     const incomplete = photoSubjects.filter(subject => !subject.assignment?.completed).length;
     const missing = photoSubjects.filter(subject => subject.assignment?.returnMissing).length;
     const pendingCropReview = photo.tasks.filter(task => task.needsReview || task.patchMissing).length;
+    const onlyNoRetouch = photoSubjects.length > 0 && photoSubjects.every(subject => subject.assignment?.completed && subject.assignment.completionKind !== 'returned');
     const merged = isPhotoMergeComplete(workspace, photo);
     const issues = [
       missing ? `返图缺失 ${missing}` : '',
       incomplete ? `任务未完成 ${incomplete}` : '',
       pendingCropReview ? `工作图待复核 ${pendingCropReview}` : '',
+      onlyNoRetouch && photo.noRetouchOutputSupported === false ? photo.noRetouchOutputError || '原图格式不支持原样输出，请先转换格式' : '',
       !photoSubjects.length ? '没有人物任务' : '',
     ].filter(Boolean);
     const ready = merged || mergeableKeys.has(`${photo.photoId}:${photo.baseVersionId}`) && issues.length === 0;
@@ -495,6 +497,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const workflowGenerationScope = `${workspacePath}\0${project.id}`;
   const workflowGenerationContextRef = useRef({ projectId: project.id, onNotice });
   workflowGenerationContextRef.current = { projectId: project.id, onNotice };
+  const workflowStatusControllerRef = useRef(createWorkflowStatusController(workflowGenerationScope));
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [subjectPageSize, setSubjectPageSize] = useState(18);
   const [relayChainsOpen, setRelayChainsOpen] = useState(false);
@@ -572,12 +575,14 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     }
   }), [project.id, workflowReturnProgress?.operationId]);
   useEffect(() => {
+    workflowStatusControllerRef.current.setScope(workflowGenerationScope);
     setWorkflowGeneration(idleWorkflowGeneration(workflowGenerationContextRef.current.projectId));
     workflowGenerationVisibleTaskIdsRef.current.clear();
   }, [workflowGenerationScope]);
   useEffect(() => {
     let active = true;
     const { projectId: scopedProjectId, onNotice: scopedNotice } = workflowGenerationContextRef.current;
+    const statusToken = workflowStatusControllerRef.current.begin();
     const unsubscribe = legacyApi.onTeamWorkflowGenerationProgress(value => {
       setWorkflowGeneration(current => {
         if (!current.operationId || !matchesCurrentEvent(value, { projectId: scopedProjectId, operationId: current.operationId }, true)) return current;
@@ -586,7 +591,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       });
     });
     void legacyApi.getTeamWorkflowGenerationStatus().then(result => {
-      if (active && result.success && result.job && matchesCurrentEvent(result.job, { projectId: scopedProjectId })) setWorkflowGeneration(current => reduceWorkflowGeneration(current, result.job, 'status'));
+      if (active && result.success && result.job && matchesCurrentEvent(result.job, { projectId: scopedProjectId })) setWorkflowGeneration(current => workflowStatusControllerRef.current.accepts(statusToken, current, result.job) ? reduceWorkflowGeneration(current, result.job, 'status') : current);
     }).catch(error => { if (active) scopedNotice(`恢复协作流程生成状态失败：${error instanceof Error ? error.message : String(error)}`, 'error'); });
     return () => { active = false; unsubscribe(); };
   }, [workflowGenerationScope]);
@@ -1210,6 +1215,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const run = (replace = false) => {
       const operationId = crypto.randomUUID();
       requestedOperationId = operationId;
+      workflowStatusControllerRef.current.invalidate();
       setWorkflowGeneration(current => reduceWorkflowGeneration(current.projectId === project.id ? current : idleWorkflowGeneration(project.id), { projectId: project.id, operationId, state: 'running', phase: 'preparing', progress: 0, completedFiles: 0, totalFiles: 0, message: '正在准备协作流程…' }, 'start'));
       return legacyApi.generateTeamWorkflow({ operationId, preferredIdentityOrder, sameWeekIdentityIds, groups, replace });
     };
@@ -1255,10 +1261,12 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
 
   const mergeablePhotos = workspace.photos.filter(photo => {
     const photoSubjects = subjects.filter(subject => subject.photo.photoId === photo.photoId && subject.photo.baseVersionId === photo.baseVersionId);
+    const onlyNoRetouch = photoSubjects.length > 0 && photoSubjects.every(subject => subject.assignment?.completed && subject.assignment.completionKind !== 'returned');
     return photo.tasks.length > 0
       && !isPhotoMergeComplete(workspace, photo)
       && photoSubjects.length > 0
-      && photoSubjects.every(subject => Boolean(subject.assignment?.completed));
+      && photoSubjects.every(subject => Boolean(subject.assignment?.completed))
+      && !(onlyNoRetouch && photo.noRetouchOutputSupported === false);
   });
   const mergedPhotos = workspace.photos.filter(photo => isPhotoMergeComplete(workspace, photo));
   const mergePhotoCount = workspace.photos.filter(photo => photo.tasks.length > 0).length;
