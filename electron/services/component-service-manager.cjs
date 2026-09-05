@@ -44,10 +44,11 @@ const rememberCompletedParent = (session, id) => {
 };
 
 class ComponentServiceManager {
-  constructor({ registry, processSupervisor, capabilityBroker, executablePath = process.execPath, writeLog = () => undefined, requestTimeoutMs = REQUEST_TIMEOUT_MS, longRequestTimeoutMs = LONG_REQUEST_TIMEOUT_MS }) {
+  constructor({ registry, processSupervisor, capabilityBroker, lifecycleCoordinator = null, executablePath = process.execPath, writeLog = () => undefined, requestTimeoutMs = REQUEST_TIMEOUT_MS, longRequestTimeoutMs = LONG_REQUEST_TIMEOUT_MS }) {
     this.registry = registry;
     this.processSupervisor = processSupervisor;
     this.capabilityBroker = capabilityBroker;
+    this.lifecycleCoordinator = lifecycleCoordinator;
     this.executablePath = executablePath;
     this.writeLog = writeLog;
     this.requestTimeoutMs = requestTimeoutMs;
@@ -179,6 +180,7 @@ class ComponentServiceManager {
   }
 
   async invoke(componentId, method, payload, boundContext) {
+    this.lifecycleCoordinator?.assertAvailable?.(componentId);
     if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; }
     if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.invoke(componentId, method, payload, boundContext); }
@@ -253,6 +255,7 @@ class ComponentServiceManager {
 
   async ensureSession(descriptor) {
     if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
+    this.lifecycleCoordinator?.assertAvailable?.(descriptor?.componentId);
     this.assertNotQuarantined(descriptor?.componentId);
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
@@ -286,7 +289,7 @@ class ComponentServiceManager {
       prepareReady(session);
       session.managed = this.processSupervisor.launch({
         id: `component-service:${componentId}`,
-        kind: 'component-service', command, args, options,
+        kind: 'component-service', command, args, options, owner: { componentId }, windowsJob: true,
         health: { startupTimeoutMs: 15000 },
         restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
         onSpawn: (child, managed) => this.attach(session, child, managed),
@@ -343,6 +346,7 @@ class ComponentServiceManager {
     });
     child.once('exit', () => {
       recycled = true; fragments = []; bufferedBytes = 0; child.stdout.removeListener('data', onData);
+      if (!session.readySettled) { const error=new Error(`Component service failed before ready: ${session.descriptor.componentId}`);error.code='COMPONENT_HOST_SERVICE_START_FAILED';session.readyReject(error); }
       for (const pending of session.pending.values()) {
         clearTimeout(pending.timer);
         const error = new Error(`Component service exited before completing ${session.descriptor.componentId}.${pending.method}`);
@@ -350,7 +354,6 @@ class ComponentServiceManager {
         pending.reject(error);
       }
       session.pending.clear();
-      if (session.readySettled) prepareReady(session);
     });
   }
 

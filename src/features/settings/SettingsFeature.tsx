@@ -312,6 +312,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     setBusyAction('uninstall');
     try {
       const result = await window.electronAPI.uninstallComponent(component.id, { clearUserData });
+      if (result.cancelled) { onNotice('已取消卸载', 2500); return; }
       if (!result.success) { onNotice(`卸载“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       if (clearUserData) await onComponentDataCleared(component.id);
       const cleanupWarning = result.cleanupWarnings?.filter(Boolean).join('；');
@@ -332,6 +333,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     setBusyAction('toggle');
     try {
       const result = await setComponentEnabled(component.id, enabled);
+      if (result.cancelled) { onNotice(enabled ? '已取消启用' : '已取消禁用', 2500); return; }
       if (!result.success) { onNotice(`${enabled ? '启用' : '禁用'}“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       onNotice(enabled ? `已启用“${component.name}”` : `已禁用“${component.name}”；组件文件和用户数据均已保留`);
       await onComponentsChanged();

@@ -1,6 +1,8 @@
 const assert = require('assert');
+const fs = require('fs');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
+const os = require('os');
 const path = require('path');
 const { createBundledPythonRuntime } = require('../electron/services/bundled-python-runtime.cjs');
 
@@ -49,6 +51,35 @@ assert.deepStrictEqual(runtime.getRunConfig('cut_video.py', ['input.mov']), {
   command: 'video-tools.exe',
   args: ['cut_video', 'input.mov'],
 });
+
+const frameRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-bundled-python-frame-runtime-'));
+try {
+  const folderA = path.join(frameRuntimeRoot, 'a');
+  const folderB = path.join(frameRuntimeRoot, 'b');
+  fs.mkdirSync(folderA);
+  fs.mkdirSync(folderB);
+  fs.writeFileSync(path.join(folderA, 'reference.mp4'), 'video');
+  const capabilityCalls = [];
+  pluginService = {
+    resolveRunConfigForCapability: (capability, args) => {
+      capabilityCalls.push({ capability, args });
+      return { command: 'video-tools-worker.exe', args: ['worker-entry', ...args] };
+    },
+  };
+  const run = runtime.getRunConfig('rename.py', ['--folder_a', folderA, '--folder_b', folderB, '--preview']);
+  assert.equal(run.command, 'development-python');
+  assert.deepStrictEqual(run.args.slice(-4), [
+    '--preview',
+    '--video_tools_command',
+    'video-tools-worker.exe',
+    '--video_tools_arg=worker-entry',
+  ]);
+  assert.deepStrictEqual(capabilityCalls, [{ capability: 'media.video.processing.cli', args: [] }]);
+  assert(!run.args.includes('--video_tools_arg=ffmpeg_transcode'), 'frame bridge must not be routed through the ffmpeg_transcode worker action');
+  assert.equal(run.args.includes('--video_tools_command'), true);
+} finally {
+  fs.rmSync(frameRuntimeRoot, { recursive: true, force: true });
+}
 
 const packagedRuntime = createBundledPythonRuntime({
   app: { isPackaged: true },

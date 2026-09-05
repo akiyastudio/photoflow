@@ -1090,9 +1090,9 @@ export interface IElectronAPI {
   clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
   installComponent: (request: ComponentInstallRequest) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
-  setComponentEnabled: (componentId: string, enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>;
+  setComponentEnabled: (componentId: string, enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; cancelled?: boolean; error?: string }>;
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
-  uninstallComponent: (componentId: string, options: { clearUserData: boolean }) => Promise<{ success: boolean; dataCleared?: boolean; cleanupWarnings?: string[]; error?: string }>;
+  uninstallComponent: (componentId: string, options: { clearUserData: boolean }) => Promise<{ success: boolean; cancelled?: boolean; dataCleared?: boolean; cleanupWarnings?: string[]; error?: string }>;
   getStorageDevices: () => Promise<StorageDeviceInventoryResult>;
   getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; componentId?: string; displayName?: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
   retryDomainCommand: (commandId: string) => Promise<{ success: boolean; error?: string }>;

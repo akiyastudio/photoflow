@@ -48,6 +48,7 @@ const { createDomainCommandJournal } = require('./services/domain-command-journa
 const { createDomainHealthService } = require('./services/domain-health-service.cjs');
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
+const { ComponentLifecycleCoordinator } = require('./services/component-lifecycle-coordinator.cjs');
 const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
@@ -252,7 +253,12 @@ let mediaTrackingScanScheduler = null;
 const isInternalWorkspaceChange = isInternalWorkspacePath;
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
-const processSupervisor = createProcessSupervisor({ writeLog: (...args) => writeLog(...args) });
+const processSupervisor = createProcessSupervisor({
+  writeLog: (...args) => writeLog(...args),
+  nativeJobHostPath: app.isPackaged ? path.join(process.resourcesPath, 'component-job-host.exe') : path.join(__dirname, 'bin', 'component-job-host.exe'),
+});
+const componentLifecycleCoordinator = new ComponentLifecycleCoordinator({ blocker: componentId => processSupervisor.hasUnconfirmedOwner(componentId) });
+processSupervisor.lifecycleCoordinator = componentLifecycleCoordinator;
 const workspaceSqliteCoordinator = new WorkspaceSqliteCoordinator();
 
 const recycleBinService = createRecycleBinService({ app, shell, projectRoot, processSupervisor });
@@ -644,7 +650,7 @@ const bundledPythonRuntime = createBundledPythonRuntime({
 });
 const { getRunConfig, runJsonCommand, runPythonEventAction, runPythonJsonAction } = bundledPythonRuntime;
 
-pluginService = createPluginService({ app, registry: componentRegistry, runJsonCommand });
+pluginService = createPluginService({ app, registry: componentRegistry, runJsonCommand, processSupervisor });
 
 const extractVideoTimelineFrames = async (filePath, times) => {
   const operationId = crypto.randomUUID();
@@ -1353,6 +1359,7 @@ app.whenReady().then(async () => {
     registry: componentHostRegistry,
     processSupervisor,
     capabilityBroker: componentCapabilityBroker,
+    lifecycleCoordinator: componentLifecycleCoordinator,
     writeLog,
   });
   componentViewManager = new ComponentViewManager({
@@ -1362,7 +1369,7 @@ app.whenReady().then(async () => {
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     partitionSessionProvider: partitionName => session.fromPartition(partitionName),
     ipcMain: electronIpcMain,
-    serviceManager: componentServiceManager, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState, resolveOpenContext: componentContentBinding.resolveOpenRequest,
+    serviceManager: componentServiceManager, lifecycleCoordinator: componentLifecycleCoordinator, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState, resolveOpenContext: componentContentBinding.resolveOpenRequest,
     writeLog,
     onViewStackChanged: () => toastViewManager?.bringToFront(),
   });
@@ -1446,31 +1453,38 @@ app.whenReady().then(async () => {
   });
 });
 
-registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, onQuit: () => {
-  destroyToastViewManager();
-  componentViewManager?.destroy();
-  void componentServiceManager?.destroy();
-  telemetryService?.stop();
-  pluginService?.stop?.();
-  stopWorkspaceWatcher(true);
-  stopFileRootWatchers();
-  stopShellThumbnailProcess();
-  workspaceDatabase.stop();
-  operationsDatabase.stop();
-  workspaceMaintenanceDatabase.stop();
-  mediaDatabase.stop();
-  mediaInteractionDatabase.stop();
-  versionReadDatabase.stop();
-  versionLocationDatabase.stop();
-  mediaScanDatabase.stop();
-  trackingScanDatabase.stop();
-  imageThumbnailRuntime.stop();
-  thumbnailService?.stop();
-  backgroundTasks.stop();
-  domainCommandJournal.stop();
-  processSupervisor.stopAll();
-  eventBus.clear();
-  void exiftool.end().catch(() => undefined);
+registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, beforeDrain: () => {
+  if (!componentLifecycleCoordinator.beginApplicationQuit()) throw Object.assign(new Error('组件变更仍在进行，请稍后重试退出'), { code: 'APP_QUIT_BUSY' });
+}, onQuit: async () => {
+  const background = processSupervisor.list().filter(status => status.owner?.componentId && !['idle', 'stopped', 'exited'].includes(status.state));
+  if (background.length) {
+    const options = { type: 'warning', title: '插件仍在后台运行', message: `仍有 ${new Set(background.map(item => item.owner.componentId)).size} 个插件在后台运行。`, detail: '退出应用需要先关闭这些插件的全部后台进程。', buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true };
+    const response = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
+    if (response.response !== 0) { componentLifecycleCoordinator.cancelApplicationQuit(); const error = new Error('用户取消退出'); error.code = 'APP_QUIT_CANCELLED'; throw error; }
+  }
+  const componentIds = [...new Set(componentHostRegistry.list().map(item => item.componentId))];
+  const barriers = componentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
+  try {
+    await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
+    await componentViewManager?.destroyAndWait();
+    componentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
+    await Promise.all(barriers.map(barrier => barrier.drain({ timeoutMs: 7500 })));
+    await componentServiceManager?.destroy();
+    await processSupervisor.stopAll('application-quit');
+    await exiftool.end().catch(() => undefined);
+    destroyToastViewManager();
+    telemetryService?.stop(); pluginService?.stop?.(); stopWorkspaceWatcher(true); stopFileRootWatchers(); stopShellThumbnailProcess();
+    imageThumbnailRuntime.stop(); thumbnailService?.stop(); backgroundTasks.stop(); domainCommandJournal.stop(); eventBus.clear();
+    workspaceDatabase.stop(); operationsDatabase.stop(); workspaceMaintenanceDatabase.stop(); mediaDatabase.stop(); mediaInteractionDatabase.stop();
+    versionReadDatabase.stop(); versionLocationDatabase.stop(); mediaScanDatabase.stop(); trackingScanDatabase.stop();
+  } catch (error) { barriers.forEach(barrier => barrier.release()); componentLifecycleCoordinator.cancelApplicationQuit(); throw error; }
+}, onQuitFailed: async error => {
+  componentLifecycleCoordinator.cancelApplicationQuit();
+  if (BrowserWindow.getAllWindows().length === 0) { createWindow(); loadMainWindowRenderer(); }
+  if (error?.code !== 'APP_QUIT_CANCELLED') {
+    const options = { type: 'error', title: '无法安全退出', message: '部分插件后台进程未能确认退出，应用将继续运行。', detail: `${error?.message || String(error)}\n请稍后重试。`, buttons: ['确定'], defaultId: 0, noLink: true };
+    if (mainWindow && !mainWindow.isDestroyed()) await dialog.showMessageBox(mainWindow, options); else await dialog.showMessageBox(options);
+  }
 } });
 
 app.on('window-all-closed', () => {

@@ -70,7 +70,7 @@ const configMutationService = createConfigMutationService({
   };
   assert.deepEqual(await transitionComponentEnabled({ ...transitionDependencies, enabled: false }), { componentId, enabled: false });
   assert.equal(enabled, false);
-  assert.deepEqual(transitionCalls, ['block', 'state:false', 'close', 'processes', 'service', 'network', 'drain', 'release'], 'disable quiesces every component runtime surface');
+  assert.deepEqual(transitionCalls, ['block', 'processes', 'service', 'close', 'network', 'drain', 'state:false', 'release'], 'disable confirms process-tree shutdown before changing enabled state');
   assert.deepEqual(await transitionComponentEnabled({ ...transitionDependencies, enabled: true }), { componentId, enabled: true });
   assert.equal(enabled, true, 're-enable restores registry discovery without reinstalling files');
   console.log('Component install legacy-settings adoption rollback tests passed');

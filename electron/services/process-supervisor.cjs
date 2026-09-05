@@ -1,6 +1,7 @@
 const { EventEmitter } = require('events');
 const { spawn: defaultSpawn } = require('child_process');
 const { stopProcessAndWait, terminateAndWait } = require('../infrastructure/process-termination.cjs');
+const { wrapComponentJobSpecification } = require('../infrastructure/windows-component-job.cjs');
 
 const DEFAULT_RESTART_POLICY = Object.freeze({ enabled: false, maxRestarts: 0, windowMs: 60000, backoffMs: [100, 300, 1000] });
 const safeError = error => error?.message || String(error || 'unknown error');
@@ -116,7 +117,7 @@ class ManagedProcess extends EventEmitter {
     return true;
   }
 
-  async recycle(reason = 'recycle-requested', { timeoutMs = 2000, rollbackSettleMs = 25, restartPolicy = false } = {}) {
+  async recycle(reason = 'recycle-requested', { timeoutMs = this.specification.windowsJob ? 12000 : 2000, rollbackSettleMs = 25, restartPolicy = false } = {}) {
     const lifecycle = this.lifecycle;
     if (!lifecycle || lifecycle.settled) return this.start();
     this._safeLog('warn', 'Managed process recycled', this.details({ reason, generation: lifecycle.generation }));
@@ -134,7 +135,7 @@ class ManagedProcess extends EventEmitter {
     return this.start();
   }
 
-  async stop(reason = 'shutdown', { release = true, timeoutMs = 2000, rollbackSettleMs = 25 } = {}) {
+  async stop(reason = 'shutdown', { release = true, timeoutMs = this.specification.windowsJob ? 12000 : 2000, rollbackSettleMs = 25 } = {}) {
     this.stopping = true;
     this.state = 'stopping';
     this._restartReason = null;
@@ -237,10 +238,12 @@ class ManagedProcess extends EventEmitter {
     return this._finalizeLifecycle(lifecycle, { error });
   }
 
-  _onExit(lifecycle, code, signal) {
+  async _onExit(lifecycle, code, signal) {
     lifecycle.exitObserved = true;
-    lifecycle.terminationFailed = false;
-    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
+    const jobVerdict = lifecycle.child?.__photoFlowJobControl ? await lifecycle.child.__photoFlowJobControl.terminalVerdict : null;
+    const terminationFailed = Boolean(jobVerdict && jobVerdict.confirmed !== true);
+    lifecycle.terminationFailed = terminationFailed;
+    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error, terminationFailed });
   }
 
   _finalizeLifecycle(lifecycle, { code = null, signal = null, error = null, terminationFailed = false } = {}) {
@@ -321,10 +324,12 @@ class ManagedProcess extends EventEmitter {
     return lifecycle.finalizePromise;
   }
 
-  _onClose(lifecycle, code, signal) {
+  async _onClose(lifecycle, code, signal) {
     lifecycle.closeObserved = true;
-    lifecycle.terminationFailed = false;
-    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
+    const jobVerdict = lifecycle.child?.__photoFlowJobControl ? await lifecycle.child.__photoFlowJobControl.terminalVerdict : null;
+    const terminationFailed = Boolean(jobVerdict && jobVerdict.confirmed !== true);
+    lifecycle.terminationFailed = terminationFailed;
+    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error, terminationFailed });
   }
 
   _settleLifecycle(lifecycle) {
@@ -390,11 +395,13 @@ class ManagedProcess extends EventEmitter {
 }
 
 class ProcessSupervisor {
-  constructor({ spawnImpl = defaultSpawn, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform } = {}) {
+  constructor({ spawnImpl = defaultSpawn, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform, nativeJobHostPath, enableNativeComponentJobs = spawnImpl === defaultSpawn } = {}) {
     this.spawnImpl = spawnImpl;
     this.writeLog = writeLog;
     this.now = now;
     this.terminationPlatform = terminationPlatform;
+    this.nativeJobHostPath = nativeJobHostPath;
+    this.enableNativeComponentJobs = enableNativeComponentJobs;
     this.processes = new Map();
     this.stopping = false;
   }
@@ -407,9 +414,13 @@ class ProcessSupervisor {
     if (this.stopping) throw new Error('Process supervisor is stopping');
     const id = String(specification?.id || '').trim();
     if (!id) throw new Error('Managed process ID is required');
+    if (specification?.owner?.componentId) this.lifecycleCoordinator?.assertLaunchAllowed?.(specification.owner.componentId, specification.lifecycleLease);
     const existing = this.processes.get(id);
     if (existing && !existing.released) throw new Error(`Managed process already exists: ${id}`);
-    const managed = new ManagedProcess(this, { ...specification, id });
+    const effectiveSpecification = this.enableNativeComponentJobs
+      ? wrapComponentJobSpecification({ ...specification, id }, { jobHostPath: this.nativeJobHostPath })
+      : { ...specification, id };
+    const managed = new ManagedProcess(this, effectiveSpecification);
     this.processes.set(id, managed);
     try {
       managed.start();
@@ -428,6 +439,18 @@ class ProcessSupervisor {
 
   list() {
     return [...this.processes.values()].map(process => process.status()).sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  hasWhere(predicate) {
+    return [...this.processes.values()].some(process => {
+      const status = process.status();
+      return predicate(status) && !['idle', 'stopped', 'exited'].includes(status.state);
+    });
+  }
+
+  hasUnconfirmedOwner(componentId) {
+    const id = String(componentId || '');
+    return [...this.processes.values()].some(process => process.owner?.componentId === id && process.lifecycle?.terminationFailed === true);
   }
 
   async stopWhere(predicate, reason = 'owner-revoked') {

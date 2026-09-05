@@ -5,7 +5,7 @@ const { createDevelopmentPythonResolver } = require('./python-environment-servic
 const { findPythonJsonFailureMessage } = require('./python-json-protocol.cjs');
 const { createJsonCommandRunner } = require('./json-command-runner.cjs');
 const { renameNeedsFrameRuntime } = require('./rename-runtime-model.cjs');
-const { resolveLegacyComponentRuntimeTool, resolveLegacyRuntimeRunConfig } = require('../compatibility/legacy-component-runtime-tools.cjs');
+const { resolveLegacyComponentRuntimeTool, resolveLegacyRuntimeRunConfig, resolveLegacyRuntimeBridgeConfig } = require('../compatibility/legacy-component-runtime-tools.cjs');
 
 const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'workspace_db', 'operations_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
@@ -43,7 +43,7 @@ const createBundledPythonRuntime = ({
     }
     if (baseName === 'rename' && renameNeedsFrameRuntime(args, { fs, path }) && pluginService) {
       try {
-        const videoRuntime = resolveLegacyRuntimeRunConfig(pluginService, resolveLegacyComponentRuntimeTool('ffmpeg_transcode'), []);
+        const videoRuntime = resolveLegacyRuntimeBridgeConfig(pluginService, resolveLegacyComponentRuntimeTool('ffmpeg_transcode'));
         args = [...args, '--video_tools_command', videoRuntime.command, ...videoRuntime.args.map(value => `--video_tools_arg=${value}`)];
       } catch (error) {
         if (error?.code !== 'PLUGIN_MISSING') throw error;

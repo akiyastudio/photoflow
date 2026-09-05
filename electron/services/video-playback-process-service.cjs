@@ -30,7 +30,7 @@ const createVideoPlaybackProcessService = ({
     pending.cancelled = true;
     void Promise.resolve().then(() => captureService.abort(pending.stageId)).catch(() => undefined).then(() => pending.reject(error));
   };
-  const captureOwner = session => ({ sessionId: session.id, componentId: session.componentId, processId: session.child.pid });
+  const captureOwner = session => ({ sessionId: session.id, componentId: session.componentId, processId: session.processId });
   const publishScreenshot = async (session, pending) => {
     if (pending.cancelled || pending.phase !== 'waiting') throw new Error('视频截图发布已取消');
     pending.phase = 'publishing'; clearTimeout(pending.timer);
@@ -132,6 +132,7 @@ const createVideoPlaybackProcessService = ({
     let session = null;
     let inputSessionId = '';
     let launchedChild = null;
+    let launchedManaged = null;
     let launchAborted = false;
     let onSenderDestroyed = null;
     const assertCurrentLaunch = () => {
@@ -154,7 +155,7 @@ const createVideoPlaybackProcessService = ({
         else {
           if (launches.get(key) === normalizedRequestId) launches.delete(key);
           mediaInputSessionService.revoke(id);
-          if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
+          if (launchedManaged) void launchedManaged.stop('playback-launch-aborted').catch(()=>undefined); else if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
         }
       };
       sender.once('destroyed', onSenderDestroyed);
@@ -167,6 +168,7 @@ const createVideoPlaybackProcessService = ({
         kind: 'media-playback-backend',
         protocol: 'media-playback-backend-v1',
         owner: { componentId: backendOwner.componentId, playbackSessionId: id, backendId },
+        windowsJob: true,
         command: runConfig.command,
         args: runConfig.args,
         options: { cwd: path.dirname(runConfig.command), stdio: ['pipe', 'pipe', 'pipe'] },
@@ -174,7 +176,7 @@ const createVideoPlaybackProcessService = ({
         onExitCleanup: ({ child: exitedChild }) => {
           mediaInputSessionService.revokePlaybackSession?.(id);
           captureService.abortSession?.(id);
-          if (exitedChild?.pid) { mediaInputSessionService.revokeProcess?.(exitedChild.pid); captureService.abortProcess?.(exitedChild.pid); }
+          const processId=exitedChild?.__photoFlowTargetPid||exitedChild?.pid;if (processId) { mediaInputSessionService.revokeProcess?.(processId); captureService.abortProcess?.(processId); }
         },
         ephemeral: true,
       });
@@ -182,6 +184,7 @@ const createVideoPlaybackProcessService = ({
         cwd: path.dirname(runConfig.command), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       });
       launchedChild = child;
+      launchedManaged = managedProcess;
       session = {
         id,
         sender,
@@ -203,6 +206,7 @@ const createVideoPlaybackProcessService = ({
         ownerWindow,
         componentId: backendOwner.componentId,
         backendId,
+        processId: 0,
         inputToken: '',
         pendingAuthorizedSubtitles: [],
         surfaceAttachPromise: null,
@@ -249,7 +253,7 @@ const createVideoPlaybackProcessService = ({
         }
         if (value.type === 'surface-created') {
           if (session.surfaceAttachPromise) return;
-          session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id, onLost: error => { if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'SURFACE_LOST', error: error.message }); } })
+          session.surfaceAttachPromise = Promise.resolve(session.child.__photoFlowJobControl?.ready).then(()=>nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: { pid: session.child.__photoFlowTargetPid || session.child.pid }, surfaceHandle: value.surfaceHandle, sessionId: session.id, onLost: error => { if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'SURFACE_LOST', error: error.message }); } }))
             .then(controller => {
               if (session.stopped) { controller.close(); return controller; }
               session.surfaceController = controller; return controller;
@@ -299,7 +303,7 @@ const createVideoPlaybackProcessService = ({
         session.lastError = error.message;
         rejectReady(error);
         if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: error.message });
-        try { child.kill(); } catch { /* process already exited */ }
+        if (session.managedProcess) void session.managedProcess.stop('playback-protocol-failure').catch(()=>undefined); else try { child.kill(); } catch { /* process already exited */ }
       };
       child.stdout.on('data', chunk => {
         let incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -340,9 +344,11 @@ const createVideoPlaybackProcessService = ({
         writeLog(code === 0 || wasStopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
       });
 
-      const inputGrant = mediaInputSessionService.bindProcess({ componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid });
+      await child.__photoFlowJobControl?.ready;
+      session.processId = child.__photoFlowTargetPid || child.pid;
+      const inputGrant = mediaInputSessionService.bindProcess({ componentId: backendOwner.componentId, backendId, sessionId: id, processId: session.processId });
       session.inputToken = inputGrant.token;
-      const inputOwner = { componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid };
+      const inputOwner = { componentId: backendOwner.componentId, backendId, sessionId: id, processId: session.processId };
       const authorizedPathPromise = Promise.resolve(mediaInputSessionService.resolve(inputGrant.token, inputOwner));
       const authorizedPath = await authorizedPathPromise;
       session.filePath = authorizedPath;
@@ -361,7 +367,7 @@ const createVideoPlaybackProcessService = ({
       else {
         if (onSenderDestroyed) sender.removeListener('destroyed', onSenderDestroyed);
         if (inputSessionId) mediaInputSessionService.revoke(inputSessionId);
-        if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
+        if (launchedManaged) await launchedManaged.stop('playback-launch-failed').catch(()=>undefined); else if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
         if (launches.get(key) === normalizedRequestId) launches.delete(key);
       }
       throw error;

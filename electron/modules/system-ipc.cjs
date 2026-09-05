@@ -19,7 +19,7 @@ const registerHostCapabilities = (componentCapabilityBroker, registrations) => {
 const finalizeComponentRuntimeInstall = async ({ componentId, destination, destinationNodeIdentity, destinationTreeIdentity, backupPath = '', backupNodeIdentity = null, backupTreeIdentity = null, fs, configMutationService, componentViewManager, componentServiceManager, invalidateComponentStatus = () => undefined }) => {
   const stopInstalledRuntime = async reason => {
     try { componentViewManager?.closeComponent?.(componentId); } catch { /* rollback must continue */ }
-    await Promise.resolve(componentServiceManager?.stop?.(componentId, reason)).catch(() => undefined);
+    await Promise.resolve(componentServiceManager?.stop?.(componentId, reason));
   };
   try {
     await stopInstalledRuntime('component-upgrade');
@@ -60,12 +60,12 @@ const transitionComponentEnabled = async ({ componentId, enabled, pluginService,
   const capabilityBarrier = componentCapabilityBroker.blockComponent(id);
   let stateChanged = false;
   try {
-    pluginService.setComponentEnabled(id, false); stateChanged = true;
-    componentViewManager?.closeComponent?.(id);
     await processSupervisor?.stopWhere?.(status => status.owner?.componentId === id, 'component-disabled');
     await componentServiceManager?.stop?.(id, 'component-disabled');
+    await (componentViewManager?.closeComponentAndWait?.(id) ?? componentViewManager?.closeComponent?.(id));
     abortComponentNetworkRequests?.(id);
     await capabilityBarrier.drain({ timeoutMs: 7500 });
+    pluginService.setComponentEnabled(id, false); stateChanged = true;
     return { componentId: id, enabled: false };
   } catch (error) {
     if (stateChanged) pluginService.setComponentEnabled(id, true);
@@ -324,9 +324,9 @@ const enterComponentInstallTransition = async ({ componentId, componentCapabilit
   if (typeof componentCapabilityBroker?.blockComponent !== 'function' || typeof componentViewManager?.closeComponent !== 'function' || typeof componentServiceManager?.stop !== 'function' || typeof processSupervisor?.stopWhere !== 'function' || typeof abortComponentNetworkRequests !== 'function') throw new Error('组件安装 transition gate 不完整');
   const barrier = componentCapabilityBroker.blockComponent(componentId);
   try {
-    componentViewManager.closeComponent(componentId);
     await processSupervisor.stopWhere(status => status.owner?.componentId === componentId, 'component-install');
     await componentServiceManager.stop(componentId, 'component-install');
+    await (componentViewManager.closeComponentAndWait?.(componentId) ?? componentViewManager.closeComponent(componentId));
     abortComponentNetworkRequests(componentId);
     await barrier.drain({ timeoutMs: 7500 });
     return barrier;
@@ -390,6 +390,7 @@ const savePrivacyConsentWithConfig = async ({ request, privacyService, configMut
 const registerSystemIpc = context => {
   const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
+  const lifecycleCoordinator = processSupervisor?.lifecycleCoordinator;
   const mutateConfig = configMutationService.mutate;
   ipcMain.handle('domain-health-status', () => ({
     success: true,
@@ -558,7 +559,7 @@ const registerSystemIpc = context => {
     queueComponentStatusRefresh(true);
   };
   const componentLifecycleService = createComponentLifecycleService({
-    app, backgroundTasks, pluginService, spawn,
+    app, backgroundTasks, pluginService, spawn, processSupervisor,
     developmentActionRoot: path.resolve(__dirname, '..', '..', 'scripts'),
     invalidateComponentStatus, writeLog,
   });
@@ -772,14 +773,20 @@ const registerSystemIpc = context => {
   });
 
   ipcMain.handle('components-set-enabled', async (_event, componentId, enabled) => {
+    let transitionLease;
     try {
+      transitionLease = lifecycleCoordinator?.acquire?.(componentId, enabled ? '启用' : '禁用', { stopOnly: enabled === false });
+      if (enabled === false && processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId)) {
+        const response=await dialog.showMessageBox(mainWindow,{type:'warning',title:'插件仍在后台运行',message:'禁用此插件需要先关闭它的全部后台进程。',buttons:['关闭后台进程并继续退出','取消'],defaultId:1,cancelId:1,noLink:true});
+        if(response.response!==0)return {success:false,cancelled:true};
+      }
       const result = await transitionComponentEnabled({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
       invalidateComponentStatus();
       writeLog('info', result.enabled ? 'Component enabled' : 'Component disabled', { componentId: result.componentId });
       return { success: true, enabled: result.enabled };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
-    }
+    } finally { transitionLease?.release?.(); }
   });
 
   ipcMain.handle('logs-open-folder', async () => {
@@ -840,7 +847,8 @@ const registerSystemIpc = context => {
     try {
       ({ componentId } = validateComponentInstallRequest(request));
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
-      releaseInstall = acquireComponentInstall(componentId);
+      if (lifecycleCoordinator) { const lease = lifecycleCoordinator.acquire(componentId, '安装或更新'); releaseInstall = () => lease.release(); }
+      else releaseInstall = acquireComponentInstall(componentId);
       const discoveredPackage = pluginService.resolvePackage(componentId);
       const archivePath = discoveredPackage.packagePath;
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
@@ -851,6 +859,11 @@ const registerSystemIpc = context => {
       const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
       const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, dialog, mainWindow });
       if (!confirmed) return { success: false, cancelled: true };
+      if (processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId)) {
+        const response = await dialog.showMessageBox(mainWindow, { type: 'warning', title: '更新需要关闭插件后台进程', message: '安装或更新此插件前，需要关闭它的全部后台进程。', buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true });
+        if (response.response !== 0) return { success: false, cancelled: true };
+      }
+      capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
       const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath);
       const manifestDirectory = path.dirname(extractedPackage.manifestEntry);
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
@@ -881,7 +894,6 @@ const registerSystemIpc = context => {
       const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
       await assertAvailableDiskSpace(pluginService.installRoot, componentSizeBytes);
 
-      capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
       await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
 
       const installLocation = await prepareSafeComponentInstallContainer({ fs, path, installRoot: pluginService.installRoot, componentId });
@@ -900,6 +912,7 @@ const registerSystemIpc = context => {
         backupTreeIdentity = await captureComponentTreeIdentity(destination);
         backupPath = path.join(installRoot, `.${componentId}-backup-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
         await fs.promises.rename(destination, backupPath);
+        preserveBackupPath = true;
         await assertDirectoryNodeIdentity(fs, backupPath, backupNodeIdentity, '组件备份目录');
         await verifyComponentTreeIdentity(backupPath, backupTreeIdentity);
       }
@@ -930,6 +943,7 @@ const registerSystemIpc = context => {
         preserveBackupPath = Boolean(error.preserveComponentBackupPath);
         throw error;
       }
+      preserveBackupPath = false;
       if (backupPath && backupNodeIdentity && backupTreeIdentity) {
         try {
           await assertDirectoryNodeIdentity(fs, backupPath, backupNodeIdentity, '组件备份目录');
@@ -986,12 +1000,24 @@ const registerSystemIpc = context => {
   });
 
   ipcMain.handle('components-uninstall', async (_event, componentId, options = {}) => {
+    let transitionLease;
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
       const clearUserData = options?.clearUserData === true;
       const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
       if (component.source !== 'user') throw new Error('此组件不在用户组件目录中，不能通过组件管理卸载');
+      transitionLease = lifecycleCoordinator?.acquire?.(componentId, '卸载', { stopOnly: true });
+      const hasBackgroundTree = processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId) === true;
+      if (hasBackgroundTree) {
+        const response = await dialog.showMessageBox(mainWindow, {
+          type: 'warning', title: '插件仍在后台运行',
+          message: `“${component.name || componentId}”仍有后台进程。`,
+          detail: '继续卸载需要先关闭该插件的全部后台进程。',
+          buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true,
+        });
+        if (response.response !== 0) return { success: false, cancelled: true };
+      }
       const installRoot = path.resolve(pluginService.installRoot);
       const componentPath = path.resolve(component.path);
       const containerPath = path.basename(componentPath) === 'runtime' ? path.dirname(componentPath) : componentPath;
@@ -999,13 +1025,12 @@ const registerSystemIpc = context => {
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(containerPath) !== componentId) throw new Error('组件目录校验失败');
       const capabilityBarrier = componentCapabilityBroker.blockComponent(componentId);
       try {
-      componentViewManager?.closeComponent?.(componentId);
       await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-uninstall');
       await componentServiceManager?.stop?.(componentId, 'component-uninstall');
+      await componentViewManager?.closeComponentAndWait?.(componentId);
       abortComponentNetworkRequests?.(componentId);
       await capabilityBarrier.drain({ timeoutMs: 7500 });
       const uninstallPath = clearUserData || componentPath === containerPath ? containerPath : componentPath;
-      await shell.trashItem(uninstallPath);
 
       const cleanupWarnings = [];
       if (clearUserData) {
@@ -1058,6 +1083,10 @@ const registerSystemIpc = context => {
         }
         try { await clearComponentSecretData?.(componentId); } catch (error) { cleanupWarnings.push(`组件秘密：${error.message || String(error)}`); }
       }
+      if (cleanupWarnings.length) {
+        const error = new Error(`组件数据清理未完成：${cleanupWarnings.join('；')}`); error.code = 'COMPONENT_DATA_CLEANUP_FAILED'; throw error;
+      }
+      await shell.trashItem(uninstallPath);
       try { pluginService.clearComponentEnabledState(componentId); }
       catch (error) { cleanupWarnings.push(`组件启用状态：${error.message || String(error)}`); }
       invalidateComponentStatus();
@@ -1066,7 +1095,7 @@ const registerSystemIpc = context => {
       } finally { capabilityBarrier.release(); }
     } catch (error) {
       return { success: false, error: error.message || String(error) };
-    }
+    } finally { transitionLease?.release?.(); }
   });
 
   ipcMain.handle('cancel-python', async (_event, requestId) => {

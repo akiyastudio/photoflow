@@ -74,7 +74,7 @@ const componentSurfaceCss = (theme, surface) => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, partitionSessionProvider = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, lifecycleCoordinator = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, partitionSessionProvider = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -83,6 +83,7 @@ class ComponentViewManager {
     this.clearComponentCapabilityState = clearComponentCapabilityState;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
+    this.lifecycleCoordinator = lifecycleCoordinator;
     this.capabilityBroker = capabilityBroker;
     this.inputGrantService = inputGrantService;
     this.notificationService = notificationService;
@@ -205,6 +206,7 @@ class ComponentViewManager {
 
   async readSettingsForm(request) {
     if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
+    this.lifecycleCoordinator?.assertAvailable?.(request?.componentId);
     const { descriptor, contribution } = this.settingsForm(request);
     const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'get' }, this.declarativeSettingsContext(descriptor));
     return { revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
@@ -212,6 +214,7 @@ class ComponentViewManager {
 
   async updateSettingsForm(request) {
     if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
+    this.lifecycleCoordinator?.assertAvailable?.(request?.componentId);
     const { descriptor, contribution } = this.settingsForm(request);
     const patch = validateComponentSettingsFormPatch(contribution.form, request?.patch);
     const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'merge', settings: patch }, this.declarativeSettingsContext(descriptor));
@@ -244,6 +247,7 @@ class ComponentViewManager {
   }
 
   async openSurface(rawRequest, surface) {
+    this.lifecycleCoordinator?.assertAvailable?.(rawRequest?.componentId);
     const activationGeneration = ++this.activationGeneration;
     const applicationLevel = surface === 'application.settings' || surface === 'application.command';
     const request = applicationLevel ? rawRequest : this.resolveOpenContext(rawRequest, surface);
@@ -553,6 +557,14 @@ class ComponentViewManager {
     return ids.length;
   }
 
+  async closeComponentAndWait(componentId, timeoutMs = 2000) {
+    componentPartition(componentId);
+    const contents = [...this.instances.values()].filter(instance => instance.descriptor.componentId === componentId).map(instance => instance.view.webContents);
+    this.closeComponent(componentId);
+    await Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+    return contents.length;
+  }
+
   async clearComponentPartitionStorage(componentId) {
     const normalizedId = componentId;
     componentPartition(normalizedId);
@@ -571,6 +583,11 @@ class ComponentViewManager {
   }
 
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
+  async destroyAndWait(timeoutMs = 2000) {
+    const contents = [...this.instances.values()].map(instance => instance.view.webContents);
+    this.destroy();
+    await Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+  }
 }
 
 module.exports = { ComponentViewManager, componentPageKey, componentPartition, componentSettingsPageKey, componentSurfaceCss, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds, waitForWebContentsDestroyed };

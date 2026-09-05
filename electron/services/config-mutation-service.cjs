@@ -205,15 +205,15 @@ const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfi
   return { ready: tail, recover, mutate, read, drain, adoptLegacySettings, hasSnapshot: () => configSnapshotExists(fs, getConfigPath()), mergeRendererConfig: mergeRendererConfigWithOpaqueSettings, mergeRestoredConfig: (current, restored, destination) => mergeRestoredConfig(current, restored, destination, currentLegacySettingsAdoptions(), adoptionPolicy), nextRevision: nextComponentRevision, normalizeRevision: normalizeComponentRevision };
 };
 
-const registerConfigDrainBeforeQuit = ({ app, getConfigMutationService, writeLog = () => undefined, onQuit, timeoutMs = 5000 }) => {
+const registerConfigDrainBeforeQuit = ({ app, getConfigMutationService, writeLog = () => undefined, beforeDrain = () => undefined, onQuit, onQuitFailed = () => undefined, timeoutMs = 5000 }) => {
   let state = 'idle';
   app.on('before-quit', event => {
-    if (state === 'ready') { onQuit(); return; }
+    if (state === 'ready') return;
     event.preventDefault();
     if (state === 'draining') return;
     state = 'draining';
     const service = getConfigMutationService?.();
-    void (service?.drain({ timeoutMs }) || Promise.resolve()).catch(error => writeLog('warn', 'Config mutation drain timed out during quit', { error: error.message || String(error) })).finally(() => { state = 'ready'; app.quit(); });
+    void (async()=>{await beforeDrain();await (service?.drain({timeoutMs})||Promise.resolve());await onQuit?.();state='ready';app.quit();})().catch(error=>{state='idle';writeLog('error','Application quit coordination failed',{error:error.message||String(error),code:error.code});return onQuitFailed(error);});
   });
   return () => state;
 };

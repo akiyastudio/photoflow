@@ -294,7 +294,7 @@ const main = async () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
   assert.match(mainSource, /processId:\s*'python:workspace-catalog'/);
   assert.match(mainSource, /processId:\s*'python:media-interaction'/);
-  assert.match(mainSource, /processSupervisor\.stopAll\(\)/);
+  assert.match(mainSource, /await processSupervisor\.stopAll\(/);
   assert.match(mainSource, /let shellThumbnailStopPromise = null;/, 'Shell thumbnail shutdown must expose a lifecycle fence');
   assert.match(mainSource, /if \(shellThumbnailStopPromise\) await shellThumbnailStopPromise;/, 'a replacement Shell thumbnail helper must wait for the old managed ID to be released');
   assert.match(mainSource, /failed; using decoder fallback[\s\S]*?return false;/, 'Shell thumbnail failures must fall through to the decoder/FFmpeg path');

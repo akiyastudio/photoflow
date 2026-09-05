@@ -12,4 +12,12 @@ const resolveLegacyRuntimeRunConfig = (pluginService, tool, args = []) => typeof
   ? pluginService.resolveRunConfigForCapability(tool.capability, [tool.runtimeAction, ...args])
   : pluginService.resolveRunConfig(tool.componentId, [tool.runtimeAction, ...args]);
 
-module.exports = { LEGACY_RUNTIME_TOOLS, resolveLegacyComponentRuntimeTool, resolveLegacyRuntimeRunConfig };
+// Some core workflows use the component worker as a generic bridge and append
+// their own worker action later. Resolve only the component entrypoint in that
+// case; prepending a legacy tool action would route the bridge request into the
+// wrong worker subcommand.
+const resolveLegacyRuntimeBridgeConfig = (pluginService, tool) => typeof pluginService.resolveRunConfigForCapability === 'function'
+  ? pluginService.resolveRunConfigForCapability(tool.capability, [])
+  : pluginService.resolveRunConfig(tool.componentId, []);
+
+module.exports = { LEGACY_RUNTIME_TOOLS, resolveLegacyComponentRuntimeTool, resolveLegacyRuntimeRunConfig, resolveLegacyRuntimeBridgeConfig };

@@ -20,6 +20,7 @@
     "build:file-publication-service": "node scripts/build-file-publication-service.cjs",
     "build:filesystem-native-services": "npm run build:file-publication-service && npm run build:recycle-bin-service",
     "build:video-surface-host": "node scripts/build-video-surface-host.cjs",
+    "build:component-job-host": "node scripts/build-component-job-host.cjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:python": "node scripts/build-python.cjs",
@@ -87,7 +88,7 @@
     "test:background-tasks": "node scripts/test-background-task-service.cjs && node scripts/test-background-task-migrations.cjs && node scripts/test-background-task-renderer-model.cjs && node scripts/test-background-task-drawer.cjs && node scripts/test-file-operation-notifications.cjs && node scripts/test-dirty-coalescing-runner.cjs && node scripts/test-watch-change-filter.cjs && node scripts/test-media-cache-cleanup-ipc.cjs && node scripts/test-media-tracking-scan-scheduler.cjs && node scripts/test-version-tracking-background.cjs && node scripts/test-sliced-maintenance-runner.cjs",
     "test:file-operation-notifications": "node scripts/test-file-operation-notifications.cjs",
     "test:file-operation-state": "node scripts/test-file-operation-state-model.cjs",
-    "test:process-supervisor": "node scripts/test-process-supervisor.cjs && npm run test:bundled-python-runtime",
+    "test:process-supervisor": "node scripts/test-process-supervisor.cjs && node scripts/test-component-lifecycle-coordinator.cjs && npm run build:component-job-host && node scripts/test-component-job-host.cjs && npm run test:bundled-python-runtime",
     "test:bundled-python-runtime": "node scripts/test-bundled-python-runtime.cjs",
     "test:panel-task-sessions": "node scripts/test-panel-task-sessions.cjs",
     "test:workspace-tabs": "node scripts/test-workspace-tab-model.cjs && node scripts/test-titlebar-tab-order-hook.cjs && node --experimental-strip-types scripts/test-titlebar-tab-scroll.mjs",
@@ -141,10 +142,10 @@
     "test:screenshot-main-image": ".venv\\Scripts\\python.exe scripts\\test-screenshot-main-image.py",
     "test:inspiration-gather": "node scripts/test-inspiration-gather.cjs",
     "preview": "vite preview",
-    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && npm run build:file-publication-service && npm run build:video-surface-host && node scripts/launch-electron-dev.cjs",
+    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && npm run build:file-publication-service && npm run build:video-surface-host && npm run build:component-job-host && node scripts/launch-electron-dev.cjs",
     "electron:dev": "cross-env PHOTOFLOW_DEV_SERVER_URL=http://localhost:5173 concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
     "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
-    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && npm run build:file-publication-service && npm run build:video-surface-host && electron-builder && npm run cleanup:electron-artifacts"
+    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && npm run build:file-publication-service && npm run build:video-surface-host && npm run build:component-job-host && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
@@ -198,6 +199,14 @@
         {
           "from": "electron/bin/video-surface-host.exe",
           "to": "video-surface-host.exe"
+        },
+        {
+          "from": "electron/bin/component-job-host.exe",
+          "to": "component-job-host.exe"
+        },
+        {
+          "from": "electron/bin/component-job-host.exe.sha256",
+          "to": "component-job-host.exe.sha256"
         }
       ]
     },

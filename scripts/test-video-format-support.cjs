@@ -40,7 +40,7 @@ assert.equal((decoder.match(/fflags=\+genpts\+igndts/g) || []).length, 1, 'times
 
 const bundledRuntime = fs.readFileSync(path.join(root, 'electron/services/bundled-python-runtime.cjs'), 'utf8');
 assert(bundledRuntime.includes('`--video_tools_arg=${value}`') && !bundledRuntime.includes("['--video_tools_arg', value]"), 'rename must bind forwarded video runtime flags with = so argparse accepts values such as -u');
-assert(bundledRuntime.includes("baseName === 'rename' && renameNeedsFrameRuntime(args, { fs, path })") && bundledRuntime.includes("error?.code !== 'PLUGIN_MISSING'") && bundledRuntime.includes('resolveLegacyRuntimeRunConfig'), 'image comparison must treat the capability-discovered video runtime as an optional frame adapter');
+assert(bundledRuntime.includes("baseName === 'rename' && renameNeedsFrameRuntime(args, { fs, path })") && bundledRuntime.includes("error?.code !== 'PLUGIN_MISSING'") && bundledRuntime.includes('resolveLegacyRuntimeBridgeConfig'), 'image comparison must treat the capability-discovered video runtime as an optional frame bridge without a legacy worker action prefix');
 const { renameNeedsFrameRuntime } = require('../electron/services/rename-runtime-model.cjs');
 const runtimeProbeRoot = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'photoflow-rename-runtime-'));
 try {

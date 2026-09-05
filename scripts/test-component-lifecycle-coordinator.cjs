@@ -1,0 +1,10 @@
+const assert=require('node:assert/strict');
+const {ComponentLifecycleCoordinator}=require('../electron/services/component-lifecycle-coordinator.cjs');
+const blocked=new Set();const coordinator=new ComponentLifecycleCoordinator({blocker:id=>blocked.has(id)});
+const a=coordinator.acquire('a','install');
+assert.throws(()=>coordinator.acquire('a','uninstall'),error=>error.code==='COMPONENT_QUIESCING');
+assert.equal(coordinator.beginApplicationQuit(),false,'quit must not race an active component transition');
+a.release();assert.equal(coordinator.beginApplicationQuit(),true);assert.throws(()=>coordinator.acquire('b','install'),error=>error.code==='COMPONENT_QUIESCING');assert.throws(()=>coordinator.assertLaunchAllowed('a',a),error=>error.code==='COMPONENT_QUIESCING','a stale lease cannot launch during global quit');
+coordinator.cancelApplicationQuit();const b=coordinator.acquire('b','install');coordinator.assertLaunchAllowed('b',b);b.release();
+blocked.add('c');assert.throws(()=>coordinator.acquire('c','install'),error=>error.code==='COMPONENT_TERMINATION_UNCONFIRMED');const retry=coordinator.acquire('c','uninstall',{stopOnly:true});retry.release();
+console.log('Component lifecycle coordinator tests passed');

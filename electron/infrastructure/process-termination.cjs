@@ -14,6 +14,8 @@ const waitForChildExit = (child, deadlineAt = Infinity) => {
     };
     child.once('exit', finish);
     child.once('close', finish);
+    // The process may exit between the initial probe and listener attachment.
+    if (childHasExited(child)) return finish();
     if (Number.isFinite(deadlineAt)) timer = setTimeout(() => {
       child.removeListener?.('exit', finish);
       child.removeListener?.('close', finish);
@@ -31,6 +33,16 @@ const terminateWindowsProcessTree = (pid, deadlineAt, execFileImpl = execFile) =
 const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, platform = process.platform, execFileImpl = execFile } = {}) => {
   if (!child) return { exited: true, forced: false };
   const terminationDeadline = Number.isFinite(deadlineAt) ? deadlineAt : Date.now() + 2000;
+  if (platform === 'win32' && child.__photoFlowJobControl) {
+    try { child.stdin?.end?.(); } catch { /* target stdin shutdown is best effort */ }
+    const result = await child.__photoFlowJobControl.terminate(terminationDeadline);
+    const exited = await waitForChildExit(child, Math.max(terminationDeadline, Date.now() + 2000));
+    if (!exited || result.confirmed !== true || child.__photoFlowJobControl.emptyConfirmed !== true) {
+      const error = new Error(`Windows Job 未能确认组件进程树已经清空 (hostExited=${exited}, treeConfirmed=${result.confirmed}, emptyConfirmed=${child.__photoFlowJobControl.emptyConfirmed})`); error.code = 'PROCESS_TREE_TERMINATION_UNCONFIRMED'; error.pid = child.pid || null; throw error;
+    }
+    if (rollbackSettleMs > 0) await delay(rollbackSettleMs);
+    return { exited: true, forced: true, treeConfirmed: true };
+  }
   if (platform === 'win32' && child.__photoFlowTreeTerminationUnconfirmed && childHasExited(child)) {
     const error = new Error('组件服务父进程已退出，但无法确认其 Windows 子进程树已终止');
     error.code = 'PROCESS_TREE_TERMINATION_UNCONFIRMED'; error.pid = child.pid || null;
