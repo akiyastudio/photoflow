@@ -1,5 +1,5 @@
 class ComponentLifecycleCoordinator {
-  constructor({ blocker = () => false } = {}) {
+  constructor({ blocker = () => false, promotionTimeoutMs = 7500 } = {}) {
     this.transitions = new Map();
     this.work = new Map();
     this.workWaiters = new Map();
@@ -10,6 +10,19 @@ class ComponentLifecycleCoordinator {
     this.blocker = blocker;
     this.persistentBlocks = new Map();
     this.corruptTransactionState = false;
+    this.promotionTimeoutMs = promotionTimeoutMs;
+  }
+
+  waitForComponentWork(componentId, { timeoutMs = this.promotionTimeoutMs } = {}) {
+    const id = String(componentId || '');
+    if (!this.work.get(id)?.size) return Promise.resolve();
+    let timer;
+    return new Promise((resolve, reject) => {
+      const waiters = this.workWaiters.get(id) || new Set();
+      const waiter = () => { clearTimeout(timer); waiters.delete(waiter); if (!waiters.size) this.workWaiters.delete(id); resolve(); };
+      waiters.add(waiter); this.workWaiters.set(id, waiters);
+      timer = setTimeout(() => { waiters.delete(waiter); if (!waiters.size) this.workWaiters.delete(id); reject(Object.assign(new Error('组件后台工作未在 transition 期限内结束'), { code: 'COMPONENT_BUSY' })); }, Math.max(1, Number(timeoutMs) || this.promotionTimeoutMs));
+    });
   }
 
   unavailableError(componentId) {
@@ -79,20 +92,13 @@ class ComponentLifecycleCoordinator {
     const state = { componentId: id, operation: String(operation || 'transition'), phase: 'intent', token: Symbol(id) };
     this.transitions.set(id, state);
     let released = false;
-    const settled = () => {
-      if (!this.work.get(id)?.size) return Promise.resolve();
-      return new Promise(resolve => {
-        const waiters = this.workWaiters.get(id) || new Set();
-        waiters.add(resolve);
-        this.workWaiters.set(id, waiters);
-      });
-    };
+    const settled = options => this.waitForComponentWork(id, options);
     return {
       ...state,
       settled,
       requestStop: () => { state.stopRequested = true; },
       promote: async () => {
-        await settled();
+        await settled({ timeoutMs: this.promotionTimeoutMs });
         if (released || this.transitions.get(id)?.token !== state.token) throw Object.assign(new Error('组件 transition intent 已失效'), { code: 'COMPONENT_QUIESCING' });
         state.phase = 'exclusive';
       },
@@ -110,11 +116,8 @@ class ComponentLifecycleCoordinator {
     const state = { componentId: id, operation: '持久事务恢复', phase: 'intent', token: Symbol(id), recovery: true };
     this.transitions.set(id, state);
     let released = false;
-    const settled = () => {
-      if (!this.work.get(id)?.size) return Promise.resolve();
-      return new Promise(resolve => { const waiters = this.workWaiters.get(id) || new Set(); waiters.add(resolve); this.workWaiters.set(id, waiters); });
-    };
-    return { ...state, settled, requestStop: () => { state.stopRequested = true; }, promote: async () => { await settled(); if (released || this.transitions.get(id)?.token !== state.token) throw Object.assign(new Error('组件恢复 intent 已失效'), { code: 'COMPONENT_QUIESCING' }); state.phase = 'exclusive'; }, release: () => { if (!released && this.transitions.get(id)?.token === state.token) this.transitions.delete(id); released = true; } };
+    const settled = options => this.waitForComponentWork(id, options);
+    return { ...state, settled, requestStop: () => { state.stopRequested = true; }, promote: async () => { await settled({ timeoutMs: this.promotionTimeoutMs }); if (released || this.transitions.get(id)?.token !== state.token) throw Object.assign(new Error('组件恢复 intent 已失效'), { code: 'COMPONENT_QUIESCING' }); state.phase = 'exclusive'; }, release: () => { if (!released && this.transitions.get(id)?.token === state.token) this.transitions.delete(id); released = true; } };
   }
 
   beginApplicationQuit() {
@@ -160,9 +163,11 @@ class ComponentLifecycleCoordinator {
   }
 
   async waitForAllWork({ timeoutMs = 7500 } = {}) {
+    const registrations = [];
     const pending = [...this.work.keys()].map(componentId => new Promise(resolve => {
       const waiters = this.workWaiters.get(componentId) || new Set();
-      waiters.add(resolve);
+      const waiter = () => { waiters.delete(waiter); if (!waiters.size) this.workWaiters.delete(componentId); resolve(); };
+      registrations.push({ componentId, waiters, waiter }); waiters.add(waiter);
       this.workWaiters.set(componentId, waiters);
     }));
     if (!pending.length) return;
@@ -172,11 +177,11 @@ class ComponentLifecycleCoordinator {
         Promise.all(pending),
         new Promise((_, reject) => {
           timer = setTimeout(() => reject(Object.assign(new Error('组件后台工作未在退出期限内停止'), { code: 'APP_QUIT_BUSY' })), timeoutMs);
-          timer.unref?.();
         }),
       ]);
     } finally {
       clearTimeout(timer);
+      for (const { componentId, waiters, waiter } of registrations) { waiters.delete(waiter); if (!waiters.size) this.workWaiters.delete(componentId); }
     }
   }
 

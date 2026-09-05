@@ -40,6 +40,8 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
 (async () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
   assert.match(mainSource, /buttons:\s*\['关闭后台进程并继续退出',\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/);
+  const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+  assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续卸载'/, '卸载确认不得冒充真实应用退出按钮');
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
   const mainWindow = new EventEmitter();
   mainWindow.close = () => {
@@ -72,6 +74,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
 
   const continued = fixture({ confirm: true });
   await runApplicationQuit(continued.options);
+  assert(continued.events.indexOf('services-stopped') < continued.events.indexOf('component-processes-stopped'), 'owned services stop before generic owner processes');
   assert(continued.events.indexOf('all-processes-stopped') < continued.events.indexOf('commit'));
   assert(continued.events.indexOf('commit') < continued.events.indexOf('video-disposed'));
 
@@ -89,6 +92,13 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   await runApplicationQuit(retry.options);
   assert.equal(retry.events.filter(event => event === 'commit').length, 1, 'second quit attempt reaches the commit point once');
   assert.equal(retry.events.filter(event => event === 'video-disposed').length, 1, 'video disposal happens only after confirmed retry');
+
+  const capabilityRetry = fixture({ confirm: true }); let capabilityCloseFails = true;
+  capabilityRetry.options.componentViewManager.closeAllAndWait = async () => { capabilityRetry.events.push('views-closed'); if (capabilityCloseFails) { capabilityCloseFails = false; throw new Error('capability clear failed'); } };
+  await assert.rejects(runApplicationQuit(capabilityRetry.options), /capability clear failed/);
+  assert.equal(capabilityRetry.events.includes('commit'), false, 'capability cleanup failure blocks quit commit');
+  await runApplicationQuit(capabilityRetry.options);
+  assert.equal(capabilityRetry.events.filter(event => event === 'commit').length, 1, 'capability cleanup failure remains retryable');
 
   const unconfirmed = fixture({ background: false, confirm: true });
   let stopAttempts = 0;

@@ -54,6 +54,19 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
   await new Promise(resolve => setImmediate(resolve)); assert.equal(recoveryPromoted, false, 'recovery waits for pre-existing work');
   oldRecoveryWork.release(); await recoveryPromotion; drainingRecovery.release();
 
+  const timeoutCoordinator = new ComponentLifecycleCoordinator({ promotionTimeoutMs: 20 });
+  const stuckWork = timeoutCoordinator.acquireWork('stuck', 'leaked-work'); const timedTransition = timeoutCoordinator.acquire('stuck', 'disable', { stopOnly: true }); timedTransition.requestStop();
+  await assert.rejects(timedTransition.promote(), error => error.code === 'COMPONENT_BUSY');
+  assert.equal(timeoutCoordinator.transitions.get('stuck').phase, 'intent', 'promotion timeout does not enter exclusive mutation phase');
+  assert.equal(timeoutCoordinator.workWaiters.has('stuck'), false, 'promotion timeout removes its waiter'); timedTransition.release();
+  stuckWork.release(); const retryTransition = timeoutCoordinator.acquire('stuck', 'disable', { stopOnly: true }); retryTransition.requestStop(); await retryTransition.promote(); retryTransition.release();
+
+  const quitTimeoutCoordinator = new ComponentLifecycleCoordinator();
+  const stuckQuitWork = quitTimeoutCoordinator.acquireWork('quit-timeout', 'leaked-work');
+  await assert.rejects(quitTimeoutCoordinator.waitForAllWork({ timeoutMs: 20 }), error => error.code === 'APP_QUIT_BUSY');
+  assert.equal(quitTimeoutCoordinator.workWaiters.has('quit-timeout'), false, 'application timeout removes every registered waiter');
+  stuckQuitWork.release(); await quitTimeoutCoordinator.waitForAllWork({ timeoutMs: 20 });
+
   coordinator.beginStartupRecovery();
   assert.throws(() => coordinator.acquireWork('e'), error => error.code === 'COMPONENT_RECOVERY_PENDING');
   assert.equal(coordinator.beginApplicationQuit(), false, 'quit waits for startup transaction recovery');

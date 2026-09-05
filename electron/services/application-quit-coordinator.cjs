@@ -36,8 +36,8 @@ const runApplicationQuit = async ({
 
   const barriers = guardedComponentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
   try {
-    await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
     await componentServiceManager?.stopAll('application-quit');
+    await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
     await componentViewManager?.closeAllAndWait();
     guardedComponentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
     await Promise.all(barriers.map(barrier => barrier.drain({ timeoutMs: 7500 })));

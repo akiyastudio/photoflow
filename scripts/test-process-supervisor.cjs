@@ -30,6 +30,8 @@ class FakeChild extends EventEmitter {
   const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const main = async () => {
+  const supervisorSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'process-supervisor.cjs'), 'utf8');
+  assert.equal((supervisorSource.match(/'Managed process stopped'/g) || []).length, 1, 'a confirmed stop writes exactly one completion log');
   const rawWindowsChild = pid => { const child = new EventEmitter(); child.pid = pid; child.exitCode = null; child.signalCode = null; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); return child; };
   const invalidPidChild = rawWindowsChild(0); let invalidPidSettled = false;
   const invalidPidTermination = terminateAndWait(invalidPidChild, Date.now() + 200, { platform: 'win32' }).finally(() => { invalidPidSettled = true; });

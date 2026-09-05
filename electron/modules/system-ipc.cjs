@@ -44,8 +44,8 @@ const transitionComponentEnabled = async ({ componentId, enabled, pluginService,
   let stateChanged = false;
   try {
     transitionLease?.requestStop?.();
-    await processSupervisor?.stopWhere?.(status => status.owner?.componentId === id, 'component-disabled');
     await componentServiceManager?.stop?.(id, 'component-disabled');
+    await processSupervisor?.stopWhere?.(status => status.owner?.componentId === id, 'component-disabled');
     await (componentViewManager?.closeComponentAndWait?.(id) ?? componentViewManager?.closeComponent?.(id));
     abortComponentNetworkRequests?.(id);
     await capabilityBarrier.drain({ timeoutMs: 7500 });
@@ -241,7 +241,7 @@ const confirmComponentBackgroundStop = async ({ componentId, componentName = com
   const messages = {
     disable: { title: '插件仍在后台运行', message: '禁用此插件需要先关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续禁用' },
     install: { title: '更新需要关闭插件后台进程', message: '安装或更新此插件前，需要关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续安装或更新' },
-    uninstall: { title: '插件仍在后台运行', message: `“${componentName}”仍有后台进程。`, detail: '继续卸载需要先关闭该插件的全部后台进程。', continueLabel: '关闭后台进程并继续退出' },
+    uninstall: { title: '插件仍在后台运行', message: `“${componentName}”仍有后台进程。`, detail: '继续卸载需要先关闭该插件的全部后台进程。', continueLabel: '关闭后台进程并继续卸载' },
   };
   const presentation = messages[action];
   if (!presentation) throw new Error('组件后台停止确认动作无效');
@@ -312,8 +312,8 @@ const enterComponentInstallTransition = async ({ componentId, componentCapabilit
   const barrier = componentCapabilityBroker.blockComponent(componentId);
   try {
     transitionLease?.requestStop?.();
-    await processSupervisor.stopWhere(status => status.owner?.componentId === componentId, 'component-install');
     await componentServiceManager.stop(componentId, 'component-install');
+    await processSupervisor.stopWhere(status => status.owner?.componentId === componentId, 'component-install');
     await (componentViewManager.closeComponentAndWait?.(componentId) ?? componentViewManager.closeComponent(componentId));
     abortComponentNetworkRequests(componentId);
     await barrier.drain({ timeoutMs: 7500 });
@@ -789,8 +789,8 @@ const registerSystemIpc = context => {
     const barrier = componentCapabilityBroker.blockComponent(componentId);
     try {
       recoveryTransition?.requestStop?.();
-      await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-transaction-recovery');
       await componentServiceManager?.stop?.(componentId, 'component-transaction-recovery');
+      await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-transaction-recovery');
       await (componentViewManager?.closeComponentAndWait?.(componentId) ?? componentViewManager?.closeComponent?.(componentId));
       abortComponentNetworkRequests?.(componentId);
       await barrier.drain({ timeoutMs: 7500 });
@@ -1199,8 +1199,8 @@ const registerSystemIpc = context => {
       const capabilityBarrier = componentCapabilityBroker.blockComponent(componentId);
       try {
       transitionLease?.requestStop?.();
-      await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-uninstall');
       await componentServiceManager?.stop?.(componentId, 'component-uninstall');
+      await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-uninstall');
       await componentViewManager?.closeComponentAndWait?.(componentId);
       abortComponentNetworkRequests?.(componentId);
       await capabilityBarrier.drain({ timeoutMs: 7500 });

@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { captureComponentTreeIdentity, componentCleanupIntentPaths, componentTreeIdentityDigest, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 const { createComponentTransactionService, nodeIdentity } = require('../electron/services/component-transaction-service.cjs');
+assert.equal(fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'component-transaction-service.cjs'), 'utf8').includes('committed-staging'), false, 'dead committed-staging cleanup role stays removed');
 
 const writeTree = async (root, value) => {
   await fs.promises.mkdir(root, { recursive: true });
