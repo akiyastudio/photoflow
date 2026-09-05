@@ -11,6 +11,7 @@ assert.equal(manager.includes("tab === 'people'"), false, 'the unreachable peopl
 assert.equal(manager.includes('data-merge-audit'), false, 'the hidden duplicate merge audit is removed');
 for (const text of ['任务分配', '批量导入返图', '审核输出', '重新输出']) assert(manager.includes(text), `current workflow action remains: ${text}`);
 assert(photoManager.includes('调整工作图范围') && photoManager.includes('下一步：'));
+for (const contract of ['aria-busy={cropBusy}', 'disabled={cropBusy}', 'disabled={cropBusy} onClick={() => setCropEditor(null)}', 'disabled={cropBusy} onChange=']) assert(photoManager.includes(contract), `busy crop editor contract remains wired: ${contract}`);
 assert(dialog.includes('aria-modal="true"') && dialog.includes('pf-dialog-title'));
 assert.equal((layer.match(/window\.addEventListener\('keydown'/g) || []).length, 1, 'one registry owns modal keyboard handling');
 for (const source of [manager, photoManager, progressHook]) assert.equal(source.includes('@ts-nocheck'), false);

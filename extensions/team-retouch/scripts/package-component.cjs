@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { copyServiceRuntime } = require('./package-layout.cjs');
+const { npmInvocation } = require('./npm-invocation.cjs');
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
 const dist = path.join(root, 'dist'); const packageRoot = path.join(dist, 'component');
@@ -19,7 +20,8 @@ const models = [
   ['adaface_ir18_webface4m.onnx',83886080,'6b6a35772fb636cdd4fa86520c1a259d0c41472a76f70f802b351837a00d9870'],
   ['osnet_x1_0_msmt17.onnx',7340032,'7f545cff27644dcc7481d53b2f6df0b4ba22ceff71f1a839c83a1be5c0973eae'],
 ];
-const run = (command,args) => { const result=spawnSync(command,args,{cwd:root,stdio:'inherit'}); if(result.error) throw result.error; if((result.status??1)!==0) throw new Error(`${command} failed with code ${result.status}`); };
+const run = (command,args) => { const result=spawnSync(command,args,{cwd:root,stdio:'inherit',windowsHide:true}); if(result.error) throw result.error; if((result.status??1)!==0) throw new Error(`${command} failed with code ${result.status}`); };
+const runNpmScript = script => { const npm = npmInvocation(); run(npm.command, [...npm.argsPrefix, 'run', script]); };
 const sha256File = file => {
   const hash = crypto.createHash('sha256');
   const handle = fs.openSync(file, 'r');
@@ -33,8 +35,8 @@ if (!fs.existsSync(python)) throw new Error('Plugin Python environment missing; 
 if (!developmentPackage) require('./setup-python.cjs').verifyLockedEnvironment(python, fs.readFileSync(path.join(root, 'requirements-build.lock'), 'utf8'));
 for (const [name,minimum,expectedSha256] of models) { const file=path.join(root,'models',name); if(!fs.existsSync(file)||fs.statSync(file).size<minimum) throw new Error(`Required model is missing or incomplete: models/${name}`); const handle=fs.openSync(file,'r'); const prefix=Buffer.alloc(256); const count=fs.readSync(handle,prefix,0,prefix.length,0); fs.closeSync(handle); if(prefix.subarray(0,count).toString('utf8').startsWith('version https://git-lfs.github.com/spec/v1')) throw new Error(`Required model is missing or incomplete: models/${name}`); const actual=sha256File(file); if(actual!==expectedSha256) throw new Error(`Required model checksum mismatch: models/${name}`); }
 if (!skipChecks) {
-  for (const script of ['typecheck','lint','test:node']) run(process.platform === 'win32' ? 'npm.cmd' : 'npm',['run',script]);
-  if (developmentPackage) run(process.platform === 'win32' ? 'npm.cmd' : 'npm',['run','test:python']);
+  for (const script of ['typecheck','lint','test:node']) runNpmScript(script);
+  if (developmentPackage) runNpmScript('test:python');
   else { run(python,[path.join(root,'tests','test-team-retouch.py')]); run(python,[path.join(root,'tests','test-team-retouch-progress-folder-policy.py')]); }
 }
 run(process.execPath,[viteBin,'build','--config',path.join(root,'renderer','vite.config.ts')]);

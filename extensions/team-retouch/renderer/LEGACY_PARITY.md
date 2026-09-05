@@ -7,4 +7,4 @@
 - 初始化读取当前 workspace，再登记本次明确选择；缺失文件以诊断卡显示。
 - 工作流 manifest 必须是 `version: 2` 且精确绑定 `projectId`，不会按项目名称或状态回退。
 - task-chain reconcile、返图审核、输出 ownership、revision lease/fence 与崩溃恢复仍是当前功能。
-- 生产 UI 的后续文件重命名和去 `@ts-nocheck` 属于独立重构，不影响本次首发契约收敛。
+- 生产 UI 已移除 `@ts-nocheck` 并通过严格类型检查；后续文件重命名仍属于独立重构，不影响本次首发契约收敛。

@@ -285,7 +285,7 @@ const IdentityPicker = ({ subject, candidates, allSubjects, identities, included
 
 type CropHandle = 'move' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
 
-const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange }: { previewUrl: string; imageSize: { width: number; height: number }; crop: Crop; onChange: (crop: Crop) => void }) => {
+const InteractiveCropEditor = ({ previewUrl, imageSize, crop, disabled = false, onChange }: { previewUrl: string; imageSize: { width: number; height: number }; crop: Crop; disabled?: boolean; onChange: (crop: Crop) => void }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<{ pointerId: number; handle: CropHandle; x: number; y: number; crop: Crop } | null>(null);
   const minimumSize = Math.max(40, Math.round(Math.min(imageSize.width, imageSize.height) * .025));
@@ -303,6 +303,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange }: { prev
   };
 
   const beginDrag = (event: ReactPointerEvent<SVGElement>, handle: CropHandle) => {
+    if (disabled) return;
     event.preventDefault();
     event.stopPropagation();
     const point = imagePoint(event.clientX, event.clientY);
@@ -311,6 +312,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange }: { prev
   };
 
   const moveDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
+    if (disabled) return;
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     const point = imagePoint(event.clientX, event.clientY);
@@ -337,7 +339,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange }: { prev
   ];
 
   return <div className="mt-4 flex max-h-80 justify-center overflow-hidden rounded-xl bg-slate-950">
-    <svg ref={svgRef} className="max-h-80 w-full select-none touch-none" viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
+    <svg ref={svgRef} aria-disabled={disabled} className={`max-h-80 w-full select-none touch-none ${disabled ? 'pointer-events-none opacity-70' : ''}`} viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
       <image href={previewUrl} width={imageSize.width} height={imageSize.height} pointerEvents="none"/>
       <path d={`M0 0H${imageSize.width}V${imageSize.height}H0Z M${crop.x} ${crop.y}V${crop.y + crop.height}H${crop.x + crop.width}V${crop.y}Z`} fill="rgba(2,6,23,.55)" fillRule="evenodd" pointerEvents="none"/>
       <rect data-crop-handle="move" aria-label="移动裁剪范围" x={crop.x} y={crop.y} width={crop.width} height={crop.height} fill="rgba(37,99,235,.1)" stroke="#60a5fa" strokeWidth={Math.max(3, imageSize.width / 800)} style={{ cursor: 'move' }} onPointerDown={event => beginDrag(event, 'move')}/>
@@ -375,7 +377,8 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
   const [busy, setBusy] = useState('');
   useEffect(() => { onBusyChange?.(Boolean(busy)); return () => onBusyChange?.(false); }, [busy, onBusyChange]);
   const [cropEditor, setCropEditor] = useState<{ task: TeamPatchTask; crop: Crop } | null>(null);
-  useEscapeLayer(Boolean(cropEditor), () => setCropEditor(null), !busy.startsWith('crop:'));
+  const cropBusy = busy.startsWith('crop:');
+  useEscapeLayer(Boolean(cropEditor), () => setCropEditor(null), !cropBusy);
   const [detectionProgress, setDetectionProgress] = useState({ progress: 0, message: '等待识别操作' });
   const [sourceFullscreen, setSourceFullscreen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
@@ -542,7 +545,7 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
         </article>;
       })}</div>}</section>
     </div>}
-    {cropEditor && <div role="dialog" aria-modal="true" className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/70 p-5"><div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl"><div className="flex items-center"><div><h3 className="font-bold text-slate-900">调整工作图范围</h3><p className="mt-1 text-xs text-slate-500">拖动框体移动，拖动边缘或八个控制点调整大小。</p></div><button onClick={() => setCropEditor(null)} className="ml-auto p-2 text-slate-500"><X size={18}/></button></div>{sourcePreview.url && <InteractiveCropEditor previewUrl={sourcePreview.url} imageSize={imageSize} crop={cropEditor.crop} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/>}<div className="mt-4 flex flex-wrap gap-2"><button type="button" onClick={() => setCropEditor(current => { if (!current) return current; const marginX = Math.max(20, Math.round(current.crop.width * .1)); const marginY = Math.max(20, Math.round(current.crop.height * .1)); const x = Math.max(0, current.crop.x - marginX); const y = Math.max(0, current.crop.y - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, current.crop.width + marginX * 2), height: Math.min(imageSize.height - y, current.crop.height + marginY * 2) } }; })} className="dialog-secondary">四周扩大 10%</button><button type="button" onClick={() => setCropEditor(current => { if (!current) return current; const boxes = membersOf(current.task).map(member => member.bbox); const left = Math.min(...boxes.map(box => box.x)); const top = Math.min(...boxes.map(box => box.y)); const right = Math.max(...boxes.map(box => box.x + box.width)); const bottom = Math.max(...boxes.map(box => box.y + box.height)); const marginX = Math.max(20, Math.round((right - left) * .12)); const marginY = Math.max(20, Math.round((bottom - top) * .12)); const x = Math.max(0, left - marginX); const y = Math.max(0, top - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, right - left + marginX * 2), height: Math.min(imageSize.height - y, bottom - top + marginY * 2) } }; })} className="dialog-secondary">完整包住已识别人物</button></div><div className="mt-4 grid grid-cols-2 gap-3">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" min={key === 'x' || key === 'y' ? 0 : 1} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 1, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2"/></label>)}</div><div className="mt-5 flex justify-end gap-2"><button onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button disabled={Boolean(busy)} onClick={() => void saveCrop()} className="dialog-primary">{busy.startsWith('crop:') ? '正在重新裁图…' : '保存并重新裁图'}</button></div></div></div>}
+    {cropEditor && <div role="dialog" aria-modal="true" aria-busy={cropBusy} className="fixed inset-0 z-[460] flex items-center justify-center bg-slate-950/70 p-5"><div className="w-full max-w-2xl rounded-2xl bg-white p-5 shadow-2xl"><div className="flex items-center"><div><h3 className="font-bold text-slate-900">调整工作图范围</h3><p className="mt-1 text-xs text-slate-500">拖动框体移动，拖动边缘或八个控制点调整大小。</p></div><button disabled={cropBusy} onClick={() => setCropEditor(null)} aria-label="关闭裁剪编辑器" className="ml-auto p-2 text-slate-500 disabled:opacity-50"><X size={18}/></button></div>{sourcePreview.url && <InteractiveCropEditor previewUrl={sourcePreview.url} imageSize={imageSize} crop={cropEditor.crop} disabled={cropBusy} onChange={crop => setCropEditor(current => current ? { ...current, crop } : current)}/>}<div className="mt-4 flex flex-wrap gap-2"><button type="button" disabled={cropBusy} onClick={() => setCropEditor(current => { if (!current) return current; const marginX = Math.max(20, Math.round(current.crop.width * .1)); const marginY = Math.max(20, Math.round(current.crop.height * .1)); const x = Math.max(0, current.crop.x - marginX); const y = Math.max(0, current.crop.y - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, current.crop.width + marginX * 2), height: Math.min(imageSize.height - y, current.crop.height + marginY * 2) } }; })} className="dialog-secondary">四周扩大 10%</button><button type="button" disabled={cropBusy} onClick={() => setCropEditor(current => { if (!current) return current; const boxes = membersOf(current.task).map(member => member.bbox); const left = Math.min(...boxes.map(box => box.x)); const top = Math.min(...boxes.map(box => box.y)); const right = Math.max(...boxes.map(box => box.x + box.width)); const bottom = Math.max(...boxes.map(box => box.y + box.height)); const marginX = Math.max(20, Math.round((right - left) * .12)); const marginY = Math.max(20, Math.round((bottom - top) * .12)); const x = Math.max(0, left - marginX); const y = Math.max(0, top - marginY); return { ...current, crop: { x, y, width: Math.min(imageSize.width - x, right - left + marginX * 2), height: Math.min(imageSize.height - y, bottom - top + marginY * 2) } }; })} className="dialog-secondary">完整包住已识别人物</button></div><div className="mt-4 grid grid-cols-2 gap-3">{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key} className="text-xs font-bold text-slate-600">{{ x: '左边 X', y: '顶部 Y', width: '宽度', height: '高度' }[key]}<input type="number" disabled={cropBusy} min={key === 'x' || key === 'y' ? 0 : 1} value={cropEditor.crop[key]} onChange={event => setCropEditor(current => current ? { ...current, crop: { ...current.crop, [key]: Math.max(key === 'x' || key === 'y' ? 0 : 1, Math.round(Number(event.target.value) || 0)) } } : current)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 disabled:opacity-50"/></label>)}</div><div className="mt-5 flex justify-end gap-2"><button disabled={cropBusy} onClick={() => setCropEditor(null)} className="dialog-secondary">取消</button><button disabled={Boolean(busy)} onClick={() => void saveCrop()} className="dialog-primary">{cropBusy ? '正在重新裁图…' : '保存并重新裁图'}</button></div></div></div>}
   </div>;
 };
 
