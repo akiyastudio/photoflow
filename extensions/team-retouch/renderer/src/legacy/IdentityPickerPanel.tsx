@@ -41,7 +41,7 @@ export function IdentityPickerPanel<TIdentity extends PickerIdentity>({
   const filteredIdentities = useMemo(() => normalizedSearch
     ? identities.filter(identity => identity.name.toLocaleLowerCase('zh-CN').includes(normalizedSearch))
     : identities, [identities, normalizedSearch]);
-  useEscapeLayer(!busy, onClose);
+  useEscapeLayer(true, onClose, !busy);
 
   return <div role="dialog" aria-modal="true" aria-label="确认人物身份" className="fixed inset-0 z-[470] flex items-center justify-center bg-slate-950/75 p-5" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <div className="flex h-[94vh] max-h-[94vh] w-full max-w-7xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">

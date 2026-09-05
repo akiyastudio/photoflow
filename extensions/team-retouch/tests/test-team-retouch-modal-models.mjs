@@ -27,6 +27,7 @@ const first = queue.ask({ kind: 'choice', tone: 'danger', defaultValue: 'discard
 const second = queue.ask({ kind: 'prompt', defaultValue: '人物 1' }).then(value => answers.push(['second', value]));
 assert.equal(queue.size(), 2);
 const firstToken = queue.current().token;
+assert.deepEqual(queue.current().request, { kind: 'choice', tone: 'danger', defaultValue: 'discard', cancelDefault: true, dismissible: false });
 assert.equal(queue.settle(firstToken, null), true);
 assert.equal(queue.settle(firstToken, 'discard'), false, 'each promise resolves exactly once');
 const secondToken = queue.current().token;

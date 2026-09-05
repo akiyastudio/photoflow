@@ -12,7 +12,7 @@ import type { TeamRetouchStep } from './TeamRetouchSteps';
 import { TeamWorkflowHeader } from './TeamWorkflowHeader';
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
-import { isIdentityConfirmed, WORKFLOW_STAGES, workingImageMetrics } from '../interaction-model';
+import { isIdentityConfirmed, resizeCrop, WORKFLOW_STAGES, workingImageMetrics } from '../interaction-model';
 import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 import { isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 import { IdentityPickerPanel } from './IdentityPickerPanel';
@@ -316,23 +316,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange }: { prev
     const point = imagePoint(event.clientX, event.clientY);
     const dx = point.x - drag.x;
     const dy = point.y - drag.y;
-    if (drag.handle === 'move') {
-      onChange({
-        ...drag.crop,
-        x: Math.round(Math.max(0, Math.min(imageSize.width - drag.crop.width, drag.crop.x + dx))),
-        y: Math.round(Math.max(0, Math.min(imageSize.height - drag.crop.height, drag.crop.y + dy))),
-      });
-      return;
-    }
-    let left = drag.crop.x;
-    let top = drag.crop.y;
-    let right = drag.crop.x + drag.crop.width;
-    let bottom = drag.crop.y + drag.crop.height;
-    if (drag.handle.includes('w')) left = Math.max(0, Math.min(right - minimumSize, drag.crop.x + dx));
-    if (drag.handle.includes('e')) right = Math.min(imageSize.width, Math.max(left + minimumSize, drag.crop.x + drag.crop.width + dx));
-    if (drag.handle.includes('n')) top = Math.max(0, Math.min(bottom - minimumSize, drag.crop.y + dy));
-    if (drag.handle.includes('s')) bottom = Math.min(imageSize.height, Math.max(top + minimumSize, drag.crop.y + drag.crop.height + dy));
-    onChange({ x: Math.round(left), y: Math.round(top), width: Math.round(right - left), height: Math.round(bottom - top) });
+    onChange(resizeCrop(drag.crop, drag.handle, dx, dy, imageSize, minimumSize));
   };
 
   const endDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -384,6 +368,7 @@ type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange' | 'o
 
 const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = true, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange, onBusyChange }: PhotoCardProps) => {
   const appDialog = useAppDialog();
+  const initialPhotoRef = useRef(initialPhoto); initialPhotoRef.current = initialPhoto;
   const [bundle, setBundle] = useState<TeamPatchBundle>(() => initialPhoto ? bundleFromWorkspacePhoto(initialPhoto) : { success: true, versions: [], tasks: [] });
   const [loading, setLoading] = useState(!initialPhoto);
   const [loadError, setLoadError] = useState('');
@@ -424,11 +409,13 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
       const message = error instanceof Error ? error.message : String(error); setLoadError(message); onNotice(`打开团片协作失败：${message}`, 'error');
     } finally { if (photoLoadTokenRef.current.isCurrent(token)) setLoading(false); }
   };
+  const loadRef = useRef(load); loadRef.current = load;
   useEffect(() => {
     const photoLoadToken = photoLoadTokenRef.current;
-    if (initialPhoto) { setBundle(bundleFromWorkspacePhoto(initialPhoto)); setLoading(false); setLoadError(''); }
+    const seededPhoto = initialPhotoRef.current;
+    if (seededPhoto) { setBundle(bundleFromWorkspacePhoto(seededPhoto)); setLoading(false); setLoadError(''); }
     if (!previewEnabled) return;
-    void load();
+    void loadRef.current();
     return () => photoLoadToken.invalidate();
   }, [project.id, entry.path, entry.relativePath, entry.updatedAt, initialPhoto?.photoId, initialPhoto?.baseVersionId, identityState.revision, refreshToken, previewEnabled]);
 
@@ -448,7 +435,7 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
 
   useEffect(() => legacyApi.onTeamPatchDetectionProgress(value => {
     if (matchesCurrentEvent(value, { projectId: project.id }) && value.photoId === bundle.photo?.id && value.baseVersionId === baseVersion?.id) setDetectionProgress({ progress: value.progress, message: value.message });
-  }), [bundle.photo?.id, baseVersion?.id]);
+  }), [project.id, bundle.photo?.id, baseVersion?.id]);
 
   const detect = async (restoreExcluded = false) => {
     if (!bundle.photo || !baseVersion) return;
@@ -561,6 +548,8 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
 
 const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
+  const noticeRef = useRef(onNotice); noticeRef.current = onNotice;
+  const projectChangedRef = useRef(onProjectChanged); projectChangedRef.current = onProjectChanged;
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BatchResult[]>([]);
   const [progress, setProgress] = useState({ itemIndex: 0, itemCount: entries.length, progress: 0, itemName: '', message: '准备批量识别' });
@@ -582,7 +571,7 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
   const photoBusyCallbacks = useMemo(() => new Map(entries.map(entry => [entry.relativePath, (pending: boolean) => setPhotoBusyKeys(current => {
     const has = current.has(entry.relativePath); if (has === pending) return current;
     const next = new Set(current); if (pending) next.add(entry.relativePath); else next.delete(entry.relativePath); return next;
-  })])), [entries.map(entry => entry.relativePath).join('\0')]);
+  })])), [entries]);
   const teamGraph = useTeamOutputProgress(teamWorkflowSourcePaths(identityState.photos), workspacePath, project, onNotice);
   const identifyingRef = useRef(false);
   const batchTaskVisibleRef = useRef(false);
@@ -631,6 +620,7 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
       if (sequence === identityLoadSequenceRef.current) setIdentityLoading(false);
     }
   };
+  const loadIdentitiesRef = useRef(loadIdentities); loadIdentitiesRef.current = loadIdentities;
   const mutateIdentityWorkspace = async <T extends { success?: boolean }>(action: () => Promise<T>) => {
     const mutationScope = managerScope;
     if (!workspaceScopeRef.current.canMutate(mutationScope) || !workspaceScopeRef.current.beginMutation(mutationScope)) throw new Error('项目数据尚未完成首次同步，请稍后重试');
@@ -653,7 +643,7 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
     if (initialWorkspacePending) return () => { identityLoadSequenceRef.current += 1; };
     if (isUsableWorkspaceSeed(initialWorkspace) && workspaceScopeRef.current.accept(managerScope, initialWorkspace)) { setIdentityState(initialWorkspace); setIdentityLoadError(''); setIdentityLoading(false); return () => { identityLoadSequenceRef.current += 1; }; }
     setIdentityLoading(true);
-    void loadIdentities();
+    void loadIdentitiesRef.current();
     return () => { identityLoadSequenceRef.current += 1; };
   }, [managerScope, initialWorkspace, initialWorkspacePending]);
   useEffect(() => legacyApi.onTeamPatchBatchProgress(value => {
@@ -662,12 +652,14 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
       setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message });
     }
   }), [project.id]);
+  const { ensureWorkflowInputs: ensureTeamGraphInputs, sourceProgressIds: teamGraphSourceIds } = teamGraph;
+  const teamGraphSourceKey = teamGraphSourceIds.join('|');
   useEffect(() => {
     if (!identityState.workflowNode?.id) return;
-    void teamGraph.ensureWorkflowInputs(identityState.workflowNode.id).then(() => onProjectChanged?.()).catch(error => {
-      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    void ensureTeamGraphInputs(identityState.workflowNode.id).then(() => projectChangedRef.current?.()).catch(error => {
+      noticeRef.current(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     });
-  }, [identityState.workflowNode?.id, teamGraph.sourceProgressIds.join('|')]);
+  }, [identityState.workflowNode?.id, teamGraphSourceKey, ensureTeamGraphInputs]);
 
   const openIdentityPicker = (subjectKey: string) => {
     const subject = identitySubjects.find(candidate => candidate.key === subjectKey);

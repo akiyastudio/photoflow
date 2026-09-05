@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProgressFolder, TeamProjectPhoto, WorkspaceProject } from './legacy-types';
 import { resolveLegacyTeamSourceProgressIds } from './legacy-progress-scope';
 import { normalizeLegacyProgressResult, resolveLegacyTeamWorkflowProgressId } from './legacy-progress-result-model';
+import { progressCandidates } from '../interaction-model';
 
 const normalizePath = (value = '') => value.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 
@@ -55,7 +56,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
     if (!result.success) throw new Error(result.error || '无法读取项目进度');
     const { progressFolders, graphEdges } = result;
     const sources = resolveTeamSourceProgressIds(normalizedSourcePaths, progressFolders);
-    const candidates = progressFolders.filter(folder => isTeamProgressCandidate(folder) && !sources.includes(folder.id));
+    const candidates = (progressCandidates({ progressFolders }, normalizedSourcePaths) as ProgressFolder[]).filter(folder => !sources.includes(folder.id));
     const rememberedKey = `photoflow:team-retouch-output:${workspacePath}|${project.name}|${sources.join('|') || sourcePathKey}`;
     const remembered = candidates.find(folder => folder.id === (window.localStorage.getItem(rememberedKey) || ''));
     const workflowOutputIds = new Set(graphEdges

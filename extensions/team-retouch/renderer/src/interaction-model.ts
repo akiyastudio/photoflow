@@ -276,7 +276,7 @@ export const workflowGroups = (workspace: Json, preferredIdentityOrder: string[]
 
 export const progressCandidates = (result: Json, sourcePaths: string[] = []) => {
   const normalizedSources = sourcePaths.map(value => value.replace(/\\/g, '/').toLocaleLowerCase());
-  return (result.progressFolders || []).filter((folder: Json) => folder.mediaKind === 'image' && !folder.folderMissing && folder.nodeRole === 'progress' && folder.relationKind !== 'auxiliary' && !normalizedSources.some(source => {
+  return (result.progressFolders || []).filter((folder: Json) => folder.mediaKind === 'image' && !folder.folderMissing && !folder.missing && folder.nodeRole === 'progress' && folder.relationKind !== 'auxiliary' && !normalizedSources.some(source => {
     const relativeDirectory = String(folder.contentRef?.relativeDirectory || '').replace(/\\/g, '/').toLocaleLowerCase();
     return source === relativeDirectory || source.startsWith(`${relativeDirectory}/`);
   }));
@@ -291,13 +291,13 @@ export const clampCrop = (crop: Crop, bounds: { width: number; height: number })
   return { x, y, width: Math.max(1, Math.min(width - x, Math.round(finite(crop.width, 1)))), height: Math.max(1, Math.min(height - y, Math.round(finite(crop.height, 1)))) };
 };
 
-export const resizeCrop = (start: Crop, handle: CropHandle, dx: number, dy: number, bounds: { width: number; height: number }): Crop => {
+export const resizeCrop = (start: Crop, handle: CropHandle, dx: number, dy: number, bounds: { width: number; height: number }, minimumSize = 1): Crop => {
   if (handle === 'move') return clampCrop({ ...start, x: Math.max(0, Math.min(bounds.width - start.width, start.x + dx)), y: Math.max(0, Math.min(bounds.height - start.height, start.y + dy)) }, bounds);
   let left = start.x; let top = start.y; let right = start.x + start.width; let bottom = start.y + start.height;
-  if (handle.includes('w')) left = Math.min(right - 1, left + dx);
-  if (handle.includes('e')) right = Math.max(left + 1, right + dx);
-  if (handle.includes('n')) top = Math.min(bottom - 1, top + dy);
-  if (handle.includes('s')) bottom = Math.max(top + 1, bottom + dy);
+  if (handle.includes('w')) left = Math.min(right - minimumSize, left + dx);
+  if (handle.includes('e')) right = Math.max(left + minimumSize, right + dx);
+  if (handle.includes('n')) top = Math.min(bottom - minimumSize, top + dy);
+  if (handle.includes('s')) bottom = Math.max(top + minimumSize, bottom + dy);
   left = Math.max(0, left); top = Math.max(0, top); right = Math.min(bounds.width, right); bottom = Math.min(bounds.height, bottom);
   return clampCrop({ x: left, y: top, width: right - left, height: bottom - top }, bounds);
 };
@@ -328,13 +328,14 @@ export const rankIdentityCandidates = (subject: Json, subjects: Json[], identiti
     .sort((left, right) => Number(right.score || 0) - Number(left.score || 0) || String(left.identity.name).localeCompare(String(right.identity.name), 'zh-CN'));
 };
 
-export const returnCandidates = (item: Json) => {
+export const returnCandidates = (item: Json, sortByScore = true) => {
   const seen = new Set<string>();
-  return [item, ...(item.alternatives || [])].filter(candidate => {
-    const key = `${candidate.photoId}:${candidate.baseVersionId}:${candidate.personIndex}:${candidate.taskId}`;
+  const candidates = [item, ...(item.alternatives || [])].filter(candidate => {
+    const key = String(candidate.taskId || '');
     if (!candidate.taskId || seen.has(key)) return false;
     seen.add(key); return true;
-  }).sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+  });
+  return sortByScore ? candidates.sort((left, right) => Number(right.score || 0) - Number(left.score || 0)) : candidates;
 };
 
 export const clampZoom = (value: number) => Math.max(1, Math.min(5, Number.isFinite(value) ? value : 1));
