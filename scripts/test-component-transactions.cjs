@@ -3,617 +3,289 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { captureComponentTreeIdentity, componentCleanupIntentPaths, componentTreeIdentityDigest, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
-const { createComponentTransactionService, nodeIdentity } = require('../electron/services/component-transaction-service.cjs');
-assert.equal(fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'component-transaction-service.cjs'), 'utf8').includes('committed-staging'), false, 'dead committed-staging cleanup role stays removed');
-
+const { spawnSync } = require('node:child_process');
+const { captureComponentTreeIdentity, cleanupOwnedComponentPath, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
+const { createComponentTransactionService, nodeIdentity, atomicJson } = require('../electron/services/component-transaction-service.cjs');
+const crash = point => Object.assign(new Error(point), { simulateCrash: true });
+const exists = target => fs.existsSync(target);
 const writeTree = async (root, value) => {
   await fs.promises.mkdir(root, { recursive: true });
-  await fs.promises.writeFile(path.join(root, 'component.json'), JSON.stringify({ value }), 'utf8');
+  await fs.promises.writeFile(path.join(root, 'component.json'), JSON.stringify({ value }));
+  await fs.promises.writeFile(path.join(root, 'worker.cjs'), value);
 };
 const readValue = async root => JSON.parse(await fs.promises.readFile(path.join(root, 'component.json'), 'utf8')).value;
+const directoryReceipt = async target => ({ path: target, kind: 'directory', nodeIdentity: nodeIdentity(await fs.promises.lstat(target)), treeIdentity: await captureComponentTreeIdentity(target) });
+const fileReceipt = async target => {
+  const stat = await fs.promises.lstat(target);
+  return { path: target, kind: 'file', nodeIdentity: nodeIdentity(stat), size: stat.size, mode: stat.mode & 0o777, sha256: crypto.createHash('sha256').update(await fs.promises.readFile(target)).digest('hex') };
+};
 const journalDirectory = state => path.join(state.installRoot, '.transactions', state.componentId);
 const readLatestJournal = async state => {
   const directory = journalDirectory(state);
-  const names = (await fs.promises.readdir(directory)).filter(name => /^state-\d{8}\.json$/.test(name)).sort();
-  const statePath = path.join(directory, names.at(-1));
+  const statePath = path.join(directory, 'state.json');
   const mutable = JSON.parse(await fs.promises.readFile(statePath, 'utf8'));
   const receipt = JSON.parse(await fs.promises.readFile(path.join(directory, 'receipt.json'), 'utf8'));
-  return { journal: { ...receipt, ...mutable }, mutable, statePath, directory };
+  return { journal: { ...receipt, ...mutable }, mutable, receipt, statePath, directory };
 };
-const writeStateWithHash = async (statePath, mutable) => {
-  const { stateHash: _stateHash, ...payload } = mutable;
-  const stateHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-  await fs.promises.writeFile(statePath, `${JSON.stringify({ ...payload, stateHash })}\n`, 'utf8');
-};
-const crash = message => Object.assign(new Error(message), { simulateCrash: true, code: 'SIMULATED_CRASH' });
-
-const fixture = async () => {
-  const sandbox = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-component-transaction-'));
+const fixture = async supplied => {
+  const sandbox = supplied || await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-component-transaction-'));
   const installRoot = path.join(sandbox, 'components');
   const componentId = 'fixture.component';
   const container = path.join(installRoot, componentId);
   const destination = path.join(container, 'runtime');
   await fs.promises.mkdir(container, { recursive: true });
   const enabled = new Map([[componentId, true]]);
-  const makeService = ({ fault = async () => undefined, cleanupFault = async () => undefined, trashFault = null, blocked = new Set(), onTrash = () => undefined, onPublish = () => undefined, afterPublish = () => undefined, onDeleteFile = () => undefined, afterDeleteFile = () => undefined, onDeleteDirectory = () => undefined, afterDeleteDirectory = () => undefined, onCorrupt = () => undefined, preparationRoot = '', verifyTreeIdentityOverride = verifyComponentTreeIdentity, captureTreeIdentityOverride = captureComponentTreeIdentity } = {}) => createComponentTransactionService({
-    fs, path, crypto, installRoot, preparationRoot,
-    captureTreeIdentity: captureTreeIdentityOverride,
-    verifyTreeIdentity: verifyTreeIdentityOverride,
-    cleanupOwnedPath: async (receipt, { persistPrepared }) => {
-      const sidecars = componentCleanupIntentPaths(receipt);
-      const preparedReceipt = { ...receipt, cleanupPhase: 'prepared', sidecarReceipts: [['intent', sidecars.intentPath], ['proof', sidecars.proofPath], ['verified', sidecars.verifiedPath]].map(([role, sidecarPath]) => ({ path: sidecarPath, role, size: 1, sha256: 'a'.repeat(64), nativeIdentity: `native:${role}` })) };
-      await persistPrepared(preparedReceipt);
-      await cleanupFault('after-prepared', preparedReceipt);
-      await onTrash(receipt);
+  const blocked = new Set();
+  const warnings = [];
+  const hostPath = path.join(sandbox, 'host.json');
+  const hostCommit = async () => fs.promises.writeFile(hostPath, JSON.stringify({ version: 'new' }));
+  const defaultCleanup = (_id, clear) => clear ? ['settings', 'secrets'].map(name => ({ name, run: () => fs.promises.rm(path.join(sandbox, name), { force: true }) })) : [];
+  const makeService = ({ fault = async () => undefined, cleanupFault = async () => undefined, trashFault = null, onTrash = async () => undefined, fsImpl = fs, preparationRoot = '', cleanupProvider = defaultCleanup,
+    recoverInstallHostState = hostCommit, captureTreeIdentityOverride = captureComponentTreeIdentity, verifyTreeIdentityOverride = verifyComponentTreeIdentity } = {}) => createComponentTransactionService({
+    fs: fsImpl, path, crypto, installRoot, preparationRoot, fault,
+    captureTreeIdentity: captureTreeIdentityOverride, verifyTreeIdentity: verifyTreeIdentityOverride,
+    cleanupOwnedPath: (receipt, options) => cleanupOwnedComponentPath(receipt, { ...options, fault: cleanupFault, beforeDelete: async () => {
+      await options.beforeDelete?.(); await onTrash(receipt);
       if (trashFault?.current) { const error = trashFault.current; trashFault.current = null; throw error; }
-      await fs.promises.rm(receipt.path, { recursive: true, force: true });
-      await cleanupFault('after-delete', preparedReceipt);
-      return { preparedReceipt };
-    },
-    finalizeOwnedPath: receipt => cleanupFault('finalize', receipt),
-    deleteOwnedFile: async receipt => {
-      await onDeleteFile(receipt);
-      const stat = await fs.promises.lstat(receipt.path);
-      const content = await fs.promises.readFile(receipt.path);
-      const digest = crypto.createHash('sha256').update(content).digest('hex');
-      if (stat.isSymbolicLink() || stat.dev !== receipt.nodeIdentity.dev || stat.ino !== receipt.nodeIdentity.ino || stat.birthtimeMs !== receipt.nodeIdentity.birthtimeMs || stat.size !== receipt.size || digest !== receipt.sha256) throw new Error('bound file replacement');
-      await fs.promises.unlink(receipt.path);
-      await afterDeleteFile(receipt);
-    },
-    deleteOwnedDirectory: async receipt => {
-      await onDeleteDirectory(receipt);
-      const stat = await fs.promises.lstat(receipt.path);
-      if (!stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== receipt.nodeIdentity.dev || stat.ino !== receipt.nodeIdentity.ino || stat.birthtimeMs !== receipt.nodeIdentity.birthtimeMs) throw new Error('bound directory replacement');
-      await fs.promises.rmdir(receipt.path);
-      await afterDeleteDirectory(receipt);
-    },
-    publishNoReplace: async (source, target) => {
-      if (await fs.promises.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error))) throw Object.assign(new Error('target exists'), { code: 'EEXIST' });
-      await onPublish(source, target);
-      await fs.promises.rename(source, target);
-      await afterPublish(source, target);
-    },
-    getComponentEnabled: id => enabled.get(id) !== false,
-    setComponentEnabled: (id, value) => enabled.set(id, value),
-    clearComponentEnabledState: id => enabled.delete(id),
-    recoverInstallHostState: async (_id, target, desired) => { await readValue(target); enabled.set(componentId, desired); },
-    cleanupProvider: (_id, clearUserData) => clearUserData ? [{ name: 'settings', run: async () => undefined }, { name: 'secrets', run: async () => undefined }] : [],
-    onBlocked: id => blocked.add(id),
-    onUnblocked: id => blocked.delete(id),
-    onCorrupt,
-    fault,
+    } }),
+    getComponentEnabled: id => enabled.get(id) !== false, setComponentEnabled: (id, value) => enabled.set(id, value), clearComponentEnabledState: id => enabled.delete(id),
+    cleanupProvider, recoverInstallHostState, onBlocked: id => blocked.add(id), onUnblocked: id => blocked.delete(id), onWarning: error => warnings.push(error),
   });
   const stage = async value => {
     const target = path.join(installRoot, `.${componentId}-install-${crypto.randomUUID()}`);
     await writeTree(target, value);
-    return { target, identity: nodeIdentity(await fs.promises.lstat(target)), tree: await captureComponentTreeIdentity(target) };
+    const receipt = await directoryReceipt(target);
+    return { target, identity: receipt.nodeIdentity, tree: receipt.treeIdentity };
   };
-  return { sandbox, installRoot, componentId, container, destination, enabled, makeService, stage };
+  const installArgs = staged => ({ componentId, container, destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: hostCommit });
+  const uninstallArgs = async (clearUserData = false) => {
+    const target = clearUserData ? container : destination;
+    const receipt = await directoryReceipt(target);
+    return { componentId, container, destination, targetPath: target, targetIdentity: receipt.nodeIdentity, targetTreeIdentity: receipt.treeIdentity, clearUserData, previousEnabled: enabled.get(componentId) !== false };
+  };
+  return { sandbox, installRoot, componentId, container, destination, enabled, blocked, warnings, hostPath, hostCommit, makeService, stage, installArgs, uninstallArgs };
 };
-
-const installCrashRecovery = async () => {
+const withFixture = async run => {
   const state = await fixture();
-  try {
-    await writeTree(state.destination, 'old');
-    const staged = await state.stage('new');
-    let fired = false;
-    const service = state.makeService({ fault: async point => { if (!fired && point === 'journal:install:published') { fired = true; throw crash(point); } } });
-    await assert.rejects(service.install({
-      componentId: state.componentId, container: state.container, destination: state.destination,
-      stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
-      previousEnabled: false, desiredEnabled: true, validatePublished: async target => assert.equal(await readValue(target), 'new'), commitHostState: async () => undefined,
-    }), error => error.simulateCrash === true);
-    state.enabled.set(state.componentId, true);
-    await state.makeService().recover();
-    assert.equal(await readValue(state.destination), 'old');
-    assert.equal(state.enabled.get(state.componentId), false, 'rollback restores previous enablement');
-    assert.equal((await fs.promises.readdir(state.installRoot)).filter(name => name.includes('quarantine')).length, 0, 'only backup is consumed by recovery');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+  try { await run(state); } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+};
+const crashOnceAt = target => {
+  let fired = false;
+  return async point => { if (!fired && point === target) { fired = true; throw crash(point); } };
 };
 
-const committedCleanupRecovery = async () => {
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'old');
-    const staged = await state.stage('new');
-    let fired = false;
-    const service = state.makeService({ fault: async point => { if (!fired && point === 'install:cleanup-backup') { fired = true; throw crash(point); } } });
-    await assert.rejects(service.install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined }), error => error.simulateCrash === true);
-    await state.makeService().recover();
-    assert.equal(await readValue(state.destination), 'new');
-    assert.equal(state.enabled.get(state.componentId), true, 'committed cleanup recovery keeps desired enablement');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const preJournalFailureRetainsCallerOwnership = async () => {
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'old');
-    const staged = await state.stage('new');
-    let fired = false;
-    const service = state.makeService({ fault: async point => { if (!fired && point === 'journal:install:prepared') { fired = true; throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); } } });
-    let admitted = false;
-    await assert.rejects(service.install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: async () => undefined, onAdmitted: () => { admitted = true; } }), error => error.code === 'EACCES');
-    assert.equal(admitted, false);
-    assert.equal(await readValue(staged.target), 'new');
-    assert.equal(await readValue(state.destination), 'old');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const firstInstallRollbackIsAbsent = async () => {
-  for (const point of ['journal:install:published', 'journal:install:host-committing']) {
-    const state = await fixture();
-    try {
-      state.enabled.delete(state.componentId);
+const installCrashMatrix = async () => {
+  const beforeCommit = ['journal:after:prepared', 'install:before-publish', 'install:after-publish', 'journal:after:published', 'journal:before:host-committing'];
+  const afterCommit = ['journal:after:host-committing', 'install:host-committed', 'journal:after:cleanup-pending', 'journal:after:done', 'journal:after-retire'];
+  for (const hasOld of [false, true]) for (const previousEnabled of [false, true]) {
+    const points = [...beforeCommit, ...afterCommit, ...(hasOld ? ['install:before-backup', 'install:after-backup', 'cleanup:before:committed-backup', 'cleanup:after:committed-backup'] : [])];
+    for (const point of points) await withFixture(async state => {
+      if (hasOld) await writeTree(state.destination, 'old');
+      state.enabled.set(state.componentId, previousEnabled);
       const staged = await state.stage('new');
-      let fired = false;
-      await assert.rejects(state.makeService({ fault: async current => {
-        if (!fired && current === point) { fired = true; throw crash(point); }
-      } }).install({
-        componentId: state.componentId, container: state.container, destination: state.destination,
-        stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
-        previousInstalled: false, previousEnabled: false, desiredEnabled: true,
-        validatePublished: async () => undefined, commitHostState: async () => undefined,
-      }), error => error.simulateCrash === true);
-      await state.makeService().recover();
-      assert.equal(await fs.promises.lstat(state.destination).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error)), null, point);
-      assert.equal(state.enabled.has(state.componentId), false, `${point} must not leave ghost enablement`);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const uninstallRecovery = async () => {
-  for (const point of ['uninstall:quarantine', 'journal:uninstall:quarantined']) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'installed');
-      const targetIdentity = nodeIdentity(await fs.promises.lstat(state.container));
-      const targetTreeIdentity = await captureComponentTreeIdentity(state.container);
-      let fired = false;
-      const service = state.makeService({ fault: async current => { if (!fired && current === point) { fired = true; throw crash(point); } } });
-      await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.container, targetIdentity, targetTreeIdentity, clearUserData: true, previousEnabled: true }), error => error.simulateCrash === true);
-      await state.makeService().recover();
-      assert.equal(await fs.promises.lstat(state.destination).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error)), null);
-      assert.equal(state.enabled.has(state.componentId), false, point);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const runtimeTrashRetry = async () => {
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'installed');
-    const trashFault = { current: Object.assign(new Error('runtime trash denied'), { code: 'EACCES' }) };
-    const service = state.makeService({ trashFault });
-    await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)), targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true }), error => Boolean(error.code === 'EACCES' && error.journal?.operationId));
-    const recovered = await state.makeService().recover();
-    assert.equal(recovered[0].status, 'committed');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const competitorIsNeverDeleted = async () => {
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'old');
-    const staged = await state.stage('new');
-    let fired = false;
-    await assert.rejects(state.makeService({ fault: async point => { if (!fired && point === 'journal:install:published') { fired = true; throw crash(point); } } }).install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: async () => undefined }), error => error.simulateCrash === true);
-    const displaced = path.join(state.installRoot, '.displaced-new');
-    await fs.promises.rename(state.destination, displaced);
-    await writeTree(state.destination, 'competitor');
-    const blocked = new Set();
-    const result = await state.makeService({ blocked }).recover();
-    assert.equal(result[0].status, 'blocked');
-    assert.equal(await readValue(state.destination), 'competitor');
-    assert.equal(blocked.has(state.componentId), true);
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const journalFaultMatrix = async () => {
-  for (const code of ['EIO', 'EACCES']) {
-    for (const phase of ['prepared', 'backup-moved', 'published', 'host-committing', 'committed']) {
-      const state = await fixture();
-      try {
-        await writeTree(state.destination, 'old');
-        const staged = await state.stage('new');
-        let fired = false;
-        const service = state.makeService({ fault: async point => {
-          if (!fired && point === `journal:install:${phase}`) { fired = true; throw Object.assign(new Error(`${code}:${phase}`), { code }); }
-        } });
-        const operation = service.install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: async () => undefined });
-        if (phase === 'committed') await operation;
-        else await assert.rejects(operation);
-        assert.equal(await readValue(state.destination), phase === 'committed' ? 'new' : 'old', `${code} install ${phase}`);
-      } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-    }
-    for (const phase of ['prepared', 'quarantined', 'cleanup-pending', 'finalized']) {
-      const state = await fixture();
-      try {
-        await writeTree(state.destination, 'installed');
-        let fired = false;
-        const service = state.makeService({ fault: async point => {
-          if (!fired && point === `journal:uninstall:${phase}`) { fired = true; throw Object.assign(new Error(`${code}:${phase}`), { code }); }
-        } });
-        await assert.rejects(service.uninstall({ componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.container, targetIdentity: nodeIdentity(await fs.promises.lstat(state.container)), targetTreeIdentity: await captureComponentTreeIdentity(state.container), clearUserData: true, previousEnabled: true }));
-        await state.makeService().recover();
-        const remaining = await fs.promises.lstat(state.destination).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
-        assert.equal(Boolean(remaining), phase === 'prepared', `${code} uninstall ${phase}`);
-      } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-    }
-  }
-};
-
-const partialCleanupRecovery = async () => {
-  for (const phase of ['prepared', 'after-delete', 'data-complete', 'finalized']) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'installed');
-      let fired = false;
-      const crashAtPhase = point => {
-        if (fired) return;
-        if (phase === 'prepared' && point === 'after-prepared' || phase === 'after-delete' && point === 'after-delete' || phase === 'data-complete' && point === 'cleanup:data-complete:uninstall-runtime' || phase === 'finalized' && point === 'cleanup:finalized:uninstall-runtime') {
-          fired = true;
-          throw crash(`cleanup:${phase}`);
-        }
-      };
-      const service = state.makeService({ fault: crashAtPhase, cleanupFault: crashAtPhase });
-      await assert.rejects(service.uninstall({
-        componentId: state.componentId, container: state.container, destination: state.destination,
-        targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)),
-        targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
-      }), error => error.simulateCrash === true);
-      const { journal } = await readLatestJournal(state);
-      assert.equal(journal.cleanupItems.find(item => item.name === 'uninstall-runtime').phase, phase === 'after-delete' ? 'prepared' : phase);
+      await assert.rejects(state.makeService({ fault: crashOnceAt(point) }).install({ ...state.installArgs(staged), previousEnabled }), error => error.simulateCrash);
+      const forward = afterCommit.includes(point) || point.includes('committed-backup');
       const recovered = await state.makeService().recover();
-      assert.equal(recovered[0].status, 'committed', phase);
-      assert.equal(await fs.promises.lstat(state.destination).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error)), null, phase);
-      assert.equal(state.enabled.has(state.componentId), false, phase);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const uninstallLayoutMatrix = async () => {
-  for (const layout of ['legacy', 'runtime']) for (const clearUserData of [false, true]) {
-    const state = await fixture();
-    try {
-      const destination = layout === 'legacy' ? state.container : state.destination;
-      await writeTree(destination, 'installed');
-      const targetPath = layout === 'legacy' || clearUserData ? state.container : state.destination;
-      const result = await state.makeService().uninstall({ componentId: state.componentId, container: state.container, destination, targetPath, targetIdentity: nodeIdentity(await fs.promises.lstat(targetPath)), targetTreeIdentity: await captureComponentTreeIdentity(targetPath), clearUserData, previousEnabled: true });
-      assert.equal(result.status, 'committed', `${layout}/${clearUserData}`);
-      assert.equal(fs.existsSync(targetPath), false, `${layout}/${clearUserData}`);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const transactionOwnedPackagePreparation = async () => {
-  for (const validationFails of [false, true]) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'old');
-      const staged = await state.stage('new'); const operationId = crypto.randomUUID(); const preparationRoot = path.join(state.sandbox, 'temp');
-      await fs.promises.mkdir(preparationRoot);
-      const packageStage = path.join(preparationRoot, `photoflow-component-package-${state.componentId}-${operationId}`); const snapshot = `${packageStage}.zip`;
-      await writeTree(packageStage, 'package'); await fs.promises.writeFile(snapshot, 'zip');
-      const packageStageStat = await fs.promises.lstat(packageStage); const packageTree = await captureComponentTreeIdentity(packageStage); const snapshotStat = await fs.promises.lstat(snapshot);
-      const preparationCleanup = [
-        { path: packageStage, kind: 'directory', nodeIdentity: nodeIdentity(packageStageStat), treeDigest: componentTreeIdentityDigest(packageTree) },
-        { path: snapshot, kind: 'file', nodeIdentity: nodeIdentity(snapshotStat), size: snapshotStat.size, sha256: crypto.createHash('sha256').update('zip').digest('hex'), mode: snapshotStat.mode & 0o777 },
-      ];
-      const result = state.makeService({ preparationRoot }).install({ operationId, componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, preparationCleanup, validatePublished: async () => { assert.equal(fs.existsSync(packageStage), false); assert.equal(fs.existsSync(snapshot), false); if (validationFails) throw new Error('validation failed'); }, commitHostState: async () => undefined });
-      if (validationFails) await assert.rejects(result, /validation failed/); else await result;
-      assert.equal(await readValue(state.destination), validationFails ? 'old' : 'new');
-      assert.equal(fs.existsSync(staged.target), false, 'transaction owns runtime staging after durable admission');
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const packagePreparationCrashMatrix = async () => {
-  for (const itemName of ['package-stage', 'package-snapshot']) for (const phase of ['prepared', 'after-delete', 'data-complete', 'finalized']) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'old'); const staged = await state.stage('new'); const operationId = crypto.randomUUID(); const preparationRoot = path.join(state.sandbox, 'temp');
-      await fs.promises.mkdir(preparationRoot); const packageStage = path.join(preparationRoot, `photoflow-component-package-${state.componentId}-${operationId}`); const snapshot = `${packageStage}.zip`;
-      await writeTree(packageStage, 'package'); await fs.promises.writeFile(snapshot, 'zip');
-      const packageStageStat = await fs.promises.lstat(packageStage); const snapshotStat = await fs.promises.lstat(snapshot);
-      const preparationCleanup = [
-        { path: packageStage, kind: 'directory', nodeIdentity: nodeIdentity(packageStageStat), treeDigest: componentTreeIdentityDigest(await captureComponentTreeIdentity(packageStage)) },
-        { path: snapshot, kind: 'file', nodeIdentity: nodeIdentity(snapshotStat), size: snapshotStat.size, sha256: crypto.createHash('sha256').update('zip').digest('hex'), mode: snapshotStat.mode & 0o777 },
-      ];
-      const targetPath = itemName === 'package-stage' ? packageStage : snapshot; let fired = false;
-      const crashAt = (point, receipt) => {
-        const match = phase === 'prepared' && point === 'after-prepared' || phase === 'after-delete' && point === 'after-delete' || phase === 'data-complete' && point === `cleanup:data-complete:${itemName}` || phase === 'finalized' && point === `cleanup:finalized:${itemName}`;
-        const receiptMatches = point === 'after-prepared' || point === 'after-delete' ? receipt?.path === targetPath : true;
-        if (!fired && match && receiptMatches) { fired = true; throw crash(`${itemName}:${phase}`); }
-      };
-      await assert.rejects(state.makeService({ preparationRoot, cleanupFault: crashAt, fault: crashAt }).install({ operationId, componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, preparationCleanup, validatePublished: async () => undefined, commitHostState: async () => undefined }), error => error.simulateCrash === true);
-      assert.equal(fired, true, `${itemName}/${phase}`); assert.equal(await readValue(state.destination), 'old', `${itemName}/${phase} cannot publish runtime`);
-      const recovered = await state.makeService({ preparationRoot }).recover(); assert.equal(recovered[0].status, 'rolled-back', `${itemName}/${phase}`);
-      assert.equal(fs.existsSync(packageStage), false); assert.equal(fs.existsSync(snapshot), false); assert.equal(fs.existsSync(staged.target), false); assert.equal(await readValue(state.destination), 'old');
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const largeReceiptUsesSmallAppendOnlyStates = async () => {
-  const state = await fixture();
-  try {
-    state.enabled.delete(state.componentId);
-    const staged = await state.stage('new');
-    const largeTree = Array.from({ length: 20000 }, (_, index) => ({ path: `tree/${String(index).padStart(5, '0')}.bin`, kind: 'file', size: index, sha256: 'b'.repeat(64), node: { dev: 1, ino: index + 1, birthtimeMs: index + 0.5 }, mode: 0o600 }));
-    const publishedBytes = [];
-    await state.makeService({ verifyTreeIdentityOverride: async () => true, onPublish: async source => { const stat = await fs.promises.lstat(source); if (stat.isFile()) publishedBytes.push({ name: path.basename(source), size: stat.size }); } }).install({
-      componentId: state.componentId, container: state.container, destination: state.destination,
-      stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: largeTree,
-      previousInstalled: false, previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined,
+      assert(!recovered.some(item => item.status === 'blocked'), `${point}: ${JSON.stringify(recovered)}`);
+      assert.equal(exists(state.destination), hasOld || forward, point);
+      if (hasOld || forward) assert.equal(await readValue(state.destination), forward ? 'new' : 'old', point);
+      assert.equal(state.enabled.has(state.componentId), hasOld || forward, point);
+      if (hasOld || forward) assert.equal(state.enabled.get(state.componentId), forward || previousEnabled, point);
+      assert.equal(await state.makeService().hasPendingJournal(state.componentId), false, point);
+      assert.equal(exists(staged.target), false, point);
+      assert.deepEqual(await state.makeService().recover(), [], 'recovery is idempotent');
     });
-    const receiptBytes = Math.max(...publishedBytes.filter(item => item.name.includes('receipt')).map(item => item.size));
-    const stateBytes = publishedBytes.filter(item => item.name.includes('state-')).map(item => item.size);
-    assert(receiptBytes > 2 * 1024 * 1024, '20k immutable tree receipt exercises the large-receipt path');
-    assert(stateBytes.length >= 3 && Math.max(...stateBytes) < 64 * 1024, 'phase states stay small and never rewrite the tree receipt');
-    assert(stateBytes.reduce((sum, size) => sum + size, 0) < receiptBytes / 10, 'all mutable phase I/O is sublinear versus the immutable tree');
-    console.log(`20k transaction receipt: ${receiptBytes} bytes immutable once; ${stateBytes.reduce((sum, size) => sum + size, 0)} bytes across ${stateBytes.length} mutable states; max state ${Math.max(...stateBytes)} bytes`);
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const noReplaceSucceededThenThrowIsAdopted = async () => {
-  for (const mode of ['receipt', 'state', 'bundle']) {
-    const state = await fixture();
-    try {
-      state.enabled.delete(state.componentId); const staged = await state.stage('new'); let fired = false;
-      const afterPublish = async (_source, target) => {
-        const matches = mode === 'receipt' ? path.basename(target) === 'receipt.json' : mode === 'state' ? path.basename(target) === 'state-00000002.json' : target === journalDirectory(state);
-        if (!fired && matches) { fired = true; throw Object.assign(new Error('success response lost'), { outcomeUnknown: true }); }
-      };
-      const result = await state.makeService({ afterPublish }).install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, previousInstalled: false, previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined });
-      assert.equal(result.status, 'committed', mode); assert.equal(fired, true, mode); assert.equal(await readValue(state.destination), 'new');
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
   }
 };
-
-const appendOnlyJournalCorruptionMatrix = async () => {
-  for (const mode of ['invalid-utf8', 'oversize', 'higher-generation', 'different-operation', 'illegal-transition']) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'old'); const staged = await state.stage('new'); let fired = false;
-      await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'journal:install:host-committing') { fired = true; throw crash(point); } } }).install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: async () => undefined }), error => error.simulateCrash === true);
-      const loaded = await readLatestJournal(state);
-      if (mode === 'invalid-utf8') await fs.promises.writeFile(loaded.statePath, Buffer.from([0xff, 0xfe, 0xfd]));
-      else if (mode === 'oversize') { const handle = await fs.promises.open(loaded.statePath, 'r+'); try { await handle.truncate(4 * 1024 * 1024 + 1); } finally { await handle.close(); } }
-      else if (mode === 'higher-generation') await fs.promises.copyFile(loaded.statePath, path.join(loaded.directory, 'state-99999999.json'));
-      else { loaded.mutable.operationId = mode === 'different-operation' ? crypto.randomUUID() : loaded.mutable.operationId; if (mode === 'illegal-transition') loaded.mutable.phase = 'finalized'; await writeStateWithHash(loaded.statePath, loaded.mutable); }
-      let deletes = 0; const recovered = await state.makeService({ onTrash: () => { deletes += 1; } }).recover();
-      assert.equal(recovered[0].status, 'blocked', mode); assert.equal(deletes, 0, `${mode} performs zero native cleanup`); assert.equal(fs.existsSync(journalDirectory(state)), true);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const admissionOrphanAndTemporaryRecovery = async () => {
-  const state = await fixture();
-  try {
-    const service = state.makeService(); await service.recover();
-    const operationId = crypto.randomUUID(); const orphan = path.join(state.installRoot, '.transactions', `.admit-${state.componentId}-${operationId}`);
-    await fs.promises.mkdir(orphan); await fs.promises.writeFile(path.join(orphan, '.receipt.partial.tmp'), Buffer.from([0xff, 0x00, 0x01]));
-    const cleaned = await service.recover(); assert(cleaned.some(item => item.status === 'orphan-cleaned')); assert.equal(fs.existsSync(orphan), false);
-
-    await writeTree(state.destination, 'old'); const staged = await state.stage('new'); let fired = false;
-    await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'journal:install:host-committing') { fired = true; throw crash(point); } } }).install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: async () => undefined }), error => error.simulateCrash === true);
-    const directory = journalDirectory(state); const temp = path.join(directory, `.state-00000099.json.${crypto.randomUUID()}.tmp`); await fs.promises.writeFile(temp, Buffer.from([0xff, 0x00]));
-    const recovered = await state.makeService().recover(); assert.equal(recovered[0].status, 'rolled-back'); assert.equal(fs.existsSync(temp), false, 'valid unpublished temp is safely reclaimed');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const sameContentStateReplacementBlocksAppend = async () => {
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'old'); const staged = await state.stage('new'); let swapped = false; let nativeDeletes = 0;
-    const service = state.makeService({ onTrash: () => { nativeDeletes += 1; }, fault: async point => {
-      if (swapped || point !== 'journal:install:host-committing') return;
-      swapped = true; const loaded = await readLatestJournal(state); const bytes = await fs.promises.readFile(loaded.statePath); const displaced = path.join(state.sandbox, 'displaced-state.json');
-      await fs.promises.rename(loaded.statePath, displaced); await fs.promises.writeFile(loaded.statePath, bytes);
-    } });
-    await assert.rejects(service.install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, validatePublished: async () => undefined, commitHostState: async () => undefined }));
-    assert.equal(swapped, true); assert.equal(nativeDeletes, 0, 'same-content new-inode state blocks before cleanup mutation'); assert.equal(await readValue(state.destination), 'new'); assert.equal(state.enabled.get(state.componentId), true, 'previous enablement is not advanced by a blocked append');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const terminalGcCrashMatrix = async () => {
-  for (const mode of ['old-state', 'terminal-state', 'receipt', 'gc-marker', 'directory']) {
-    const state = await fixture();
-    try {
-      state.enabled.delete(state.componentId); const staged = await state.stage('new'); let stateDeletes = 0; let fired = false; const blocked = new Set();
-      const afterDeleteFile = receipt => {
-        const name = path.basename(receipt.path); if (/^state-/.test(name)) stateDeletes += 1;
-        const matches = mode === 'old-state' ? stateDeletes === 1 : mode === 'terminal-state' ? stateDeletes === 5 : mode === 'receipt' ? name === 'receipt.json' : mode === 'gc-marker' ? name === 'gc.json' : false;
-        if (!fired && matches) { fired = true; throw crash(`gc:${mode}`); }
-      };
-      const afterDeleteDirectory = () => { if (!fired && mode === 'directory') { fired = true; throw crash('gc:directory'); } };
-      const service = state.makeService({ blocked, afterDeleteFile, afterDeleteDirectory });
-      const operation = service.install({ componentId: state.componentId, container: state.container, destination: state.destination, stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree, previousInstalled: false, previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined });
-      if (mode === 'directory') await operation;
-      else await assert.rejects(operation, error => error.gcPending === true);
-      assert.equal(fired, true, mode); assert.equal(state.enabled.get(state.componentId), true, `${mode} occurs only after terminal state and enable commit`);
-      const recovered = await service.recover();
-      assert.equal(recovered.some(item => item.status === 'blocked'), false, mode); assert.equal(fs.existsSync(journalDirectory(state)), false, `${mode} GC resumes to completion`); assert.equal(blocked.has(state.componentId), false, `${mode} clears tracking and blocker`); assert.equal(await readValue(state.destination), 'new');
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const installCleanupRoleCrashRecovery = async () => {
-  for (const role of ['rollback-runtime', 'rollback-staging', 'committed-backup']) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'old');
-      state.enabled.set(state.componentId, false);
-      const staged = await state.stage('new');
-      let fired = false;
-      const cleanupFault = (point, receipt) => {
-        const matches = role === 'rollback-runtime' ? receipt.path === state.destination : role === 'rollback-staging' ? receipt.path === staged.target : receipt.path.includes('-quarantine-');
-        if (!fired && matches && point === 'after-delete') { fired = true; throw crash(`${role}:after-delete`); }
-      };
-      const fault = role === 'rollback-staging' ? point => { if (point === 'install:publish') throw new Error('publish rejected'); } : async () => undefined;
-      const validatePublished = role === 'rollback-runtime' ? async () => { throw new Error('validation rejected'); } : async () => undefined;
-      await assert.rejects(state.makeService({ cleanupFault, fault }).install({
-        componentId: state.componentId, container: state.container, destination: state.destination,
-        stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
-        previousEnabled: false, desiredEnabled: true, validatePublished, commitHostState: async () => undefined,
-      }));
-      const { journal } = await readLatestJournal(state);
-      assert.equal(journal.cleanupItems.find(item => item.name === role).phase, 'prepared', `${role} persists prepared before native deletion`);
-      const recovered = await state.makeService().recover();
-      assert.equal(recovered[0].status, role === 'committed-backup' ? 'committed' : 'rolled-back');
-      assert.equal(await readValue(state.destination), role === 'committed-backup' ? 'new' : 'old');
-      assert.equal(state.enabled.get(state.componentId), role === 'committed-backup');
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const committedCleanupKeepsLatestPreparedRecord = async () => {
-  const state = await fixture();
-  try {
+const rollbackCanCrashAgain = async () => {
+  for (const point of ['cleanup:before:rollback-runtime', 'cleanup:after:rollback-runtime', 'install:after-restore', 'cleanup:before:rollback-staging', 'cleanup:after:rollback-staging']) await withFixture(async state => {
     await writeTree(state.destination, 'old');
-    state.enabled.set(state.componentId, false);
     const staged = await state.stage('new');
-    const trashFault = { current: Object.assign(new Error('native delete retry'), { code: 'EIO' }) };
-    await assert.rejects(state.makeService({ trashFault }).install({
-      componentId: state.componentId, container: state.container, destination: state.destination,
-      stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
-      previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined,
-    }), error => Boolean(error.journal));
-    const { journal } = await readLatestJournal(state);
-    assert.equal(journal.phase, 'committed', 'forward-only cleanup failure never regresses to host-committing');
-    assert.equal(journal.cleanupItems.find(item => item.name === 'committed-backup').phase, 'prepared', 'latest prepared receipt survives outer error handling');
-    assert.equal(state.enabled.get(state.componentId), false, 'desired enablement waits for cleanup finalization');
-    await state.makeService().recover();
-    assert.equal(state.enabled.get(state.componentId), true);
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+    const firstPoint = point.includes('staging') ? 'install:after-backup' : 'journal:after:published';
+    await assert.rejects(state.makeService({ fault: crashOnceAt(firstPoint) }).install(state.installArgs(staged)), error => error.simulateCrash);
+    assert.equal((await state.makeService({ fault: crashOnceAt(point) }).recover())[0].status, 'blocked');
+    const result = await state.makeService().recover();
+    assert.equal(result[0].status, 'rolled-back', `${point}: ${JSON.stringify(result)}`);
+    assert.equal(await readValue(state.destination), 'old');
+  });
 };
-
-const cleanupReceiptTamperIsBlocked = async () => {
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'installed');
+const uninstallCrashMatrix = async () => {
+  for (const clear of [false, true]) {
+    const points = ['journal:after:prepared', 'uninstall:before-quarantine', 'uninstall:after-quarantine', 'journal:after:quarantined', 'journal:after:cleanup-pending', 'cleanup:before:uninstall-runtime', 'cleanup:after:uninstall-runtime', 'journal:after:done', ...(clear ? ['uninstall:before:settings', 'uninstall:after:settings', 'uninstall:after:secrets'] : [])];
+    for (const point of points) await withFixture(async state => {
+      await writeTree(state.destination, 'installed');
+      await fs.promises.writeFile(path.join(state.container, 'user-data'), 'keep unless requested');
+      for (const name of ['settings', 'secrets']) await fs.promises.writeFile(path.join(state.sandbox, name), 'private');
+      await assert.rejects(state.makeService({ fault: crashOnceAt(point) }).uninstall(await state.uninstallArgs(clear)), error => error.simulateCrash);
+      const result = await state.makeService().recover();
+      assert(!result.some(item => item.status === 'blocked'), `${point}: ${JSON.stringify(result)}`);
+      assert.equal(exists(state.destination), false);
+      assert.equal(exists(path.join(state.container, 'user-data')), !clear);
+      for (const name of ['settings', 'secrets']) assert.equal(exists(path.join(state.sandbox, name)), !clear);
+      assert.equal(state.enabled.has(state.componentId), false);
+    });
+  }
+};
+const partialDeletionAndOrdinaryFailures = async () => {
+  for (const kind of ['install', 'uninstall', 'preparation']) await withFixture(async state => {
+    await writeTree(state.destination, 'old');
+    const staged = await state.stage('new');
+    const options = {};
+    const args = state.installArgs(staged);
+    if (kind === 'preparation') {
+      options.preparationRoot = state.sandbox;
+      args.operationId = crypto.randomUUID();
+      const preparationPath = path.join(state.sandbox, `photoflow-component-package-${state.componentId}-${args.operationId}`);
+      await writeTree(preparationPath, 'package');
+      await fs.promises.writeFile(`${preparationPath}.zip`, 'zip snapshot');
+      args.preparationCleanup = [await directoryReceipt(preparationPath), await fileReceipt(`${preparationPath}.zip`)];
+    }
     let fired = false;
-    await assert.rejects(state.makeService({ fault: point => {
-      if (!fired && point === 'cleanup:pending:uninstall-runtime') { fired = true; throw crash(point); }
-    } }).uninstall({
-      componentId: state.componentId, container: state.container, destination: state.destination,
-      targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)),
-      targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
-    }), error => error.simulateCrash === true);
-    const loaded = await readLatestJournal(state); const journal = loaded.journal;
-    loaded.mutable.cleanupItems[0].receipt.path = path.join(state.sandbox, 'outside-owned-root');
-    await writeStateWithHash(loaded.statePath, loaded.mutable);
-    let nativeDeletes = 0;
-    const recovered = await state.makeService({ onTrash: () => { nativeDeletes += 1; } }).recover();
-    assert.equal(recovered[0].status, 'blocked');
-    assert.equal(nativeDeletes, 0, 'forged cleanup receipt must be rejected before native deletion');
-    assert.equal(await readValue(journal.quarantinePath), 'installed');
-    assert.equal(fs.existsSync(loaded.directory), true, 'corrupt journal remains durably blocked for inspection');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+    const service = state.makeService({ ...options, cleanupFault: point => { if (!fired && point === 'cleanup:file-deleted') { fired = true; throw crash(point); } } });
+    await assert.rejects(kind === 'uninstall' ? service.uninstall(await state.uninstallArgs()) : service.install(args), error => error.simulateCrash);
+    const result = await state.makeService(options).recover();
+    assert.equal(result[0].status, kind === 'preparation' ? 'rolled-back' : 'committed', JSON.stringify(result));
+    if (kind !== 'uninstall') assert.equal(await readValue(state.destination), kind === 'preparation' ? 'old' : 'new');
+  });
+  await withFixture(async state => {
+    await writeTree(state.destination, 'old');
+    const staged = await state.stage('new');
+    await assert.rejects(state.makeService().install({ ...state.installArgs(staged), validatePublished: async () => { throw new Error('invalid package'); } }), /invalid package/);
+    assert.equal(await readValue(state.destination), 'old');
+    assert.equal(await state.makeService().hasPendingJournal(state.componentId), false);
+    const service = state.makeService({ trashFault: { current: new Error('file busy') } });
+    const next = await state.stage('new');
+    await assert.rejects(service.install(state.installArgs(next)), /file busy/);
+    assert.equal((await readLatestJournal(state)).mutable.cleanup['committed-backup'], 'executing');
+    assert.equal((await state.makeService().recover())[0].status, 'committed');
+  });
 };
-
-const cleanupPlanTamperMatrix = async () => {
-  const variants = [
-    ['empty', () => []], ['subset', steps => steps.slice(0, 1)], ['reorder', steps => [...steps].reverse()],
-    ['duplicate', steps => [...steps, steps[0]]], ['extra', steps => [...steps, { name: 'extra', state: 'pending' }]],
+const corruptionAndOwnership = async () => {
+  for (const mode of ['invalid-json', 'wrong-receipt', 'out-of-root', 'foreign-cleanup', 'unknown-runtime', 'missing-runtime', 'added-file', 'wrong-preparation']) await withFixture(async state => {
+    await writeTree(state.destination, 'old');
+    const staged = await state.stage('new');
+    await assert.rejects(state.makeService({ fault: crashOnceAt('journal:after:published') }).install(state.installArgs(staged)), error => error.simulateCrash);
+    const { mutable, receipt, statePath, directory } = await readLatestJournal(state);
+    if (mode === 'invalid-json') await fs.promises.writeFile(statePath, '{');
+    if (mode === 'wrong-receipt') { mutable.receiptDigest = '0'.repeat(64); await fs.promises.writeFile(statePath, JSON.stringify(mutable)); }
+    if (mode === 'foreign-cleanup') { mutable.cleanup['another-component'] = 'executing'; await fs.promises.writeFile(statePath, JSON.stringify(mutable)); }
+    if (mode === 'out-of-root' || mode === 'wrong-preparation') {
+      if (mode === 'out-of-root') receipt.source.path = state.sandbox;
+      else receipt.preparationCleanup = [{ name: 'package-stage', receipt: await directoryReceipt(state.destination) }];
+      const bytes = JSON.stringify(receipt);
+      await fs.promises.writeFile(path.join(directory, 'receipt.json'), bytes);
+      mutable.receiptDigest = crypto.createHash('sha256').update(bytes).digest('hex');
+      await fs.promises.writeFile(statePath, JSON.stringify(mutable));
+    }
+    if (mode === 'unknown-runtime') { await fs.promises.rename(state.destination, `${state.destination}.displaced`); await writeTree(state.destination, 'foreign'); }
+    if (mode === 'missing-runtime') await fs.promises.rm(state.destination, { recursive: true });
+    if (mode === 'added-file') await fs.promises.writeFile(path.join(state.destination, 'user-file'), 'must survive');
+    const result = await state.makeService().recover();
+    assert.equal(result[0].status, 'blocked', `${mode}: ${JSON.stringify(result)}`);
+    if (mode === 'unknown-runtime') assert.equal(await readValue(state.destination), 'foreign');
+    if (mode === 'added-file') assert.equal(await fs.promises.readFile(path.join(state.destination, 'user-file'), 'utf8'), 'must survive');
+    assert(exists(receipt.backup.path), 'old version is retained for recovery');
+  });
+};
+const atomicStateAndMetadataFailures = async () => {
+  for (const mode of ['before-replace', 'after-rename-error', 'temporary-delete-error']) await withFixture(async state => {
+    const filePath = path.join(state.sandbox, 'state.json');
+    await fs.promises.writeFile(filePath, JSON.stringify({ step: 'old' }));
+    const promises = { ...fs.promises,
+      rename: async (...args) => { await fs.promises.rename(...args); if (mode === 'after-rename-error') throw new Error('lost response'); },
+      unlink: async (...args) => { if (mode === 'temporary-delete-error') throw new Error('file busy'); return fs.promises.unlink(...args); },
+    };
+    const operation = atomicJson({ fs: { ...fs, promises }, path, crypto, filePath, value: { step: 'new' }, fault: point => { if (mode === 'before-replace' && point === 'json:before-replace') throw new Error('disk full'); } });
+    if (mode === 'before-replace') await assert.rejects(operation, /disk full/); else await operation;
+    assert.equal(JSON.parse(await fs.promises.readFile(filePath)).step, mode === 'before-replace' ? 'old' : 'new');
+  });
+  for (const mode of ['retire', 'receipt', 'state', 'directory']) await withFixture(async state => {
+    await writeTree(state.destination, 'old');
+    const fsImpl = { ...fs, promises: { ...fs.promises,
+      rename: async (from, to) => { if (mode === 'retire' && path.basename(to).startsWith('.retired-')) throw new Error('antivirus busy'); return fs.promises.rename(from, to); },
+      unlink: async target => { if (target.includes('.retired-') && path.basename(target) === `${mode}.json`) throw new Error('antivirus busy'); return fs.promises.unlink(target); },
+      rmdir: async target => { if (mode === 'directory' && target.includes('.retired-')) throw new Error('antivirus busy'); return fs.promises.rmdir(target); },
+    } };
+    const result = await state.makeService({ fsImpl }).install(state.installArgs(await state.stage('new')));
+    assert.equal(result.status, 'committed'); assert.equal(result.cleanupWarnings.length, 1);
+    assert.equal(state.blocked.size, 0);
+    state.enabled.set(state.componentId, false);
+    await state.makeService().recover();
+    assert.equal(state.enabled.get(state.componentId), false, 'metadata recovery must not replay an obsolete enabled value');
+    assert.equal(await readValue(state.destination), 'new');
+    assert.deepEqual(await fs.promises.readdir(path.join(state.installRoot, '.transactions')), []);
+  });
+};
+const largeReceiptAndSmallState = async () => withFixture(async state => {
+  const staged = await state.stage('new');
+  const files = Array.from({ length: 20_000 }, (_, index) => ({ path: `file-${index}`, kind: 'file', node: { dev: 1, ino: index + 1, birthtimeMs: 1 }, size: 1, mode: 0o600, sha256: 'a'.repeat(64) }));
+  let initialReceipt;
+  let writes = 0;
+  const service = state.makeService({ verifyTreeIdentityOverride: async () => true, fault: async (point, value) => {
+    if (point !== 'json:after-replace') return;
+    if (path.basename(value.filePath) === 'receipt.json') { initialReceipt = await fs.promises.readFile(value.filePath); writes += 1; }
+    if (path.basename(value.filePath) === 'state.json') assert((await fs.promises.stat(value.filePath)).size < 2048);
+    if (value.value.phase === 'host-committing') throw crash(point);
+  } });
+  await assert.rejects(service.install({ ...state.installArgs(staged), stagingTreeIdentity: files }), error => error.simulateCrash);
+  assert(initialReceipt.length > 2 * 1024 * 1024);
+  assert.equal(writes, 1, 'large immutable receipt is written once');
+  assert.deepEqual((await fs.promises.readdir(journalDirectory(state))).sort(), ['receipt.json', 'state.json']);
+  assert.deepEqual(await fs.promises.readFile(path.join(journalDirectory(state), 'receipt.json')), initialReceipt);
+});
+const actualProcessCrash = async () => {
+  for (const point of ['install:after-backup', 'install:after-publish', 'install:host-committed', 'cleanup:after:committed-backup']) await withFixture(async state => {
+    await writeTree(state.destination, 'old');
+    const child = spawnSync(process.execPath, [__filename, '--crash-child', state.sandbox, point], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+    assert.equal(child.status, 86, `${point}: ${child.stderr}`);
+    const result = await state.makeService().recover();
+    const forward = point.includes('host-committed') || point.includes('committed-backup');
+    assert.equal(result[0].status, forward ? 'committed' : 'rolled-back', JSON.stringify(result));
+    assert.equal(await readValue(state.destination), forward ? 'new' : 'old');
+    if (forward) assert.equal(JSON.parse(await fs.promises.readFile(state.hostPath)).version, 'new');
+  });
+};
+const commitFailuresStayForward = async () => withFixture(async state => {
+  await writeTree(state.destination, 'old');
+  const staged = await state.stage('new');
+  await assert.rejects(state.makeService().install({ ...state.installArgs(staged), commitHostState: async () => {
+    await state.hostCommit(); throw new Error('commit response lost');
+  } }), /commit response lost/);
+  assert.equal((await readLatestJournal(state)).mutable.phase, 'host-committing');
+  assert.equal(await readValue(state.destination), 'new');
+  assert.equal((await state.makeService().recover())[0].status, 'committed');
+  const calls = { settings: 0, secrets: 0 };
+  const cleanupProvider = () => [
+    { name: 'settings', run: () => { calls.settings += 1; } },
+    { name: 'secrets', run: () => { if (++calls.secrets === 1) throw new Error('secret store busy'); } },
   ];
-  for (const [label, mutate] of variants) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'installed'); let fired = false;
-      await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'uninstall:quarantine') { fired = true; throw crash(point); } } }).uninstall({
-        componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.container,
-        targetIdentity: nodeIdentity(await fs.promises.lstat(state.container)), targetTreeIdentity: await captureComponentTreeIdentity(state.container), clearUserData: true, previousEnabled: true,
-      }), error => error.simulateCrash === true);
-      const loaded = await readLatestJournal(state); loaded.mutable.cleanupSteps = mutate(loaded.mutable.cleanupSteps); await writeStateWithHash(loaded.statePath, loaded.mutable);
-      let mutations = 0; const recovered = await state.makeService({ onTrash: () => { mutations += 1; } }).recover();
-      assert.equal(recovered[0].status, 'blocked', label); assert.equal(mutations, 0, label); assert.equal(await readValue(state.destination), 'installed', label);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-  const state = await fixture();
-  try {
-    await writeTree(state.destination, 'installed'); let fired = false;
-    await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'uninstall:quarantine') { fired = true; throw crash(point); } } }).uninstall({
-      componentId: state.componentId, container: state.container, destination: state.destination, targetPath: state.destination,
-      targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)), targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
-    }), error => error.simulateCrash === true);
-    const loaded = await readLatestJournal(state); loaded.mutable.cleanupSteps = [{ name: 'settings', state: 'pending' }]; await writeStateWithHash(loaded.statePath, loaded.mutable);
-    const recovered = await state.makeService().recover(); assert.equal(recovered[0].status, 'blocked', 'clear=false+steps'); assert.equal(await readValue(state.destination), 'installed');
-  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-};
-
-const missingCleanupTargetsFailClosed = async () => {
-  for (const role of ['rollback-runtime', 'committed-backup', 'uninstall-runtime']) {
-    const state = await fixture();
-    try {
-      let fired = false;
-      let cleanupTarget;
-      if (role === 'uninstall-runtime') {
-        await writeTree(state.destination, 'installed');
-        await assert.rejects(state.makeService({ fault: point => { if (!fired && point === 'cleanup:pending:uninstall-runtime') { fired = true; throw crash(point); } } }).uninstall({
-          componentId: state.componentId, container: state.container, destination: state.destination,
-          targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)), targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false,
-        }), error => error.simulateCrash === true);
-      } else {
-        await writeTree(state.destination, 'old');
-        const staged = await state.stage('new');
-        const faultPoint = role === 'rollback-runtime' ? 'journal:install:published' : 'install:cleanup-backup';
-        await assert.rejects(state.makeService({ fault: point => { if (!fired && point === faultPoint) { fired = true; throw crash(point); } } }).install({
-          componentId: state.componentId, container: state.container, destination: state.destination,
-          stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
-          validatePublished: async () => undefined, commitHostState: async () => undefined,
-        }), error => error.simulateCrash === true);
-      }
-      const loaded = await readLatestJournal(state); const journalPath = loaded.directory; const journal = loaded.journal;
-      cleanupTarget = role === 'rollback-runtime' ? journal.destination : journal.quarantinePath;
-      await fs.promises.rm(cleanupTarget, { recursive: true, force: true });
-      let nativeDeletes = 0;
-      const recovered = await state.makeService({ onTrash: () => { nativeDeletes += 1; } }).recover();
-      assert.equal(recovered[0].status, 'blocked', role);
-      assert.equal(nativeDeletes, 0, `${role} missing without prepared proof performs zero native deletes`);
-      assert.equal(fs.existsSync(journalPath), true, `${role} remains persistently blocked`);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
-const replacementsBeforeCommitStayDisabled = async () => {
-  for (const mode of ['install', 'uninstall', 'rollback']) {
-    const state = await fixture();
-    try {
-      await writeTree(state.destination, 'old');
-      state.enabled.set(state.componentId, false);
-      let replaced = false;
-      const replaceDestination = async (point, receipt) => {
-        if (point !== 'finalize' || replaced) return;
-        const relevant = mode === 'install' ? receipt.path.includes('-quarantine-') : mode === 'uninstall' ? receipt.path.includes('-uninstall-') : receipt.path.includes('-install-');
-        if (!relevant) return;
-        replaced = true;
-        await fs.promises.rm(state.destination, { recursive: true, force: true });
-        await writeTree(state.destination, 'competitor');
-      };
-      if (mode === 'uninstall') {
-        await assert.rejects(state.makeService({ cleanupFault: replaceDestination }).uninstall({
-          componentId: state.componentId, container: state.container, destination: state.destination,
-          targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)), targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: false,
-        }));
-      } else {
-        const staged = await state.stage('new');
-        const fault = mode === 'rollback' ? point => { if (point === 'install:publish') throw new Error('publish rejected'); } : async () => undefined;
-        await assert.rejects(state.makeService({ cleanupFault: replaceDestination, fault }).install({
-          componentId: state.componentId, container: state.container, destination: state.destination,
-          stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
-          previousEnabled: false, desiredEnabled: true, validatePublished: async () => undefined, commitHostState: async () => undefined,
-        }));
-      }
-      assert.equal(replaced, true, mode);
-      assert.equal(await readValue(state.destination), 'competitor', `${mode} preserves replacement runtime`);
-      assert.equal(state.enabled.get(state.componentId), false, `${mode} never enables or clears disabled state after replacement`);
-      assert.equal(fs.existsSync(journalDirectory(state)), true, `${mode} remains durably blocked`);
-    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
-  }
-};
-
+  await assert.rejects(state.makeService({ cleanupProvider }).uninstall(await state.uninstallArgs(true)), /secret store busy/);
+  const pending = (await readLatestJournal(state)).mutable;
+  assert.equal(pending.cleanup['data:settings'], 'applied');
+  assert.equal(pending.cleanup['data:secrets'], 'executing');
+  assert.equal((await state.makeService({ cleanupProvider }).recover())[0].status, 'committed');
+  assert.deepEqual(calls, { settings: 1, secrets: 2 });
+});
+const metadataCannotCrossOperations = async () => withFixture(async state => {
+  await writeTree(state.destination, 'old');
+  let reachAdmission; let releaseAdmission;
+  const reached = new Promise(resolve => { reachAdmission = resolve; });
+  const gate = new Promise(resolve => { releaseAdmission = resolve; });
+  const service = state.makeService({ fault: async point => { if (point === 'journal:before-admission') { reachAdmission(); await gate; } } });
+  const installing = service.install(state.installArgs(await state.stage('new')));
+  await reached;
+  assert.deepEqual(await service.recover('another-component'), []);
+  assert((await fs.promises.readdir(service.journalRoot)).some(name => name.startsWith('.admit-')));
+  releaseAdmission(); await installing;
+  let retireFailed = false;
+  const nextService = state.makeService({ fault: point => { if (point === 'journal:before-retire' && !retireFailed) { retireFailed = true; throw new Error('metadata busy'); } } });
+  await nextService.install(state.installArgs(await state.stage('next')));
+  assert.equal(await nextService.hasPendingJournal(state.componentId), false);
+  assert(exists(journalDirectory(state)), 'status reads do not mutate or retire a journal');
+  await nextService.install({ ...state.installArgs(await state.stage('latest')), desiredEnabled: false });
+  assert.equal(await readValue(state.destination), 'latest');
+  assert.equal(state.enabled.get(state.componentId), false);
+});
 const concurrentRecoveryIsSingleFlight = async () => {
   const state = await fixture();
   try {
@@ -740,34 +412,16 @@ const recoveryDoesNotCrossActiveUninstall = async () => {
 };
 
 (async () => {
-  await installCrashRecovery();
-  await committedCleanupRecovery();
-  await transactionOwnedPackagePreparation();
-  await packagePreparationCrashMatrix();
-  await largeReceiptUsesSmallAppendOnlyStates();
-  await noReplaceSucceededThenThrowIsAdopted();
-  await appendOnlyJournalCorruptionMatrix();
-  await admissionOrphanAndTemporaryRecovery();
-  await sameContentStateReplacementBlocksAppend();
-  await terminalGcCrashMatrix();
-  await committedCleanupKeepsLatestPreparedRecord();
-  await preJournalFailureRetainsCallerOwnership();
-  await firstInstallRollbackIsAbsent();
-  await uninstallRecovery();
-  await runtimeTrashRetry();
-  await uninstallLayoutMatrix();
-  await competitorIsNeverDeleted();
-  await journalFaultMatrix();
-  await partialCleanupRecovery();
-  await installCleanupRoleCrashRecovery();
-  await cleanupReceiptTamperIsBlocked();
-  await cleanupPlanTamperMatrix();
-  await missingCleanupTargetsFailClosed();
-  await replacementsBeforeCommitStayDisabled();
-  await concurrentRecoveryIsSingleFlight();
-  await activeTransactionRejectsRecovery();
-  await crossScopeRecoveryIsExclusive();
-  await fullRecoveryWaitsForActiveInstall();
-  await recoveryDoesNotCrossActiveUninstall();
+  if (process.argv[2] === '--crash-child') {
+    const state = await fixture(process.argv[3]);
+    const service = state.makeService({ fault: point => { if (point === process.argv[4]) process.exit(86); } });
+    await service.install(state.installArgs(await state.stage('new')));
+    throw new Error('child crash point was not reached');
+  }
+  for (const test of [installCrashMatrix, rollbackCanCrashAgain, uninstallCrashMatrix, partialDeletionAndOrdinaryFailures, corruptionAndOwnership,
+    atomicStateAndMetadataFailures, largeReceiptAndSmallState, actualProcessCrash, commitFailuresStayForward, metadataCannotCrossOperations, concurrentRecoveryIsSingleFlight, activeTransactionRejectsRecovery,
+    crossScopeRecoveryIsExclusive, fullRecoveryWaitsForActiveInstall, recoveryDoesNotCrossActiveUninstall]) {
+    await test(); console.log(`${test.name} passed`);
+  }
   console.log('Component durable transaction tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

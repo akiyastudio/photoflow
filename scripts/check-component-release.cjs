@@ -17,6 +17,7 @@ const steps = [
   ['component install adoption', process.execPath, ['scripts/test-component-install-adoption.cjs']],
   ['component install trust boundary', process.execPath, ['scripts/test-component-install-trust.mjs']],
   ['component durable transactions', process.execPath, ['scripts/test-component-transactions.cjs']],
+  ['component receipt cleanup', process.execPath, ['scripts/test-component-cleanup.cjs']],
   ['component lifecycle coordination', process.execPath, ['scripts/test-component-lifecycle-coordinator.cjs']],
   ['component capability lifecycle', process.execPath, ['scripts/test-component-capability-lifecycle.cjs']],
   ['component service lifecycle lease', process.execPath, ['scripts/test-component-service-lifecycle-lease.cjs']],

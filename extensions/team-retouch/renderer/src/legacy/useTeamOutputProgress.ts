@@ -1,4 +1,3 @@
-// @ts-nocheck -- source-faithful migration from fef15e4^; RPC types are enforced by legacy-api.ts
 import { legacyApi } from './legacy-api';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ProgressFolder, TeamProjectPhoto, WorkspaceProject } from './legacy-types';
@@ -23,12 +22,14 @@ export const resolveTeamSourceProgressIds = resolveLegacyTeamSourceProgressIds;
 /** Only photos that produced at least one AI crop are real team-workflow inputs. */
 export const teamWorkflowSourcePaths = (photos: TeamProjectPhoto[]) => photos
   .filter(photo => photo.tasks.length > 0)
-  .map(photo => photo.relativePath || photo.sourcePath);
+  .map(photo => photo.relativePath || photo.sourcePath)
+  .filter((path): path is string => Boolean(path));
 
 export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void) => {
+  const sourcePathInputKey = (Array.isArray(sourceFilePaths) ? sourceFilePaths : [sourceFilePaths]).filter(Boolean).join('\0');
   const normalizedSourcePaths = useMemo(
-    () => [...new Set((Array.isArray(sourceFilePaths) ? sourceFilePaths : [sourceFilePaths]).filter(Boolean))],
-    [Array.isArray(sourceFilePaths) ? sourceFilePaths.join('|') : sourceFilePaths],
+    () => [...new Set(sourcePathInputKey.split('\0').filter(Boolean))],
+    [sourcePathInputKey],
   );
   const sourcePathKey = normalizedSourcePaths.map(normalizePath).join('|');
   const [folders, setFolders] = useState<ProgressFolder[]>([]);
@@ -44,7 +45,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
     if (!isTeamProgressCandidate(folder)) return '不是主进度或合法原始来源';
     if (sourceProgressIds.includes(folder.id)) return '当前来源，不可选择';
     return '';
-  }, [sourceProgressKey]);
+  }, [sourceProgressIds]);
 
   const refresh = useCallback(async () => {
     const scope = scopeToken;
@@ -69,7 +70,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
       return remembered?.id || related?.id || '__new__';
     });
     return { ...result, progressFolders, graphEdges, sourceProgressIds: sources };
-  }, [workspacePath, project.id, project.name, sourcePathKey, scopeToken]);
+  }, [workspacePath, project.id, project.name, sourcePathKey, scopeToken, normalizedSourcePaths]);
 
   useEffect(() => {
     let active = true;
@@ -104,7 +105,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
     if (generation !== refreshGenerationRef.current || scope !== scopeToken || legacyApi.getMediaAuthorizationScope() !== scope.projectId) throw new Error('项目或来源已切换，已忽略旧项目来源登记结果');
   }, [refresh, project.id, scopeToken]);
 
-  const ensureTargetProgress = async (workflowProgressId?: string) => {
+  const ensureTargetProgress = useCallback(async (workflowProgressId?: string) => {
     const scope = scopeToken;
     const latest = await refresh();
     const generation = refreshGenerationRef.current;
@@ -143,7 +144,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
     setTargetProgressIdState(registered.progressFolder.id);
     window.localStorage.setItem(storageKey, registered.progressFolder.id);
     return registered.progressFolder;
-  };
+  }, [project.id, refresh, scopeToken, storageKey, targetProgressId]);
 
   return {
     folders: [...folders].sort((left, right) => compareProgressKeys(left.versionKey, right.versionKey)),

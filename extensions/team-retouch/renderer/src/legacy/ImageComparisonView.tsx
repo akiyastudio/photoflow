@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 export type ImageComparisonMode = 'side-by-side' | 'split' | 'overlay' | 'blink' | 'difference';
 
@@ -48,18 +48,18 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
   const effectiveSwapped = onSwappedChange ? swapped : internalSwapped;
   const ordered = effectiveSwapped ? [right, left] : [left, right];
 
-  const resetView = () => {
+  const resetView = useCallback(() => {
     setSplit(50);
     setOpacity(50);
     setZoom(1);
     setRotation(0);
     setPan({ x: 0, y: 0 });
     if (!onSwappedChange) setInternalSwapped(false);
-  };
+  }, [onSwappedChange]);
 
   useEffect(() => {
     resetView();
-  }, [comparisonKey]);
+  }, [comparisonKey, resetView]);
 
   useEffect(() => {
     setBlinkRight(false);

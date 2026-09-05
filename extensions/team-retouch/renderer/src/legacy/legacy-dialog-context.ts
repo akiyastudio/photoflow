@@ -1,8 +1,9 @@
 import { createContext, useContext } from 'react';
 
-export type LegacyDialogChoice = { value: string; label: string };
-export type LegacyDialogRequest = { kind: 'confirm' | 'prompt' | 'choice'; title: string; message: string; detail?: string; confirmLabel?: string; cancelLabel?: string; defaultValue?: string; tone?: string; choices?: LegacyDialogChoice[]; resolve: (value: any) => void };
-export type LegacyDialogOptions = Omit<LegacyDialogRequest, 'kind' | 'resolve'>;
+export type LegacyDialogTone = 'default' | 'danger';
+export type LegacyDialogChoice = { value: string; label: string; tone?: LegacyDialogTone };
+export type LegacyDialogOptions = { title: string; message: string; detail?: string; confirmLabel?: string; cancelLabel?: string; defaultValue?: string; cancelDefault?: boolean; dismissible?: boolean; tone?: LegacyDialogTone; choices?: LegacyDialogChoice[] };
+export type LegacyDialogRequest = LegacyDialogOptions & { kind: 'confirm' | 'prompt' | 'choice' };
 export type LegacyDialogApi = { confirm: (value: LegacyDialogOptions) => Promise<boolean>; prompt: (value: LegacyDialogOptions) => Promise<string | null>; choice: (value: LegacyDialogOptions) => Promise<string | null> };
 
 export const LegacyDialogContext = createContext<LegacyDialogApi | null>(null);

@@ -39,9 +39,10 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
     }
   }, []);
   useEffect(() => {
+    const statusGuard = statusGuardRef.current;
     void refreshEnvironment();
     const offActivate = window.photoFlowComponent.onActivate(() => { void refreshEnvironment(); });
-    return () => { statusGuardRef.current.invalidate(); offActivate(); };
+    return () => { statusGuard.invalidate(); offActivate(); };
   }, [refreshEnvironment]);
   const run = async (label: string, action: () => Promise<boolean | void>) => {
     if (busy) return;

@@ -7,6 +7,7 @@ import { TeamRetouchManager } from './legacy/TeamRetouchManager';
 import { PersonIdentityManager } from './legacy/PersonIdentityManager';
 import { TeamRetouchBrand } from './legacy/TeamRetouchBrand';
 import { LegacyDialogProvider } from './legacy/legacy-dialog';
+import { useEscapeLayer } from './legacy/legacy-layer';
 import type { TeamRetouchStep } from './legacy/TeamRetouchSteps';
 import { notify, rpc, type ComponentContext } from './sdk';
 import { hydrateLegacyWorkspace, legacyApi, teamProjectRpc } from './legacy/legacy-api';
@@ -41,6 +42,7 @@ const TeamHistoryLoadSurface = ({ initialLoading, loadError, entriesLoaded, entr
 };
 
 const TeamSettingsDialog = ({ state, patch, retry, close, notice }: { state: TeamSettingsState; patch: ReturnType<typeof createTeamSettingsController>['patch']; retry: () => void; close: () => void; notice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void }) => {
+  useEscapeLayer(true, close, !state.loading);
   return createPortal(<div className="pf-modal-backdrop fixed inset-0 z-[850] flex items-center justify-center p-4"><section role="dialog" aria-modal="true" aria-label="团片协作设置" className="team-modal pf-modal flex max-h-[90vh] w-full max-w-4xl flex-col overflow-hidden"><header className="team-toolbar pf-toolbar flex min-h-14 items-center gap-3 px-5"><span className="pf-icon-tile p-2"><Settings size={18}/></span><div><h2 className="text-sm font-bold text-slate-900">团片协作设置</h2><p className="mt-0.5 text-[11px] text-slate-500">处理偏好与团片协作专属识别环境</p></div><button className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100" onClick={close} aria-label="关闭设置"><X size={18}/></button></header><div className="min-h-0 flex-1 space-y-5 overflow-y-auto bg-slate-50 p-5">
     {state.settings && state.loaded ? <TeamSettingsContent value={state.settings} patch={patch} notice={notice}/> : <div className="team-card pf-card flex min-h-48 flex-col items-center justify-center gap-3 p-6 text-center"><Loader2 size={18} className={state.loading ? 'animate-spin text-blue-600' : 'text-slate-400'}/><p className="text-sm font-bold text-slate-700">{state.loading ? '正在读取团片设置…' : '无法读取团片设置'}</p>{state.error && <p role="alert" className="text-xs text-red-600">{state.error}</p>}{!state.loading && <button type="button" className="dialog-secondary" onClick={retry}>重试</button>}</div>}
   </div></section></div>, document.body);
@@ -136,6 +138,7 @@ const App = () => {
   }, [entriesLoaded, context?.projectId, loadEntries]);
   useEffect(() => {
     let mounted = true;
+    const loadGuard = loadGuardRef.current;
     const stopSettings = settingsController.subscribe(value => { if (mounted) setSettingsState(value); });
     const acceptContext = (nextContext: ComponentContext) => {
       if (!mounted) return;
@@ -156,7 +159,7 @@ const App = () => {
     const stopContext = window.photoFlowComponent.onContextChange(acceptContext);
     const stopActivate = window.photoFlowComponent.onActivate(() => { if (mounted) { setComponentActive(true); void settingsController.refresh(); if (activationRefreshGateRef.current.activate() && !loadCoordinatorRef.current?.isLoading() && contextRef.current) void loadEntries(contextRef.current, { force: true }); } });
     const stopDeactivate = window.photoFlowComponent.onDeactivate(() => { if (mounted) { activationRefreshGateRef.current.deactivate(); setComponentActive(false); } });
-    return () => { mounted = false; settingsController.invalidate(); loadGuardRef.current.invalidate(); stopSettings(); stopTheme(); stopContext(); stopActivate(); stopDeactivate(); };
+    return () => { mounted = false; settingsController.invalidate(); loadGuard.invalidate(); stopSettings(); stopTheme(); stopContext(); stopActivate(); stopDeactivate(); };
   }, [loadEntries, settingsController]);
   useEffect(() => {
     const projectId = String(context?.projectId || '');

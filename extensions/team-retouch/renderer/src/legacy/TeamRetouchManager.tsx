@@ -1,4 +1,3 @@
-// @ts-nocheck -- source-faithful migration from fef15e4^; RPC types are enforced by legacy-api.ts
 import { legacyApi } from './legacy-api';
 import { readableLegacyMediaError } from './legacy-media-preview-model';
 import { legacyAdvancedStatusPresentation } from './legacy-advanced-status-model';
@@ -118,7 +117,7 @@ const normalizedPathKey = (value: string) => value.replace(/\\/g, '/').replace(/
 const workspacePhotoForEntry = (photos: TeamProjectPhoto[], entry: ProjectFileEntry) => {
   const relativeKey = normalizedPathKey(entry.relativePath);
   const absoluteKey = normalizedPathKey(entry.path);
-  return photos.find(photo => normalizedPathKey(photo.relativePath) === relativeKey || normalizedPathKey(photo.sourcePath) === absoluteKey);
+  return photos.find(photo => normalizedPathKey(photo.relativePath) === relativeKey || normalizedPathKey(photo.sourcePath || '') === absoluteKey);
 };
 const bundleFromWorkspacePhoto = (photo: TeamProjectPhoto): TeamPatchBundle => ({
   success: true,
@@ -372,7 +371,7 @@ const taskIdentityNames = (task: TeamPatchTask, photoId: string, baseVersionId: 
   return [...new Set(names)];
 };
 
-type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange'> & {
+type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange' | 'onOpenSettings'> & {
   entry: ProjectFileEntry;
   identityState: IdentityState;
   refreshToken: number;
@@ -426,10 +425,11 @@ const TeamRetouchPhotoCard = ({ entry, project, cacheConfig, componentActive = t
     } finally { if (photoLoadTokenRef.current.isCurrent(token)) setLoading(false); }
   };
   useEffect(() => {
+    const photoLoadToken = photoLoadTokenRef.current;
     if (initialPhoto) { setBundle(bundleFromWorkspacePhoto(initialPhoto)); setLoading(false); setLoadError(''); }
     if (!previewEnabled) return;
     void load();
-    return () => photoLoadTokenRef.current.invalidate();
+    return () => photoLoadToken.invalidate();
   }, [project.id, entry.path, entry.relativePath, entry.updatedAt, initialPhoto?.photoId, initialPhoto?.baseVersionId, identityState.revision, refreshToken, previewEnabled]);
 
   const baseVersion = useMemo<MediaVersion | undefined>(() => bundle.versions.find(version => version.id === bundle.photo?.currentVersionId) || bundle.versions.find(version => version.isCurrent) || bundle.versions.at(-1), [bundle.versions, bundle.photo?.currentVersionId]);
@@ -825,7 +825,7 @@ const TeamRetouchWorkspace = ({ entries, historyIssue, onRetryHistory, workspace
       const presentation = batchTaskVisibleRef.current ? 'visible' : 'none';
       if (!result.success) { if (shouldEmitTerminalToast({ presentation, outcome: 'failed' })) onNotice(`识别图片失败：${result.error || '未知错误'}`, 'error'); return; }
       await identifyAndSync();
-      if (shouldEmitTerminalToast({ presentation, outcome: 'completed' })) onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
+      if (shouldEmitTerminalToast({ presentation, outcome: 'completed' })) onNotice(`识别完成：${(result.results as BatchResult[]).filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
     } catch (error) {
       const presentation = batchTaskVisibleRef.current ? 'visible' : 'none';
       if (shouldEmitTerminalToast({ presentation, outcome: 'failed' })) onNotice(`识别图片失败：${error instanceof Error ? error.message : String(error)}`, 'error');

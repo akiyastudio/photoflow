@@ -120,6 +120,7 @@
     "test:archive-service": "node scripts/test-archive-service.cjs",
     "test:components": "npm run test:component-visual-contract && node scripts/test-component-catalog.cjs && node scripts/test-components.cjs && node scripts/test-component-development.cjs && node scripts/test-component-status-refresh-policy.cjs && node scripts/test-component-install-adoption.cjs && node scripts/test-component-host.cjs && node scripts/test-component-service.cjs && npm run test:component-package-layout",
     "test:component-development": "node scripts/test-component-development.cjs",
+    "test:component-transactions": "node scripts/test-component-transactions.cjs && node scripts/test-component-cleanup.cjs && node scripts/test-component-archive-parity.cjs",
     "test:component-catalog": "node scripts/test-component-catalog.cjs",
     "test:component-host": "node scripts/test-component-host.cjs && node scripts/test-component-release-blockers.cjs && node scripts/test-component-inspiration-binding.cjs && node scripts/test-component-inspiration-capabilities.cjs && node scripts/test-component-settings-form-contract.cjs && node scripts/test-component-declarative-settings-host.cjs && node scripts/test-component-settings-lease.cjs && node scripts/test-component-examples.cjs",
     "test:component-visual-contract": "node scripts/test-component-visual-contract.cjs",

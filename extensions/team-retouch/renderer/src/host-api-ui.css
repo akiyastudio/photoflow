@@ -94,6 +94,9 @@ html.dark {
 .pf-toolbar { border-bottom: 1px solid var(--pf-border-subtle); background: var(--pf-surface); color: var(--pf-text); }
 .pf-modal-backdrop { background: var(--pf-overlay); }
 .pf-modal { border: 1px solid var(--pf-border); border-radius: var(--pf-radius-lg); background: var(--pf-elevated); color: var(--pf-text); box-shadow: var(--pf-shadow-lg); }
+.pf-dialog-title { color: var(--pf-text-strong); }
+.pf-dialog-message { color: var(--pf-text); }
+.pf-dialog-detail { background: var(--pf-subtle); color: var(--pf-muted); }
 .pf-button { min-height: var(--pf-control-md); border-radius: var(--pf-radius-sm); border: 1px solid var(--pf-border); background: var(--pf-surface); color: var(--pf-text); padding: .55rem .9rem; font-size: .875rem; font-weight: 700; transition: background .15s, color .15s; cursor: pointer; }
 .pf-button:hover:not(:disabled) { background: var(--pf-subtle); }
 .pf-button-primary { border-color: var(--pf-primary); background: var(--pf-primary); color: #fff; }

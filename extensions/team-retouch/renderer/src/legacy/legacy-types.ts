@@ -1,14 +1,15 @@
 export type LegacyJson = Record<string, any>;
+export type CropBox = { x: number; y: number; width: number; height: number };
 export type AppConfig = LegacyJson & { mediaCache: { directory: string; maxSizeGB: number } };
 export type ComponentStatus = LegacyJson;
-export type MediaVersion = LegacyJson;
+export type MediaVersion = LegacyJson & { id: string; versionName: string; filePath?: string; isCurrent?: boolean };
 export type ProjectFileEntry = LegacyJson & { name: string; path: string; relativePath: string; kind?: string };
-export type TeamIdentity = LegacyJson;
-export type TeamIdentityWorkspace = LegacyJson;
-export type TeamPatchBundle = LegacyJson;
-export type TeamPatchTask = LegacyJson;
-export type TeamPersonAssignment = LegacyJson;
-export type TeamProjectPhoto = {
+export type TeamIdentity = LegacyJson & { id: string; name: string; color: string };
+export type TeamIdentitySimilarity = { leftKey: string; rightKey: string; score: number; evidence?: string };
+export type TeamPatchMember = LegacyJson & { personIndex: number; bbox: CropBox };
+export type TeamPatchTask = LegacyJson & { id: string; crop: CropBox; members: TeamPatchMember[]; patchPath: string; status?: string; editedPatchPath?: string; mergedVersionId?: string };
+export type TeamPersonAssignment = LegacyJson & { photoId: string; baseVersionId: string; personIndex: number; identityId?: string; identityConfirmed?: boolean; source?: string; confidence?: number; completed?: boolean; completionKind?: string; editedPatchPath?: string; returnMissing?: boolean };
+export type TeamProjectPhoto = LegacyJson & {
   photoId: string;
   baseVersionId: string;
   displayName: string;
@@ -22,9 +23,11 @@ export type TeamProjectPhoto = {
   noRetouchOutputSupported?: boolean;
   noRetouchOutputError?: string;
 };
-export type TeamPatchReturnBatchResult = LegacyJson;
-export type TeamPatchReturnMatch = LegacyJson;
-export type TeamWorkflowGenerationProgress = LegacyJson;
+export type TeamIdentityWorkspace = LegacyJson & { success?: boolean; error?: string; authoritativeGeneration?: unknown; photos: TeamProjectPhoto[]; identities: TeamIdentity[]; assignments: TeamPersonAssignment[]; similarities?: TeamIdentitySimilarity[]; workflowSettings?: { preferredIdentityOrder?: string[]; preferredIdentityId?: string; sameWeekIdentityIds?: string[] }; workflowAvailableKeys?: string[]; workflowAvailableSubjectKeys?: string[]; workflowNode?: { id: string } };
+export type TeamPatchBundle = LegacyJson & { success?: boolean; error?: string; photo?: LegacyJson; versions: MediaVersion[]; tasks: TeamPatchTask[] };
+export type TeamPatchReturnMatch = LegacyJson & { returnId: string; accepted?: boolean; alternatives?: TeamPatchReturnMatch[]; score: number; evidence?: string };
+export type TeamPatchReturnBatchResult = LegacyJson & { success?: boolean; error?: string; reviewSessionId?: string; matches: TeamPatchReturnMatch[] };
+export type TeamWorkflowGenerationProgress = LegacyJson & { projectId: string; operationId: string; state: 'idle' | 'running' | 'awaiting-confirmation' | 'cancelling' | 'completed' | 'failed' | 'cancelled'; phase: string; progress: number; message: string; completedFiles: number; totalFiles: number };
 export type ThumbnailState = 'PENDING' | 'READY' | 'FAILED' | 'MISSING';
-export type ProgressFolder = LegacyJson;
+export type ProgressFolder = LegacyJson & { id: string; mediaKind: string; nodeRole: string; versionKey: string; folderMissing?: boolean; missing?: boolean; relationKind?: string; contentRef?: LegacyJson };
 export type WorkspaceProject = LegacyJson & { id: string; name: string; status: string; path: string };

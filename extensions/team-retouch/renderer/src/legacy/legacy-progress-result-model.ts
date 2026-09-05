@@ -1,8 +1,10 @@
 type Json = Record<string, any>;
+import type { ProgressFolder } from './legacy-types';
+type ProgressResult = Json & { success?: boolean; error?: string; progressFolders: ProgressFolder[]; graphEdges: Json[] };
 
-export const normalizeLegacyProgressResult = (value: Json | undefined) => ({
+export const normalizeLegacyProgressResult = (value: Json | undefined): ProgressResult => ({
   ...(value || {}),
-  progressFolders: Array.isArray(value?.progressFolders) ? value.progressFolders : [],
+  progressFolders: Array.isArray(value?.progressFolders) ? value.progressFolders as ProgressFolder[] : [],
   graphEdges: Array.isArray(value?.graphEdges) ? value.graphEdges : [],
 });
 

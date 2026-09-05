@@ -5,12 +5,32 @@ const { componentDataRoot, createComponentLifecycleService } = require('../servi
 const { createComponentTransactionService, nodeIdentity: componentPathIdentity } = require('../services/component-transaction-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
-const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, componentTreeIdentityDigest, extractComponentArchive, finalizeComponentCleanupProof, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
+const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentCleanupReceipt, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 const { validateComponentPackageInspection } = require('../component-registry.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 const relativePathEscapes = (pathApi, relative) => pathApi.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${pathApi.sep}`);
+const componentTemporaryCleanupTargets = ({ path, tempRoot, installRoot, receipts }) => {
+  const seen = new Set();
+  const targets = [];
+  for (const receipt of receipts || []) {
+    if (receipt?.manualRecovery) continue;
+    validateComponentCleanupReceipt(receipt, { disposable: true });
+    const parent = path.dirname(receipt.path);
+    const name = path.basename(receipt.path);
+    const packageStage = parent === path.resolve(tempRoot) && /^photoflow-component-package-[a-z0-9][a-z0-9._-]{0,79}-[a-f0-9-]{36}$/.test(name);
+    const packageSnapshot = parent === path.resolve(tempRoot) && /^photoflow-component-package-[a-z0-9][a-z0-9._-]{0,79}-[a-f0-9-]{36}\.zip$/.test(name);
+    const installStage = parent === path.resolve(installRoot) && /^\.[a-z0-9][a-z0-9._-]{0,79}-install-\d+-\d+-[a-f0-9-]{36}$/.test(name);
+    if (receipt.kind === 'directory' ? !packageStage && !installStage : !packageSnapshot) throw new Error('自动清理只允许程序创建的组件暂存文件');
+    if (seen.has(receipt.path)) continue;
+    seen.add(receipt.path);
+    const target = { path: receipt.path, kind: receipt.kind, nodeIdentity: receipt.nodeIdentity };
+    if (receipt.kind === 'file') Object.assign(target, { size: receipt.size, sha256: receipt.sha256, mode: receipt.mode });
+    targets.push(target);
+  }
+  return targets;
+};
 const createDurableCleanupAdmission = ({ start, flush, worker, receipts }) => {
   let state = 'pending';
   const completion = start(async task => { if (state !== 'admitted') throw Object.assign(new Error('组件清理尚未完成持久 admission'), { cleanupPendingReceipts: receipts }); return worker(task); });
@@ -381,99 +401,6 @@ const registerSystemIpc = context => {
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
   const lifecycleCoordinator = processSupervisor?.lifecycleCoordinator;
   const componentCleanupPublicationService = filePublicationService;
-  const batchesByCleanupBudget = (items, measure, maxItems) => { const batches = []; let batch = []; let bytes = 0; for (const item of items) { const itemBytes = measure(item); if (itemBytes > 400 * 1024) throw new Error('单个组件清理路径超过原生清单预算'); if (batch.length && (batch.length >= maxItems || bytes + itemBytes > 400 * 1024)) { batches.push(batch); batch = []; bytes = 0; } batch.push(item); bytes += itemBytes; } if (batch.length) batches.push(batch); return batches; };
-  const captureNativeComponentCleanupProof = async ({ isolatedPath, proof }) => {
-    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
-    if (proof.kind === 'file') { const inspected = await componentCleanupPublicationService.inspectPath(isolatedPath); if (!inspected?.success || !inspected.identity) throw new Error('原生文件身份检查不完整'); return { rootIdentity: inspected.identity }; }
-    const targets = [isolatedPath, ...proof.entries.map(entry => path.join(isolatedPath, ...entry.path.split('/')))]; const identities = new Map();
-    for (const batch of batchesByCleanupBudget(targets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) { const results = await componentCleanupPublicationService.inspectPathsBatch(batch); if (results.length !== batch.length || results.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整'); batch.forEach((target, index) => identities.set(target, results[index].identity)); }
-    return { rootIdentity: identities.get(isolatedPath), entries: proof.entries.map(entry => ({ path: entry.path, identity: identities.get(path.join(isolatedPath, ...entry.path.split('/'))) })) };
-  };
-  const captureComponentCleanupSidecars = async items => Promise.all(items.map(async item => {
-    const expected = Buffer.from(item.expectedContent); const expectedSha256 = crypto.createHash('sha256').update(expected).digest('hex');
-    const handle = await fs.promises.open(item.path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    try { const stat = await handle.stat(); const native = await componentCleanupPublicationService.inspectPath(item.path); const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk); const linked = await fs.promises.lstat(item.path); if (!native?.success || !native.identity || stat.size !== expected.length || hash.digest('hex') !== expectedSha256 || linked.dev !== stat.dev || linked.ino !== stat.ino) throw new Error('组件清理 sidecar prepared identity 捕获失败'); return { path: item.path, role: item.role, size: expected.length, sha256: expectedSha256, nativeIdentity: native.identity }; }
-    finally { await handle.close().catch(() => undefined); }
-  }));
-  const verifyComponentCleanupSidecar = async ({ path: sidecarPath, size, sha256, nativeIdentity }) => {
-    const handle = await fs.promises.open(sidecarPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    try { const before = await handle.stat(); const native = await componentCleanupPublicationService.inspectPath(sidecarPath); const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk); const after = await handle.stat(); const linked = await fs.promises.lstat(sidecarPath); if (!native?.success || native.identity !== nativeIdentity || before.size !== size || hash.digest('hex') !== sha256 || before.dev !== after.dev || before.ino !== after.ino || linked.dev !== after.dev || linked.ino !== after.ino) throw new Error('组件清理 sidecar preflight identity 不匹配'); return true; }
-    finally { await handle.close().catch(() => undefined); }
-  };
-  const deleteComponentCleanupSidecar = async ({ path: sidecarPath, size, sha256, nativeIdentity }) => {
-    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
-    const handle = await fs.promises.open(sidecarPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    try {
-      const stat = await handle.stat(); if (!stat.isFile() || stat.size !== size) throw new Error('组件清理 sidecar 大小与 immutable proof 不一致');
-      const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
-      const linked = await fs.promises.lstat(sidecarPath); const held = await handle.stat();
-      if (linked.isSymbolicLink() || linked.dev !== held.dev || linked.ino !== held.ino || linked.size !== held.size || hash.digest('hex') !== sha256) throw new Error('组件清理 sidecar 与 immutable proof 不一致');
-      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: sidecarPath, sha256, size, identity: nativeIdentity });
-      if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw new Error('组件清理 sidecar 对象身份绑定删除未完全提交');
-    } finally { await handle.close().catch(() => undefined); }
-  };
-  const deleteBoundComponentFile = async ({ path: filePath, nodeIdentity, size, mtimeMs, ctimeMs, sha256 }) => {
-    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
-    const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-    try {
-      const before = await handle.stat(); const hash = crypto.createHash('sha256');
-      for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
-      const native = await componentCleanupPublicationService.inspectPath(filePath);
-      const after = await handle.stat(); const linked = await fs.promises.lstat(filePath);
-      const expectedNode = nodeIdentity; const beforeNode = directoryNodeIdentity(before); const afterNode = directoryNodeIdentity(after); const linkedNode = directoryNodeIdentity(linked);
-      if (!before.isFile() || linked.isSymbolicLink() || !sameDirectoryNode(beforeNode, expectedNode) || !sameDirectoryNode(afterNode, expectedNode) || !sameDirectoryNode(linkedNode, expectedNode) || after.size !== size || linked.size !== size || after.mtimeMs !== mtimeMs || after.ctimeMs !== ctimeMs || linked.mtimeMs !== mtimeMs || linked.ctimeMs !== ctimeMs || hash.digest('hex') !== sha256 || !native?.success || !native.identity) throw new Error('组件事务日志对象身份或内容已变化');
-      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: filePath, sha256, size, identity: native.identity });
-      if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw Object.assign(new Error('组件事务日志对象身份绑定删除未完全提交'), { outcomeUnknown: Boolean(deleted?.outcomeUnknown) });
-    } finally { await handle.close().catch(() => undefined); }
-  };
-  const deleteBoundComponentDirectory = async ({ path: directoryPath, nodeIdentity }) => {
-    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定目录删除服务不可用');
-    const stat = await fs.promises.lstat(directoryPath);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || !sameDirectoryNode(directoryNodeIdentity(stat), nodeIdentity)) throw new Error('组件事务目录身份已变化');
-    const volumeRoot = path.parse(directoryPath).root; const chainPaths = [];
-    for (let current = path.dirname(directoryPath); ; current = path.dirname(current)) { chainPaths.unshift(current); if (current === volumeRoot) break; }
-    const inspected = await componentCleanupPublicationService.inspectPathsBatch([...chainPaths, directoryPath]);
-    if (inspected.length !== chainPaths.length + 1 || inspected.some(item => !item?.success || !item.identity)) throw new Error('组件事务目录 native identity 检查不完整');
-    const finalStat = await fs.promises.lstat(directoryPath);
-    if (!finalStat.isDirectory() || finalStat.isSymbolicLink() || !sameDirectoryNode(directoryNodeIdentity(finalStat), nodeIdentity)) throw new Error('组件事务目录在 native identity 检查后被替换');
-    const result = await componentCleanupPublicationService.deleteDirectoriesBatch([{ path: directoryPath, rootPath: volumeRoot, parentChain: chainPaths.map((candidate, index) => ({ path: candidate, identity: inspected[index].identity })), identity: inspected.at(-1).identity }]);
-    if (!result?.[0]?.success || result[0].deleted !== true || result[0].outcomeUnknown) throw Object.assign(new Error('组件事务目录对象身份绑定删除未完全提交'), { outcomeUnknown: Boolean(result?.[0]?.outcomeUnknown) });
-  };
-  const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath, proof }) => {
-    if (!componentCleanupPublicationService.nativeAvailable()) throw new Error('对象身份绑定删除服务不可用');
-    if (receipt.kind === 'file') {
-      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: isolatedPath, sha256: proof.sha256, size: proof.size, identity: proof.native.rootIdentity });
-      if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw Object.assign(new Error('原生文件清理未完全提交'), { outcomeUnknown: Boolean(deleted?.outcomeUnknown) });
-      return;
-    }
-    const tree = await captureComponentTreeIdentity(isolatedPath);
-    const entries = [{ path: '', kind: 'directory' }, ...tree];
-    const absoluteFor = entry => entry.path ? path.join(isolatedPath, ...entry.path.split('/')) : isolatedPath;
-    const volumeRoot = path.parse(isolatedPath).root;
-    const anchorPaths = []; for (let current = isolatedPath; ; current = path.dirname(current)) { anchorPaths.unshift(current); if (current === volumeRoot) break; }
-    const nativeEntries = new Map(proof.native.entries.map(entry => [entry.path, entry.identity]));
-    const identityByPath = new Map([[isolatedPath, proof.native.rootIdentity], ...tree.map(entry => [absoluteFor(entry), nativeEntries.get(entry.path)])]);
-    const inspectTargets = anchorPaths.filter(target => target !== isolatedPath);
-    for (const batchPaths of batchesByCleanupBudget(inspectTargets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) {
-      const inspected = await componentCleanupPublicationService.inspectPathsBatch(batchPaths);
-      if (inspected.length !== batchPaths.length || inspected.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整');
-      batchPaths.forEach((target, index) => identityByPath.set(target, inspected[index].identity));
-    }
-    const parentChainFor = target => { const chain = []; for (let current = path.dirname(target); ; current = path.dirname(current)) { chain.unshift({ path: current, identity: identityByPath.get(current) }); if (current === volumeRoot) break; } return chain; };
-    const files = tree.filter(entry => entry.kind === 'file').map(entry => { const target = absoluteFor(entry); return { path: target, rootPath: volumeRoot, parentChain: parentChainFor(target), identity: identityByPath.get(target), size: entry.size, sha256: entry.sha256 }; });
-    for (const batch of batchesByCleanupBudget(files, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
-      const results = await componentCleanupPublicationService.compareDeleteFilesBatch(batch);
-      if (results.some(item => !item?.success || item.deleted !== true || item.outcomeUnknown)) throw Object.assign(new Error('原生批量文件清理未完全提交'), { outcomeUnknown: results.some(item => item?.outcomeUnknown) });
-    }
-    const directories = entries.filter(entry => entry.kind === 'directory').sort((a, b) => b.path.split('/').length - a.path.split('/').length);
-    for (const depth of [...new Set(directories.map(entry => entry.path ? entry.path.split('/').length : 0))].sort((a, b) => b - a)) {
-      const layer = directories.filter(entry => (entry.path ? entry.path.split('/').length : 0) === depth).map(entry => { const target = absoluteFor(entry); return { path: target, rootPath: volumeRoot, parentChain: parentChainFor(target), identity: identityByPath.get(target) }; });
-      for (const batch of batchesByCleanupBudget(layer, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
-        const results = await componentCleanupPublicationService.deleteDirectoriesBatch(batch);
-        if (results.some(item => !item?.success || item.deleted !== true || item.outcomeUnknown)) throw Object.assign(new Error('原生批量目录清理未完全提交'), { outcomeUnknown: results.some(item => item?.outcomeUnknown) });
-      }
-    }
-  };
   const mutateConfig = configMutationService.mutate;
   ipcMain.handle('domain-health-status', () => ({
     success: true,
@@ -666,25 +593,30 @@ const registerSystemIpc = context => {
   }, { autoRestart: true });
 
   const queueSystemFilesystemCleanup = async (paths, title, restartTask = null) => {
-    const allowedRoots = [app.getPath('temp'), app.getPath('userData'), pluginService.installRoot].filter(Boolean).map(candidate => path.resolve(candidate));
-    const seenTargets = new Set();
-    const targets = (paths || []).filter(candidate => candidate && typeof candidate === 'object' && !candidate.manualRecovery && candidate.nodeIdentity && ['file', 'directory'].includes(candidate.kind)).map(candidate => ({ ...candidate, path: path.resolve(candidate.path) })).filter(target => !seenTargets.has(target.path) && allowedRoots.some(root => {
-      const relative = path.relative(root, target.path);
-      return relative && !relativePathEscapes(path, relative);
-    }) && (seenTargets.add(target.path) || true));
+    const allowedRoots = [app.getPath('temp'), pluginService.installRoot].map(candidate => path.resolve(candidate));
+    const targets = componentTemporaryCleanupTargets({ path, tempRoot: app.getPath('temp'), installRoot: pluginService.installRoot, receipts: paths });
     if (!targets.length) return { admitted: false, reason: 'no-valid-receipts' };
-    const execute = async (task, sourceTask = restartTask) => {
+    const execute = async task => {
       task?.report(10, title);
       const failures = [];
-      const dataCleanupComplete = sourceTask?.metadata?.dataCleanupComplete === true;
-      if (!dataCleanupComplete) {
-        for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared: async preparedReceipt => { Object.assign(target, preparedReceipt); task?.report(20, '组件清理 prepared receipt 已生成', { targets, cleanupPrepared: true }); return backgroundTasks?.flush?.() === true; } }); }
-        catch (error) { const updated = error.cleanupPendingReceipts?.[0]; if (updated) Object.assign(target, updated); task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets }); failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
-        if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
-        task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
-        if (backgroundTasks?.flush?.() !== true) throw Object.assign(new Error('无法同步持久化组件清理完成前状态'), { cleanupPendingReceipts: targets });
+      for (const target of targets) {
+        try {
+          const root = allowedRoots.find(candidate => {
+            const relative = path.relative(candidate, target.path);
+            return relative && !relativePathEscapes(path, relative);
+          });
+          // These uniquely named extraction/copy stages are disposable. Persist
+          // their root ownership, keeping large file lists out of task history.
+          // Runtime and user data never enter this queue.
+          await cleanupOwnedComponentPath(target, { root, allowMissing: true, allowPartial: true, disposable: true });
+        } catch (error) {
+          failures.push({ target, error });
+          writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) });
+        }
       }
-      for (const target of targets) await finalizeComponentCleanupProof(target, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar, verifySidecar: verifyComponentCleanupSidecar });
+      if (failures.length) throw Object.assign(new Error('仍有 ' + failures.length + ' 个系统暂存路径等待清理'), {
+        cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target),
+      });
       return { removedCount: targets.length };
     };
     if (!backgroundTasks?.run) {
@@ -694,8 +626,8 @@ const registerSystemIpc = context => {
     const dedupeKey = `system-filesystem-cleanup:${crypto.createHash('sha256').update(JSON.stringify(targets.map(target => ({ path: target.path, kind: target.kind, nodeIdentity: target.nodeIdentity })))).digest('hex').slice(0, 24)}`;
     let retryFactory;
     const admit = (sourceTask = restartTask, { reuseId = false } = {}) => {
-      const taskMetadata = { targets, title, ...(sourceTask?.metadata?.dataCleanupComplete === true ? { dataCleanupComplete: true } : {}) };
-      return createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(reuseId && sourceTask?.id ? { id: sourceTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata }, worker, retryFactory), flush: () => backgroundTasks.flush?.(), worker: task => execute(task, sourceTask), receipts: targets });
+      const taskMetadata = { targets, title };
+      return createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(reuseId && sourceTask?.id ? { id: sourceTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata }, worker, retryFactory), flush: () => backgroundTasks.flush?.(), worker: task => execute(task), receipts: targets });
     };
     retryFactory = failedTask => awaitDurableCleanupRestart(Promise.resolve(admit(failedTask)));
     const admission = admit(restartTask, { reuseId: Boolean(restartTask?.id) });
@@ -761,21 +693,22 @@ const registerSystemIpc = context => {
     }
     return steps;
   };
+  const commitComponentHostState = async componentId => {
+    await componentServiceManager?.stop?.(componentId, 'component-transaction-commit');
+    await configMutationService.adoptLegacySettings();
+  };
   const componentTransactions = createComponentTransactionService({
     fs, path, crypto, installRoot: pluginService.installRoot, preparationRoot: app.getPath('temp'), captureTreeIdentity: captureComponentTreeIdentity, verifyTreeIdentity: verifyComponentTreeIdentity,
-    cleanupOwnedPath: (receipt, { persistPrepared }) => cleanupOwnedComponentPath(receipt, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared }),
-    finalizeOwnedPath: receipt => finalizeComponentCleanupProof(receipt, { dataCleanupCompletePersisted: true, deleteSidecar: deleteComponentCleanupSidecar, verifySidecar: verifyComponentCleanupSidecar }),
-    deleteOwnedFile: deleteBoundComponentFile,
-    deleteOwnedDirectory: deleteBoundComponentDirectory,
-    publishNoReplace: (source, target) => componentCleanupPublicationService.moveNoReplace(source, target),
+    cleanupOwnedPath: cleanupOwnedComponentPath,
     getComponentEnabled: componentId => pluginService.list().find(item => item.id === componentId)?.enabled !== false,
     setComponentEnabled: (componentId, enabled) => pluginService.setComponentEnabled(componentId, enabled),
     clearComponentEnabledState: componentId => pluginService.clearComponentEnabledState(componentId),
-    recoverInstallHostState: async componentId => { await componentServiceManager?.stop?.(componentId, 'component-transaction-recovery'); await configMutationService.adoptLegacySettings(); },
+    recoverInstallHostState: commitComponentHostState,
     cleanupProvider: componentCleanupSteps,
     onBlocked: (componentId, error) => lifecycleCoordinator?.blockPersistent?.(componentId, error),
     onUnblocked: componentId => lifecycleCoordinator?.unblockPersistent?.(componentId),
     onCorrupt: () => lifecycleCoordinator?.blockForCorruptTransaction?.(),
+    onWarning: error => writeLog('warn', 'Completed component transaction metadata cleanup deferred', { error: error.message || String(error) }),
   });
   lifecycleCoordinator?.beginStartupRecovery?.();
   const componentTransactionReady = componentTransactions.recover().catch(error => {
@@ -1107,6 +1040,8 @@ const registerSystemIpc = context => {
       const destination = path.join(container, 'runtime');
       stagingPath = path.join(installRoot, `.${componentId}-install-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
       assertInstallActive();
+      await fs.promises.mkdir(stagingPath);
+      stagingNodeIdentity = await readDirectoryNodeIdentity(fs, stagingPath, '组件发布暂存目录');
       await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
       stagingNodeIdentity = await readDirectoryNodeIdentity(fs, stagingPath, '组件发布暂存目录');
       componentTreeIdentity = await captureVerifiedComponentTreeIdentity(stagingPath, componentTreeIdentity);
@@ -1114,7 +1049,7 @@ const registerSystemIpc = context => {
       await assertDirectoryNodeIdentity(fs, installRoot, installLocation.rootIdentity, '组件安装根目录');
       await assertDirectoryNodeIdentity(fs, container, installLocation.containerIdentity, '组件容器');
       const packageCleanupPaths = [
-        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
+        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeIdentity: packageStageTreeIdentity } : null,
         packageSnapshotReceipt,
       ].filter(Boolean);
       const previous = pluginService.list().find(item => item.id === componentId);
@@ -1123,7 +1058,7 @@ const registerSystemIpc = context => {
         operationId: installOperationId, componentId, container, destination, stagingPath: transactionStagingPath, stagingIdentity: transactionStagingIdentity,
         stagingTreeIdentity: componentTreeIdentity, preparationCleanup: packageCleanupPaths, previousInstalled: Boolean(previous?.installed), previousEnabled: previous ? previous.enabled !== false : false, desiredEnabled: true,
         validatePublished: target => pluginService.verifyComponentDirectoryAsync(componentId, target, true),
-        commitHostState: async () => { await componentServiceManager?.stop?.(componentId, 'component-upgrade'); await configMutationService.adoptLegacySettings(); },
+        commitHostState: () => commitComponentHostState(componentId),
         onAdmitted: () => { stagingPath = ''; stagingNodeIdentity = null; packageCleanupAttempted = true; packageStagePath = ''; packageSnapshotPath = ''; },
       });
       invalidateComponentStatus();
@@ -1135,8 +1070,8 @@ const registerSystemIpc = context => {
       return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId || error?.transactionRecord?.operationId, cleanupPending: Boolean(error?.journal) || error?.cleanupPending === true || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
     } finally {
       const deferredCleanup = [
-        stagingPath && stagingNodeIdentity && componentTreeIdentity ? { path: stagingPath, kind: 'directory', nodeIdentity: stagingNodeIdentity, treeDigest: componentTreeIdentityDigest(componentTreeIdentity) } : null,
-        !packageCleanupAttempted && packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
+        stagingPath && stagingNodeIdentity ? { path: stagingPath, kind: 'directory', nodeIdentity: stagingNodeIdentity, treeIdentity: componentTreeIdentity } : null,
+        !packageCleanupAttempted && packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeIdentity: packageStageTreeIdentity } : null,
         !packageCleanupAttempted && packageSnapshotPath && packageSnapshotReceipt,
       ].filter(Boolean);
       if (deferredCleanup.length) await queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`).catch(cleanupError => writeLog('warn', 'Deferred component cleanup admission failed', { componentId, error: cleanupError.message || String(cleanupError) }));
@@ -2029,4 +1964,4 @@ const registerSystemIpc = context => {
   return { componentTransactionReady };
 };
 
-module.exports = { awaitDurableCleanupRestart, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { awaitDurableCleanupRestart, componentTemporaryCleanupTargets, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

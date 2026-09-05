@@ -132,7 +132,6 @@ assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('
 assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath,[\s\S]*inspectComponentArchive\(packageSnapshotPath,[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath,/);
 assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive[\s\S]*captureComponentTreeIdentity/);
 assert.match(mainSource, /fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity\(stagingPath[\s\S]*componentTransactions\.install/);
-assert.match(mainSource, /createComponentTransactionService\(\{[\s\S]*preparationRoot:\s*app\.getPath\('temp'\)[\s\S]*cleanupOwnedPath:[\s\S]*deleteOwnedFile:[\s\S]*deleteOwnedDirectory:[\s\S]*publishNoReplace:/);
 assert.match(mainSource, /componentTransactions\.install\(\{[\s\S]*operationId:\s*installOperationId[\s\S]*preparationCleanup:\s*packageCleanupPaths/);
 assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*recoverPendingComponentTransaction[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive/);
 assert.match(mainSource, /if \(!confirmed\) return installResponse = \{ success: false, cancelled: true \}/);

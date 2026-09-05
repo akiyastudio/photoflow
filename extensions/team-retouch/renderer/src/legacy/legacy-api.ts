@@ -3,6 +3,7 @@ import { expireLegacyMedia, scheduleLegacyMedia } from './legacy-media-scheduler
 import { createTeamRevisionCoordinator, retryOnceAfterRevisionConflict } from './legacy-revision-model.ts';
 import { createScopedPromiseCache } from './scoped-promise-cache.ts';
 import { assertTeamProjectPhotos } from './team-project-photo.ts';
+import type { TeamIdentity, TeamIdentityWorkspace, TeamPatchBundle, TeamPatchReturnBatchResult, TeamPatchTask, TeamPersonAssignment } from './legacy-types.ts';
 
 type Json = Record<string, any>;
 type MediaKind = 'original' | 'working' | 'returned' | 'review-return';
@@ -32,9 +33,9 @@ const hydrateTask = (task: Json, photoId: string, baseVersionId: string) => ({
   ...task,
   patchPath: mediaRef('working', photoId, baseVersionId, String(task.id || '')),
   ...(task.editedPatchPath || ['uploaded', 'merged'].includes(String(task.status || '')) ? { editedPatchPath: mediaRef('returned', photoId, baseVersionId, String(task.id || '')) } : {}),
-});
+}) as TeamPatchTask;
 export const resolveLegacyBundleBaseVersionId = (bundle: Json, registrationBaseVersionId = '') => String(registrationBaseVersionId || bundle.baseVersionId || bundle.tasks?.find((task: Json) => task.baseVersionId)?.baseVersionId || bundle.photo?.currentVersionId || bundle.versions?.find((version: Json) => version.isCurrent)?.id || bundle.versions?.[0]?.id || '');
-export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = '') => {
+export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = ''): TeamPatchBundle => {
   const photoId = String(bundle.photo?.id || bundle.photoId || '');
   const baseVersionId = resolveLegacyBundleBaseVersionId(bundle, registrationBaseVersionId);
   return {
@@ -44,8 +45,9 @@ export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = ''
     tasks: (bundle.tasks || []).map((task: Json) => hydrateTask(task, photoId || String(task.photoId || ''), String(task.baseVersionId || baseVersionId))),
   };
 };
-export const hydrateLegacyWorkspace = (workspace: Json) => {
-  const photos: Json[] = assertTeamProjectPhotos(workspace.photos || []).map((photo: Json) => {
+export const hydrateLegacyWorkspace = (workspace: Json): TeamIdentityWorkspace => {
+  const photos = assertTeamProjectPhotos(workspace.photos || []).map((value: Json) => {
+    const photo = value as TeamIdentityWorkspace['photos'][number];
     const reference = mediaRef('original', String(photo.photoId), String(photo.baseVersionId));
     const sourcePath = projectEntryPaths.get(normalizedRelativePath(String(photo.relativePath || ''))) || reference;
     mediaAliases.set(sourcePath, reference);
@@ -54,14 +56,15 @@ export const hydrateLegacyWorkspace = (workspace: Json) => {
   const photoByVersion = new Map(photos.map((photo: Json) => [`${String(photo.photoId)}\0${String(photo.baseVersionId)}`, photo]));
   const taskBySubject = new Map<string, Json>();
   for (const photo of photos) for (const task of photo.tasks || []) for (const member of task.members || []) taskBySubject.set(`${String(photo.photoId)}\0${String(photo.baseVersionId)}\0${Number(member.personIndex)}`, task);
-  const assignments = (workspace.assignments || []).map((assignment: Json) => {
+  const assignments = (Array.isArray(workspace.assignments) ? workspace.assignments : []).map((assignment: Json) => {
     const photo = photoByVersion.get(`${String(assignment.photoId)}\0${String(assignment.baseVersionId)}`);
     const task = photo ? taskBySubject.get(`${String(assignment.photoId)}\0${String(assignment.baseVersionId)}\0${Number(assignment.personIndex)}`) : undefined;
     return { ...assignment, ...(assignment.completed && assignment.completionKind === 'returned' && task ? { editedPatchPath: mediaRef('returned', String(assignment.photoId), String(assignment.baseVersionId), String(task.id), '', '', String(assignment.personIndex)) } : {}) };
-  });
-  return { ...workspace, photos, assignments };
+  }) as TeamPersonAssignment[];
+  const identities = (Array.isArray(workspace.identities) ? workspace.identities : []) as TeamIdentity[];
+  return { ...workspace, photos, identities, assignments };
 };
-const hydrateReviewResult = (result: Json) => {
+const hydrateReviewResult = (result: Json): TeamPatchReturnBatchResult => {
   const reviewSessionId = String(result.reviewSessionId || result.id || '');
   const matches = (result.matches || []).map((match: Json) => {
     const candidateRef = (candidate: Json) => ({ ...candidate, patchPath: candidate.taskId ? mediaRef('working', String(candidate.photoId || ''), String(candidate.baseVersionId || ''), String(candidate.taskId)) : undefined });
@@ -140,7 +143,7 @@ export const legacyApi = {
   exportTeamIdentityTasks: (request: Json) => ok('team.workflow.open-export.v1', request),
   selectTeamPatchReturns: () => ok('team.patch.select-returns.v1'),
   returnTeamWorkflowBatch: async (request: Json) => hydrateReviewResult(await durable('team.workflow.return-batch.v1', request)),
-  getTeamWorkflowReturnReview: async () => { const result = await ok('team.workflow.return-review.get.v1'); return { ...result, review: result.review ? hydrateReviewResult(result.review) : result.review }; },
+  getTeamWorkflowReturnReview: async (): Promise<Json & { success?: boolean; error?: string; review?: TeamPatchReturnBatchResult }> => { const result = await ok('team.workflow.return-review.get.v1'); return { ...result, review: result.review ? hydrateReviewResult(result.review) : result.review }; },
   discardTeamWorkflowReturnReview: (request: { reviewSessionId: string }) => ok('team.workflow.return-review.discard.v1', request),
   ignoreTeamWorkflowReturnReview: (request: { reviewSessionId: string; returnId: string }) => ok('team.workflow.return-review.ignore.v1', request),
   confirmTeamWorkflowReturn: (request: Json) => {
@@ -167,7 +170,7 @@ export const legacyApi = {
   onTeamPatchBatchProgress: (callback: (value: any) => void) => event('team.patch.detect-batch.progress.v1', callback),
   onTeamPatchReturnBatchProgress: (callback: (value: any) => void) => event('team.return.progress.v1', callback),
   onTeamWorkflowGenerationProgress: (callback: (value: any) => void) => event('team.workflow.progress.v1', callback),
-  getComponents: async () => { const state: Json = await ok('team.advanced.status.v1'); return { success: true, components: [componentStatusFromAdvancedPreflight(state)] }; },
+  getComponents: async (): Promise<{ success: boolean; error?: string; components: Json[] }> => { const state: Json = await ok('team.advanced.status.v1'); return { success: true, components: [componentStatusFromAdvancedPreflight(state)] }; },
   getContext: (): Promise<ComponentContext> => window.photoFlowComponent.getContext(),
   setProjectEntries: (entries: Json[]) => { projectEntryPaths.clear(); for (const entry of entries || []) if (entry.relativePath && entry.path) projectEntryPaths.set(normalizedRelativePath(String(entry.relativePath)), String(entry.path)); },
 };
