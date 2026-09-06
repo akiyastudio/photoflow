@@ -6,8 +6,11 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { assertComponentBuildReceipt, createStableManifest, verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release-staging.cjs');
 const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
+const { releaseOperationsRoot } = require('./project-output-paths.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-release-staging-test-'));
+const privateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-private-release-test-'));
+process.env.PHOTOFLOW_PRIVATE_ROOT = privateRoot;
 const git = args => { const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true }); assert.equal(result.status, 0, result.stderr); };
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 
@@ -22,9 +25,9 @@ const digest = value => crypto.createHash('sha256').update(value).digest('hex');
     assert.throws(() => releaseLock(replacedLock), /已被替换/);
     assert(fs.existsSync(replacedLock.lockPath), 'release must not delete another session lock');
     fs.rmSync(replacedLock.lockPath); fs.rmSync(`${replacedLock.lockPath}.owned`);
-    fs.writeFileSync(path.join(root, 'artifacts', 'release.lock'), JSON.stringify({ schemaVersion: 1, pid: 2147483647, host: os.hostname(), attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() }));
+    fs.writeFileSync(path.join(releaseOperationsRoot(root), 'release.lock'), JSON.stringify({ schemaVersion: 1, pid: 2147483647, host: os.hostname(), attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() }));
     const recovered = acquireReleaseLock(root);
-    assert(fs.readdirSync(path.join(root, 'artifacts')).some(name => name.startsWith('release.lock.stale-')), 'dead same-host lock must be retained and safely recovered');
+    assert(fs.readdirSync(releaseOperationsRoot(root)).some(name => name.startsWith('release.lock.stale-')), 'dead same-host lock must be retained and safely recovered');
     releaseLock(recovered);
     git(['init', '--quiet']);
     fs.writeFileSync(path.join(root, '.gitignore'), 'artifacts/\n');
@@ -37,7 +40,7 @@ const digest = value => crypto.createHash('sha256').update(value).digest('hex');
     const tree = spawnSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: root, encoding: 'utf8' }).stdout.trim();
     const componentIdentity = { id: 'component', version: '1.0.0', fileName: 'PhotoFlow-component-1.0.0-win32-x64.zip' };
     assert.throws(() => assertComponentBuildReceipt({ buildCommit: 'a'.repeat(40), archive: { fileName: componentIdentity.fileName }, component: { id: componentIdentity.id, version: componentIdentity.version } }, componentIdentity, commit), /固定 HEAD/);
-    const staging = path.join(root, 'artifacts', 'releases', commit, '1.0.0'); fs.mkdirSync(staging, { recursive: true });
+    const staging = path.join(root, 'artifacts', 'installers', 'releases', commit, '1.0.0'); fs.mkdirSync(staging, { recursive: true });
     const setupBytes = Buffer.from('setup'.repeat(16)); const componentBytes = Buffer.from('component'.repeat(16));
     fs.writeFileSync(path.join(staging, 'PhotoFlow Setup 1.0.0.exe'), setupBytes);
     fs.writeFileSync(path.join(staging, 'PhotoFlow-component-1.0.0-win32-x64.zip'), componentBytes);
@@ -65,5 +68,5 @@ const digest = value => crypto.createHash('sha256').update(value).digest('hex');
     fs.writeFileSync(evidence.manifestPath, '{}');
     assert.throws(() => assertStagedReleaseUnchanged(fenced), /替换或修改/);
     console.log('Stable release staging determinism and replacement tests passed.');
-  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); fs.rmSync(privateRoot, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

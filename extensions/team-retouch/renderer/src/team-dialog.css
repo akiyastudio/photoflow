@@ -1,0 +1,3 @@
+.pf-dialog-title { color: var(--pf-text-strong); }
+.pf-dialog-message { color: var(--pf-text); }
+.pf-dialog-detail { background: var(--pf-subtle); color: var(--pf-muted); }

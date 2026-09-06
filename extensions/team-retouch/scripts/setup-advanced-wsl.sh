@@ -36,28 +36,35 @@ install -m 0444 "$REVIEWED_LOCK_ROOT/checkpoints.sha256" "$RELEASE_LOCK_ROOT/che
 
 log "Creating PairDETR environment"
 if ! "$CONDA" run -n pairdetr python -c 'import sys' >/dev/null 2>&1; then
-    "$CONDA" create --yes --name pairdetr python=3.12 pip=25.3 wheel=0.45.1 setuptools=69.5.1
+    "$CONDA" create --yes --name pairdetr python=3.10 pip=25.3 wheel=0.45.1 setuptools=69.5.1
 fi
-"$CONDA" run -n pairdetr python -m pip install --require-hashes --no-deps -r "$REVIEWED_LOCK_ROOT/pairdetr-requirements.lock"
+"$CONDA" run -n pairdetr python -m pip install --require-hashes --no-deps --no-build-isolation -r "$REVIEWED_LOCK_ROOT/pairdetr-requirements.lock"
 checkout_commit https://github.com/mts-ai/pairdetr.git "$PAIRDETR_COMMIT" "$REPO_ROOT/pairdetr"
 mkdir -p "$CHECKPOINT_ROOT/pairdetr"
-"$CONDA" run -n pairdetr hf download MTSAIR/PairDETR --local-dir "$CHECKPOINT_ROOT/pairdetr"
+model_revision=$("$CONDA" run -n pairdetr python -c 'import json,sys; print(json.load(open(sys.argv[1]))["pairDetrModelRevision"])' "$SCRIPT_ROOT/../advanced/source-metadata.json")
+[[ "$model_revision" =~ ^[a-f0-9]{40}$ ]] || { printf 'Invalid PairDETR model revision\n' >&2; exit 1; }
+install -m 0444 "$SCRIPT_ROOT/../advanced/vendor/hf_utils.py" "$CHECKPOINT_ROOT/pairdetr/hf_utils.py"
+install -m 0444 "$SCRIPT_ROOT/../advanced/vendor/preprocessor_config.json" "$CHECKPOINT_ROOT/pairdetr/preprocessor_config.json"
+if ! (cd "$LAB_ROOT" && head -n 1 "$RELEASE_LOCK_ROOT/checkpoints.sha256" | sha256sum --check --strict >/dev/null 2>&1); then
+    curl --fail --location --retry 5 --output "$CHECKPOINT_ROOT/pairdetr/pytorch_model.bin" "https://huggingface.co/MTSAIR/PairDETR/resolve/$model_revision/pytorch_model.bin"
+fi
 test -s "$CHECKPOINT_ROOT/pairdetr/pytorch_model.bin"
 PYTHONPATH="$CHECKPOINT_ROOT/pairdetr" "$CONDA" run -n pairdetr python -c \
     'import torch; from hf_utils import PairDetr, forward; assert torch.cuda.is_available(); print("PAIRDETR_CUDA_OK", torch.cuda.get_device_name(0))'
 
 log "Creating SAM 2.1 environment"
 if ! "$CONDA" run -n sam2 python -c 'import sys' >/dev/null 2>&1; then
-    "$CONDA" create --yes --name sam2 python=3.12 pip=25.3 wheel=0.45.1 setuptools=69.5.1 numpy=1.26.4
+    "$CONDA" create --yes --name sam2 python=3.12 pip=25.3 wheel=0.45.1 setuptools=69.5.1
 fi
-"$CONDA" run -n sam2 python -m pip install --require-hashes --no-deps -r "$REVIEWED_LOCK_ROOT/sam2-requirements.lock"
+"$CONDA" run -n sam2 python -m pip install --require-hashes --no-deps --no-build-isolation -r "$REVIEWED_LOCK_ROOT/sam2-requirements.lock"
 checkout_commit https://github.com/facebookresearch/sam2.git "$SAM2_COMMIT" "$REPO_ROOT/sam2"
 "$CONDA" run -n sam2 env SAM2_BUILD_CUDA=0 python -m pip install \
     --no-deps --no-build-isolation --editable "$REPO_ROOT/sam2"
 mkdir -p "$CHECKPOINT_ROOT/sam2"
-curl --fail --location --retry 5 --continue-at - \
-    --output "$CHECKPOINT_ROOT/sam2/sam2.1_hiera_large.pt" \
-    https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+if ! (cd "$LAB_ROOT" && tail -n 1 "$RELEASE_LOCK_ROOT/checkpoints.sha256" | sha256sum --check --strict >/dev/null 2>&1); then
+    curl --fail --location --retry 5 --output "$CHECKPOINT_ROOT/sam2/sam2.1_hiera_large.pt" \
+        https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+fi
 test -s "$CHECKPOINT_ROOT/sam2/sam2.1_hiera_large.pt"
 (
     cd "$LAB_ROOT"

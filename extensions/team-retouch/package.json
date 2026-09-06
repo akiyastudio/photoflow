@@ -8,9 +8,14 @@
     "development": {
       "prepare": "prepare:dev",
       "runtime": {
-        "command": { "win32": ".venv/Scripts/python.exe", "default": ".venv/bin/python" },
+        "command": {
+          "win32": ".venv/Scripts/python.exe",
+          "default": ".venv/bin/python"
+        },
         "entry": "team_retouch.py",
-        "argsPrefix": ["-u"]
+        "argsPrefix": [
+          "-u"
+        ]
       },
       "files": {
         "team-retouch.exe": "team_retouch.py",
@@ -24,8 +29,12 @@
       }
     },
     "tests": {
-      "backup-restore": ["tests/test-team-retouch-host-backup-restore-e2e.cjs"],
-      "package-layout": ["tests/test-team-retouch-package-layout.cjs"]
+      "backup-restore": [
+        "tests/test-team-retouch-host-backup-restore-e2e.cjs"
+      ],
+      "package-layout": [
+        "tests/test-team-retouch-package-layout.cjs"
+      ]
     }
   },
   "scripts": {
@@ -38,11 +47,15 @@
     "test": "npm run setup:python && npm run typecheck && npm run lint && npm run build && npm run test:node && npm run test:python",
     "setup:python": "node scripts/setup-python.cjs --dev",
     "package": "npm run package:base",
-    "package:base": "node scripts/package-component.cjs --dev",
+    "package:base": "node scripts/package-base.cjs",
     "package:host": "node scripts/package-host.cjs",
     "package:advanced": "node scripts/build-advanced-package.cjs",
     "package:bundle": "node scripts/package-host.cjs",
-    "package:with-advanced": "node scripts/package-host.cjs"
+    "package:with-advanced": "node scripts/package-host.cjs",
+    "package:dev": "node scripts/package-component.cjs --dev",
+    "package:host:base": "node scripts/package-base.cjs",
+    "setup:release": "node scripts/setup-python.cjs",
+    "package:advanced:integration": "node scripts/package-advanced-integration.cjs"
   },
   "devDependencies": {
     "@eslint/js": "^8.57.1",

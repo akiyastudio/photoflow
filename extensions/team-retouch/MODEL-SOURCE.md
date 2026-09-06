@@ -18,7 +18,7 @@ fallback.
 Identity suggestions run locally and use three fixed model assets:
 
 - `face_detection_yunet_2023mar.onnx` from OpenCV Zoo's YuNet face detector.
-  OpenCV Zoo is Apache-2.0 licensed. Local SHA-256:
+  The YuNet model uses MIT; OpenCV Zoo's repository license is Apache-2.0. Local SHA-256:
   `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`.
 - `adaface_ir18_webface4m.onnx`, exported from the MIT-licensed AdaFace IR-18
   WebFace4M checkpoint. Local SHA-256:

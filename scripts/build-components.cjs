@@ -4,7 +4,11 @@ const { spawnSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
 const extensionRoot = path.join(root, 'extensions');
-const outputRoot = path.join(root, 'artifacts', 'installers');
+const variantIndex = process.argv.indexOf('--variant');
+const variant = variantIndex >= 0 ? String(process.argv[variantIndex + 1] || '') : '';
+if (variantIndex >= 0 && !['base', 'advanced'].includes(variant)) throw new Error('Component variant must be base or advanced');
+const packageScript = variant === 'base' ? 'package:host:base' : 'package:host';
+const outputRoot = path.join(root, 'artifacts', 'installers', variant);
 const onlyIndex = process.argv.indexOf('--only');
 const only = onlyIndex >= 0 ? String(process.argv[onlyIndex + 1] || '') : '';
 const commitResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true });
@@ -14,7 +18,7 @@ const packages = fs.readdirSync(extensionRoot, { withFileTypes: true }).filter(e
   const directory = path.join(extensionRoot, entry.name); const packagePath = path.join(directory, 'package.json');
   if (!fs.existsSync(packagePath)) return [];
   const manifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-  if (!manifest.photoflowComponent || !manifest.scripts?.['package:host']) return [];
+  if (!manifest.photoflowComponent || !manifest.scripts?.['package:host'] || !manifest.scripts?.[packageScript]) return [];
   const componentManifestPath = path.join(directory, String(manifest.photoflowComponent.manifest || ''));
   if (!fs.existsSync(componentManifestPath)) throw new Error(`Component manifest missing: ${entry.name}`);
   const componentManifest = JSON.parse(fs.readFileSync(componentManifestPath, 'utf8'));
@@ -27,7 +31,7 @@ for (const component of packages) {
   if (!npmCli) throw new Error('npm_execpath is unavailable; run component orchestration through npm');
   const expectedArchive = path.join(outputRoot, `PhotoFlow-${component.id}-${component.version}-${process.platform}-${process.arch}.zip`);
   fs.rmSync(expectedArchive, { force: true });
-  const result = spawnSync(process.execPath, [npmCli, 'run', 'package:host', '--', '--output-dir', outputRoot], { cwd: component.directory, stdio: 'inherit' });
+  const result = spawnSync(process.execPath, [npmCli, 'run', packageScript, '--', '--output-dir', outputRoot], { cwd: component.directory, stdio: 'inherit' });
   if (result.error) {
     fs.rmSync(expectedArchive, { force: true });
     throw result.error;

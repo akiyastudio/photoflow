@@ -1,4 +1,5 @@
-export type TeamSettings = { useGpu: boolean; oversizeCropMode: 'face-centered' | 'expand' };
+export type TeamSettings = { useGpu: boolean; oversizeCropMode: 'face-centered' | 'expand'; workTileMode: 'grouped' | 'per-person' };
+const DEFAULT_SETTINGS: TeamSettings = { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' };
 export type TeamSettingsPatch = Partial<TeamSettings>;
 export type TeamSettingsState = { settings?: TeamSettings; loaded: boolean; loading: boolean; error: string };
 export type AdvancedEnvironmentState = 'loading' | 'ready' | 'not-installed' | 'repair-needed' | 'unavailable' | 'error';
@@ -17,13 +18,15 @@ export const advancedEnvironmentPresentation = (value: unknown, loading: boolean
 };
 export const createLatestRequestGuard = () => { let generation = 0; return { begin: () => ++generation, isCurrent: (value: number) => value === generation, invalidate: () => { generation += 1; } }; };
 
-const normalizedSettings = (value: unknown, fallback: TeamSettings = { useGpu: true, oversizeCropMode: 'face-centered' }): TeamSettings => {
+const normalizedSettings = (value: unknown, fallback: TeamSettings = DEFAULT_SETTINGS): TeamSettings => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('团片设置响应无效');
   const candidate = value as Partial<TeamSettings>;
   const hasUseGpu = Object.prototype.hasOwnProperty.call(candidate, 'useGpu');
   const hasCropMode = Object.prototype.hasOwnProperty.call(candidate, 'oversizeCropMode');
+  const hasTileMode = Object.prototype.hasOwnProperty.call(candidate, 'workTileMode');
+  if (hasTileMode && !['grouped', 'per-person'].includes(String(candidate.workTileMode))) throw new Error('团片设置响应包含无效值');
   if ((hasUseGpu && typeof candidate.useGpu !== 'boolean') || (hasCropMode && !['face-centered', 'expand'].includes(String(candidate.oversizeCropMode)))) throw new Error('团片设置响应包含无效值');
-  return { useGpu: hasUseGpu ? candidate.useGpu as boolean : fallback.useGpu, oversizeCropMode: hasCropMode ? candidate.oversizeCropMode as TeamSettings['oversizeCropMode'] : fallback.oversizeCropMode };
+  return { useGpu: hasUseGpu ? candidate.useGpu as boolean : fallback.useGpu, oversizeCropMode: hasCropMode ? candidate.oversizeCropMode as TeamSettings['oversizeCropMode'] : fallback.oversizeCropMode, workTileMode: hasTileMode ? candidate.workTileMode as TeamSettings['workTileMode'] : fallback.workTileMode };
 };
 
 export const createTeamSettingsController = ({ read, merge, notice = (_message, _tone) => undefined }: {
@@ -64,7 +67,8 @@ export const createTeamSettingsController = ({ read, merge, notice = (_message, 
   const patch = (value: TeamSettingsPatch) => {
     if (!state.loaded || !authoritative) return Promise.reject(new Error('团片设置尚未读取完成'));
     const keys = Object.keys(value);
-    if (keys.length !== 1 || !['useGpu', 'oversizeCropMode'].includes(keys[0])) return Promise.reject(new Error('团片设置补丁无效'));
+    if (keys.length !== 1 || !['useGpu', 'oversizeCropMode', 'workTileMode'].includes(keys[0])) return Promise.reject(new Error('团片设置补丁无效'));
+    if (keys[0] === 'workTileMode' && !['grouped', 'per-person'].includes(String(value.workTileMode))) return Promise.reject(new Error('团片设置补丁无效'));
     if ((keys[0] === 'useGpu' && typeof value.useGpu !== 'boolean') || (keys[0] === 'oversizeCropMode' && !['face-centered', 'expand'].includes(String(value.oversizeCropMode)))) return Promise.reject(new Error('团片设置补丁无效'));
     loadGeneration += 1;
     const item = { id: nextPatchId++, patch: { ...value } };
@@ -73,7 +77,7 @@ export const createTeamSettingsController = ({ read, merge, notice = (_message, 
     const operation = tail.catch(() => undefined).then(async () => {
       try {
         const result = await merge(item.patch);
-        authoritative = normalizedSettings(result.settings, { ...(authoritative || { useGpu: true, oversizeCropMode: 'face-centered' }), ...item.patch } as TeamSettings);
+        authoritative = normalizedSettings(result.settings, { ...(authoritative || DEFAULT_SETTINGS), ...item.patch });
         pending = pending.filter(candidate => candidate.id !== item.id);
         publish({ loaded: true, error: '' });
       } catch (error) {

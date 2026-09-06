@@ -8,6 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # Local credentials and environment configuration (keep distributable templates)
+.photoflow-paths.local.json
 .env
 .env.*
 !.env.example

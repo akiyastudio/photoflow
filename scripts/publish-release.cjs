@@ -8,6 +8,7 @@ const { verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release
 const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
 const { captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
 const { runPublishStateMachine } = require('./release-publish-state.cjs');
+const { installersRootFor, releaseOperationsRoot, assertLegacyReleaseStateAbsent } = require('./project-output-paths.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
@@ -222,10 +223,11 @@ const run = async () => {
     assertStagedReleaseUnchanged(stagedEvidence);
     const versionParts = version.split('.').map(Number);
     const record = { channel: 'stable', downloadUrl: releaseConfig.downloadUrl, mandatory, notes, platform: 'win32', published: true, publishedAt: new Date().toISOString(), sha256: stagedEvidence.setup.sha256, version, versionCode: versionParts[0] * 10_000 + versionParts[1] * 100 + versionParts[2] };
-    const attemptRoot = path.join(repositoryRoot, 'artifacts', 'release-publish-attempts'); fs.mkdirSync(attemptRoot, { recursive: true });
+    assertLegacyReleaseStateAbsent(repositoryRoot, 'release-publish-attempts');
+    const attemptRoot = path.join(releaseOperationsRoot(repositoryRoot), 'publish-attempts'); fs.mkdirSync(attemptRoot, { recursive: true });
     const attemptPath = path.join(attemptRoot, `${stagedEvidence.manifestSha256}.json`);
     if (fs.existsSync(attemptPath)) throw new Error(`此交付清单已有发布尝试；为避免重复线上记录，请先人工核验：${attemptPath}`);
-    const outputRoot = path.join(repositoryRoot, 'artifacts', 'cloudbase'); fs.mkdirSync(outputRoot, { recursive: true });
+    const outputRoot = path.join(installersRootFor(repositoryRoot), 'metadata'); fs.mkdirSync(outputRoot, { recursive: true });
     const outputPath = path.join(outputRoot, `app-release-${version}.json`);
     const priorIdentity = fs.existsSync(outputPath) ? captureArtifactIdentity(outputPath) : null;
     const temporaryPath = `${outputPath}.${stagedEvidence.manifestSha256}.pending`;

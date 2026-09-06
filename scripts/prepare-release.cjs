@@ -6,6 +6,7 @@ const { stageRelease } = require('./release-staging.cjs');
 const { expectedComponentPackages, receiptPathFor } = require('./verify-component-packages.cjs');
 const { captureGitSourceFence, assertGitSourceFence, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
+const { releaseOperationsRoot } = require('./project-output-paths.cjs');
 
 const root = path.resolve(__dirname, '..');
 const npmCli = process.env.npm_execpath;
@@ -48,7 +49,7 @@ const run = async () => {
       assertGitSourceFence(root, sourceFence); assertCleanGitWorktree(root);
     }
     const staged = await stageRelease({ repositoryRoot: root, installerRoot, product: packageJson.productName || packageJson.name, version: packageJson.version, gitCommit, gitTree: sourceFence.gitTree });
-    const logRoot = path.join(root, 'artifacts', 'release-sessions');
+    const logRoot = path.join(releaseOperationsRoot(root), 'sessions');
     writeSessionLogBestEffort(logRoot, attemptId, { schemaVersion: 1, attemptId, gitCommit, startedAt, finishedAt: new Date().toISOString(), status: 'prepared', steps: results, manifestPath: staged.manifestPath });
     console.log(`\nImmutable release staging: ${staged.root}`);
     console.log(`Stable delivery manifest: ${staged.manifestPath}`);

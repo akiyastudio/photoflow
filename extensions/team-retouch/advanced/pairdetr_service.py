@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import numpy as np
+from PIL import Image
 from advanced_geometry import normalized_cxcywh_to_original_xyxy
 from checkpoint_lock import verify_checkpoint
 from image_safety import inspect_oriented_dimensions, open_validated

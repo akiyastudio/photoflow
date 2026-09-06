@@ -7,7 +7,7 @@ const repositoryRoot = path.resolve(componentRoot, '..', '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(componentRoot, 'component.template.json'), 'utf8'));
 const runtimeLock = JSON.parse(fs.readFileSync(path.join(componentRoot, 'media-runtime.lock.json'), 'utf8'));
 const outputIndex = process.argv.indexOf('--output-dir');
-const outputRoot = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1]) : path.join(componentRoot, 'dist');
+const outputRoot = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1]) : path.resolve(componentRoot, '..', '..', 'artifacts', 'installers', 'base');
 const runtimeCandidates = [
   path.join(repositoryRoot, 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64'),
   path.join(componentRoot, 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64'),

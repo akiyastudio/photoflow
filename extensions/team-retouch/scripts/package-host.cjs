@@ -2,11 +2,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { hashFile, validateReleaseLock: validateStrictReleaseLock } = require('./advanced-release-validator.cjs');
+const { advancedOutputRoot, advancedPackagePath, advancedPackageRelativePath } = require('./package-output-paths.cjs');
 
 const root = path.resolve(__dirname, '..');
 const template = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
 const packageName = `PhotoFlow-team-retouch-advanced-${template.version}-win32-x64.zip`;
-const packagePath = path.join(root, 'dist', packageName);
+const packagePath = advancedPackagePath(packageName);
 const lockPath = path.join(root, 'advanced', 'release-lock.json');
 
 function run(command, args) {
@@ -16,7 +17,7 @@ function run(command, args) {
 }
 function validateReleaseLock() {
   if (!fs.existsSync(lockPath)) throw new Error('Reviewed advanced dependency/checkpoint lock is missing; Host packaging is fail-closed.');
-  return validateStrictReleaseLock(root, lockPath, { componentVersion: template.version, advancedRuntimeApiVersion: Number(template.advancedRuntime.apiVersion) }, packagePath, `dist/${packageName}`);
+  return validateStrictReleaseLock(root, lockPath, { componentVersion: template.version, advancedRuntimeApiVersion: Number(template.advancedRuntime.apiVersion) }, packagePath, advancedPackageRelativePath(packageName));
 }
 function validateReleaseInputs(lock = validateReleaseLock()) {
   if (!fs.existsSync(packagePath)) throw new Error(`Trusted advanced package is missing: ${packagePath}`);
@@ -48,7 +49,7 @@ if (require.main === module) {
   const lock = validateReleaseLock();
   const { digest } = validateReleaseInputs(lock);
   run(process.execPath, [path.join(__dirname, 'setup-python.cjs')]);
-  run(process.execPath, componentArguments(outputDirectory));
+  run(process.execPath, componentArguments(outputDirectory || advancedOutputRoot));
   validateBundle(digest);
   console.log(`Host bundle verified with trusted advanced package ${packageName} (${digest})`);
 }

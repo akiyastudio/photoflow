@@ -25,6 +25,8 @@ assert(releaseJsonSource.includes('captureArtifactIdentity(installerPath)') && r
 assert(releaseJsonSource.includes('release:json 只能生成未发布草稿'), 'direct release:json must reject published or network modes');
 assert(publishSource.indexOf('await publishReleaseOnce(') < publishSource.indexOf('fs.renameSync(temporaryPath, outputPath)'), 'prepared published evidence must only be promoted after confirmed remote success');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-release-receipt-'));
+const privateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-private-receipt-'));
+process.env.PHOTOFLOW_PRIVATE_ROOT = privateRoot;
 try {
   const blockedLogRoot = path.join(fixtureRoot, 'not-a-directory'); fs.writeFileSync(blockedLogRoot, 'file');
   assert.equal(writeSessionLogBestEffort(blockedLogRoot, 'attempt', {}, () => {}), false, 'session log failure must not invalidate successful immutable staging');
@@ -56,5 +58,5 @@ try {
   assert.throws(() => assertGitSourceFence(fixtureRoot, sourceFence), /Git 元数据发生变化/);
   clearQualityReceipt(fixtureRoot);
   assert.throws(() => validateQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: readGitHead(fixtureRoot) }), /回执缺失/);
-} finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); }
+} finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); fs.rmSync(privateRoot, { recursive: true, force: true }); }
 console.log('Release workflow ordering tests passed.');

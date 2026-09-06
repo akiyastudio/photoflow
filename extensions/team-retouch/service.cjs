@@ -1292,7 +1292,7 @@ const detectPhoto = async (parentId, payload, context) => {
     const exclusions = payload.restoreExcluded ? [] : db.prepare('SELECT bbox_json FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').all(String(context.projectId), String(payload.photoId), String(payload.baseVersionId)).map(row => parseJson(row.bbox_json, {}));
     await fs.promises.mkdir(stagingAnalysis, { recursive: true });
     await fs.promises.mkdir(stagingDelivery, { recursive: true });
-    const detected = await runAlgorithm(parentId, ['detect', '--input', base.filePath, '--output-dir', stagingAnalysis, '--delivery-dir', stagingDelivery, '--delivery-prefix', authorized.deliveryPrefix, '--excluded-boxes', JSON.stringify(exclusions), '--provider', settings.useGpu === false ? 'cpu' : 'auto', '--oversize-crop-mode', settings.oversizeCropMode === 'expand' ? 'expand' : 'face-centered', '--advanced-mode', 'auto'], { topic: 'patch.detect.progress', progress: { projectId: String(context.projectId), projectName: context.projectName, photoId: payload.photoId, baseVersionId: payload.baseVersionId } });
+    const detected = await runAlgorithm(parentId, ['detect', '--input', base.filePath, '--output-dir', stagingAnalysis, '--delivery-dir', stagingDelivery, '--delivery-prefix', authorized.deliveryPrefix, '--excluded-boxes', JSON.stringify(exclusions), '--provider', settings.useGpu === false ? 'cpu' : 'auto', '--oversize-crop-mode', settings.oversizeCropMode === 'expand' ? 'expand' : 'face-centered', '--work-tile-mode', settings.workTileMode === 'per-person' ? 'per-person' : 'grouped', '--advanced-mode', 'auto'], { topic: 'patch.detect.progress', progress: { projectId: String(context.projectId), projectName: context.projectName, photoId: payload.photoId, baseVersionId: payload.baseVersionId } });
     const missing = (detected.tasks || []).filter(task => !task.patchPath || !fs.existsSync(task.patchPath));
     if (missing.length) throw new Error(`切好的图片没有成功保存（缺少 ${missing.length} 个文件）`);
     const publishedTasks = [];
@@ -1684,7 +1684,7 @@ const detectBatch = async (parentId, payload, context) => {
       }
       for (const item of entries) { await fs.promises.mkdir(item.outputDir, { recursive: true }); await fs.promises.mkdir(item.deliveryDir, { recursive: true }); }
       await fs.promises.writeFile(manifestPath, JSON.stringify({ items: entries.map(item => ({ key: item.key, name: item.bundle.photo?.displayName || '', input: item.base.filePath, outputDir: item.outputDir, deliveryDir: item.deliveryDir, deliveryPrefix: item.authorized.deliveryPrefix, excludedBoxes: item.exclusions })) }), 'utf8');
-      const detectedBatch = await runAlgorithm(parentId, ['detect-batch', '--manifest', manifestPath, '--provider', settings.useGpu === false ? 'cpu' : 'auto', '--oversize-crop-mode', settings.oversizeCropMode === 'expand' ? 'expand' : 'face-centered', '--advanced-mode', 'auto'], { topic: 'patch.detect-batch.progress', progress: { projectId: String(context.projectId), projectName: context.projectName } });
+      const detectedBatch = await runAlgorithm(parentId, ['detect-batch', '--manifest', manifestPath, '--provider', settings.useGpu === false ? 'cpu' : 'auto', '--oversize-crop-mode', settings.oversizeCropMode === 'expand' ? 'expand' : 'face-centered', '--work-tile-mode', settings.workTileMode === 'per-person' ? 'per-person' : 'grouped', '--advanced-mode', 'auto'], { topic: 'patch.detect-batch.progress', progress: { projectId: String(context.projectId), projectName: context.projectName } });
       const byKey = new Map((detectedBatch.results || []).map(item => [String(item.key), item]));
       const results = [];
       for (const item of entries) {
@@ -2076,7 +2076,13 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
   return { success: true, workflowSettings };
 };
 
-const componentSettings = async (parentId, payload) => payload.action === 'get' ? hostSettings(parentId) : hostSettings(parentId, payload.settings || {});
+const componentSettings = async (parentId, payload) => {
+  if (payload.action === 'get') return hostSettings(parentId);
+  const settings = payload.settings;
+  const validators = { useGpu: value => typeof value === 'boolean', oversizeCropMode: value => ['face-centered', 'expand'].includes(value), workTileMode: value => ['grouped', 'per-person'].includes(value) };
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings) || !Object.keys(settings).length || Object.entries(settings).some(([key, value]) => !Object.hasOwn(validators, key) || !validators[key](value))) throw new Error('团片设置补丁无效');
+  return hostSettings(parentId, settings);
+};
 const listProjectProgress = async parentId => { const value = await callHost(parentId, 'project.progress', { action: 'list' }); return { success: true, progressFolders: Array.isArray(value.progress) ? value.progress : [], graphEdges: Array.isArray(value.edges) ? value.edges : [] }; };
 const createProjectProgress = async (parentId, payload) => {
   const listed = await callHost(parentId, 'project.progress', { action: 'list' });

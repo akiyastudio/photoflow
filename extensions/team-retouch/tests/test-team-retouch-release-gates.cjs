@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const os = require('node:os');
 const root = path.resolve(__dirname, '..');
 const pythonSetup = require('../scripts/setup-python.cjs');
 assert.notEqual(pythonSetup.interpreterPath(true), pythonSetup.interpreterPath(false));
@@ -13,7 +14,7 @@ assert.match(packageJson.scripts['prepare:dev'], /setup-python\.cjs --dev/);
 
 const setupWsl = fs.readFileSync(path.join(root, 'scripts', 'setup-advanced-wsl.sh'), 'utf8');
 const samDownload = setupWsl.indexOf('sam2.1_hiera_large.pt"');
-const checkpointVerify = setupWsl.indexOf('sha256sum --check --strict');
+const checkpointVerify = setupWsl.indexOf('sha256sum --check --strict "$RELEASE_LOCK_ROOT/checkpoints.sha256"');
 const pairSelfTest = setupWsl.indexOf('pairdetr_service.py" --self-test');
 const samSelfTest = setupWsl.indexOf('sam2_service.py" --self-test');
 const receipt = setupWsl.indexOf('self-test-receipt.json');
@@ -22,7 +23,13 @@ assert(samDownload >= 0 && samDownload < checkpointVerify && checkpointVerify < 
 const exporter = fs.readFileSync(path.join(root, 'scripts', 'create-advanced-offline-package.ps1'), 'utf8');
 assert(exporter.indexOf('--self-test') >= 0 && exporter.indexOf('--self-test') < exporter.indexOf('wsl.exe --terminate'), 'both model self-tests gate VHD export');
 
-const formalPython = spawnSync(process.execPath, [path.join(root, 'scripts', 'setup-python.cjs')], { cwd: root, encoding: 'utf8' });
-assert.notEqual(formalPython.status, 0);
-assert.match(`${formalPython.stdout}${formalPython.stderr}`, /requires requirements-build\.lock with hashes/);
+const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'team-release-missing-lock-'));
+try {
+  fs.mkdirSync(path.join(fixture, 'scripts'));
+  const setup = path.join(fixture, 'scripts', 'setup-python.cjs');
+  fs.copyFileSync(path.join(root, 'scripts', 'setup-python.cjs'), setup);
+  const formalPython = spawnSync(process.execPath, [setup], { cwd: fixture, encoding: 'utf8' });
+  assert.notEqual(formalPython.status, 0);
+  assert.match(`${formalPython.stdout}${formalPython.stderr}`, /requires requirements-build\.lock with hashes/);
+} finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 console.log('Team-retouch release self-test ordering and formal Python lock gates passed');

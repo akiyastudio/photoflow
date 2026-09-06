@@ -3,7 +3,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..'); const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.json'), 'utf8'));
 const valueAfter = name => { const index = process.argv.indexOf(name); return index >= 0 ? String(process.argv[index + 1] || '') : ''; };
-const outputRoot = path.resolve(valueAfter('--output-dir') || path.join(root, 'dist'));
+const outputRoot = path.resolve(valueAfter('--output-dir') || path.join(root, '..', '..', 'artifacts', 'installers', 'base'));
 const packageRoot = path.join(root, 'dist', 'component');
 fs.rmSync(packageRoot, { recursive: true, force: true }); fs.mkdirSync(packageRoot, { recursive: true });
 const files = ['component.json', 'service.cjs', 'core.cjs', 'engine.py', 'README.md', 'LICENSES', 'ui'];

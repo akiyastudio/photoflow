@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { AlertCircle, Loader2, RotateCcw, Wrench } from 'lucide-react';
 import { useAppDialog } from './legacy/legacy-dialog-context';
 import { durableRpc, rpc } from './sdk';
+import { TeamLicenseContent } from './team-license-content';
 import { advancedEnvironmentPresentation, createLatestRequestGuard, runNotifiedAction, type TeamSettings, type TeamSettingsPatch } from './team-settings-model';
 
 type Json = Record<string, unknown>;
@@ -84,9 +85,11 @@ export const TeamSettingsContent = ({ value, patch, notice }: { value: TeamSetti
   const save = (next: TeamSettingsPatch) => { void Promise.resolve(patch(next)).catch(() => undefined); };
   return <div data-settings-visual-contract="official-host-v1">
     <SettingsGroup title="处理偏好">
+      <SettingsRow title="工作图分组" description="自动合组会把相邻人物安排在同一张工作图；每人一张会为每个目标人物单独生成工作图，只合并该人物的修改。靠近或遮挡的人物仍可能出现在裁剪画面中。此设置在下次检测或重新检测时生效，已有工作图保持原样。"><select aria-label="工作图分组" className="pf-select pf-settings-field" value={value.workTileMode} onChange={event => save({ workTileMode: event.target.value as TeamSettings['workTileMode'] })}><option value="grouped">自动合组</option><option value="per-person">每人一张</option></select></SettingsRow>
       <SettingsRow title="优先使用 GPU" description="显卡不支持或运行失败时，基础人物检测会自动回退 CPU。"><label className="flex justify-end"><span className="sr-only">优先使用 GPU</span><input type="checkbox" className="h-4 w-4 accent-blue-600" aria-label="优先使用 GPU" checked={value.useGpu} onChange={() => save({ useGpu: !value.useGpu })}/></label></SettingsRow>
       <SettingsRow title="裁剪方式" description="人物超过 4000 像素时，可限制尺寸或保留完整人物；后者可能超出手机修图软件限制。"><select aria-label="超大人物裁剪方式" className="pf-select pf-settings-field" value={value.oversizeCropMode} onChange={event => save({ oversizeCropMode: event.target.value as TeamSettings['oversizeCropMode'] })}><option value="face-centered">保持 4000 像素</option><option value="expand">扩大裁剪，保留完整人物</option></select></SettingsRow>
     </SettingsGroup>
     <TeamAdvancedSettingsContent notice={notice}/>
+    <TeamLicenseContent/>
   </div>;
 };

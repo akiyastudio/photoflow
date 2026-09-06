@@ -4,13 +4,14 @@ const path = require('path');
 const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 const releaseConfig = require('./release-config.cjs');
+const { installersRootFor } = require('./project-output-paths.cjs');
 const { hashStableArtifact, captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
 const { verifyStagedRelease, assertStagedReleaseUnchanged } = require('./release-staging.cjs');
 const { acquireReleaseLock, releaseLock } = require('./release-lock.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const releaseRoot = path.join(repositoryRoot, 'artifacts', 'installers');
-const outputRoot = path.join(repositoryRoot, 'artifacts', 'cloudbase');
+const outputRoot = path.join(installersRootFor(repositoryRoot), 'metadata');
 const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
 
 const parseArguments = values => {

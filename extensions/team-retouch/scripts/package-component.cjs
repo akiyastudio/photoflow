@@ -3,14 +3,17 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { copyServiceRuntime } = require('./package-layout.cjs');
+const { copyNotices, writePackageInventory } = require('./package-notices.cjs');
 const { npmInvocation } = require('./npm-invocation.cjs');
+const { baseOutputRoot, advancedPackagePath } = require('./package-output-paths.cjs');
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
 const dist = path.join(root, 'dist'); const packageRoot = path.join(dist, 'component');
-const outputOption = process.argv.indexOf('--output-dir'); const archiveRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : dist;
+const outputOption = process.argv.indexOf('--output-dir'); const archiveRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : baseOutputRoot;
 const withAdvanced = process.argv.includes('--with-advanced');
 const skipChecks = process.argv.includes('--skip-checks');
 const developmentPackage = process.argv.includes('--dev');
+if (!developmentPackage && skipChecks) throw new Error('Formal packaging cannot skip checks.');
 if (withAdvanced && (skipChecks || developmentPackage)) throw new Error('Formal advanced packaging cannot skip checks or use development dependencies.');
 if (!developmentPackage && !fs.existsSync(path.join(root, 'requirements-build.lock'))) throw new Error('Formal packaging requires requirements-build.lock with hashes.');
 const python = process.platform === 'win32' ? path.join(root, developmentPackage ? '.venv' : '.venv-release', 'Scripts', 'python.exe') : path.join(root, developmentPackage ? '.venv' : '.venv-release', 'bin', 'python');
@@ -34,12 +37,13 @@ const viteBin = path.join(path.dirname(require.resolve('vite/package.json', { pa
 if (!fs.existsSync(python)) throw new Error('Plugin Python environment missing; run npm run setup:python');
 if (!developmentPackage) require('./setup-python.cjs').verifyLockedEnvironment(python, fs.readFileSync(path.join(root, 'requirements-build.lock'), 'utf8'));
 for (const [name,minimum,expectedSha256] of models) { const file=path.join(root,'models',name); if(!fs.existsSync(file)||fs.statSync(file).size<minimum) throw new Error(`Required model is missing or incomplete: models/${name}`); const handle=fs.openSync(file,'r'); const prefix=Buffer.alloc(256); const count=fs.readSync(handle,prefix,0,prefix.length,0); fs.closeSync(handle); if(prefix.subarray(0,count).toString('utf8').startsWith('version https://git-lfs.github.com/spec/v1')) throw new Error(`Required model is missing or incomplete: models/${name}`); const actual=sha256File(file); if(actual!==expectedSha256) throw new Error(`Required model checksum mismatch: models/${name}`); }
+if (!skipChecks) for (const script of ['typecheck','lint']) runNpmScript(script);
+run(process.execPath,[viteBin,'build','--config',path.join(root,'renderer','vite.config.ts')]);
 if (!skipChecks) {
-  for (const script of ['typecheck','lint','test:node']) runNpmScript(script);
+  runNpmScript('test:node');
   if (developmentPackage) runNpmScript('test:python');
   else { run(python,[path.join(root,'tests','test-team-retouch.py')]); run(python,[path.join(root,'tests','test-team-retouch-progress-folder-policy.py')]); }
 }
-run(process.execPath,[viteBin,'build','--config',path.join(root,'renderer','vite.config.ts')]);
 fs.rmSync(packageRoot,{recursive:true,force:true}); fs.mkdirSync(path.dirname(packageRoot),{recursive:true});
 const sep=process.platform==='win32'?';':':';
 run(python,['-m','PyInstaller','--onedir','--clean','--noconfirm','--workpath',path.join(dist,'pyinstaller-work'),'--specpath',path.join(dist,'spec'),'--distpath',dist,'--name','component','--collect-binaries','onnxruntime','--paths',root,'--hidden-import','patch_merge','--hidden-import','advanced_bridge','--hidden-import','identity_engine','--hidden-import','image_safety','--hidden-import','advanced_geometry','--hidden-import','checkpoint_lock','--exclude-module','scipy','--exclude-module','matplotlib','--exclude-module','torch','--exclude-module','torchvision','--exclude-module','torchaudio',...models.flatMap(([name])=>['--add-data',`${path.join(root,'models',name)}${sep}models`]),...['pairdetr_service.py','sam2_service.py','image_safety.py','advanced_geometry.py','checkpoint_lock.py'].flatMap(name=>['--add-data',`${path.join(root,['image_safety.py','advanced_geometry.py','checkpoint_lock.py'].includes(name) ? name : path.join('advanced',name))}${sep}${['image_safety.py','advanced_geometry.py','checkpoint_lock.py'].includes(name) ? '.' : 'advanced'}`]),path.join(root,'team_retouch.py')]);
@@ -50,8 +54,9 @@ if (!fs.existsSync(generatedExecutable)) throw new Error(`PyInstaller output is 
 if (path.resolve(generatedExecutable) !== path.resolve(declaredExecutable)) fs.renameSync(generatedExecutable, declaredExecutable);
 fs.cpSync(path.join(root,'dist','ui'),path.join(packageRoot,'ui'),{recursive:true}); fs.copyFileSync(path.join(root,'renderer','team-retouch.svg'),path.join(packageRoot,'ui','team-retouch.svg'));
 copyServiceRuntime(root,packageRoot);
+manifest.requiredFiles.push(...copyNotices(root, packageRoot, python, developmentPackage), 'package-files.json');
 const advancedPackageName=`PhotoFlow-team-retouch-advanced-${manifest.version}-win32-x64.zip`;
-const advancedPackageSource=path.join(dist,advancedPackageName);
+const advancedPackageSource=advancedPackagePath(advancedPackageName);
 delete manifest.advancedRuntime.offlinePackage;
 manifest.requiredFiles = manifest.requiredFiles.filter(file => file !== advancedPackageName);
 if(withAdvanced){
@@ -60,6 +65,9 @@ if(withAdvanced){
   for(const name of ['setup-team-retouch-advanced.ps1','uninstall-team-retouch-advanced.ps1']) fs.copyFileSync(path.join(root,'advanced-installer',name),path.join(lifecycleDirectory,name));
   const advancedScriptsDirectory=path.join(packageRoot,'advanced'); fs.mkdirSync(advancedScriptsDirectory,{recursive:true});
   for(const name of ['pairdetr_service.py','sam2_service.py']) fs.copyFileSync(path.join(root,'advanced',name),path.join(advancedScriptsDirectory,name));
+  fs.mkdirSync(path.join(advancedScriptsDirectory, 'locks'), { recursive: true });
+  fs.copyFileSync(path.join(root, 'advanced/locks/checkpoints.sha256'), path.join(advancedScriptsDirectory, 'locks/checkpoints.sha256'));
+  manifest.requiredFiles.push('advanced/locks/checkpoints.sha256');
   fs.copyFileSync(path.join(root,'image_safety.py'),path.join(packageRoot,'image_safety.py'));
   fs.copyFileSync(path.join(root,'advanced_geometry.py'),path.join(packageRoot,'advanced_geometry.py'));
   fs.copyFileSync(path.join(root,'checkpoint_lock.py'),path.join(packageRoot,'checkpoint_lock.py'));
@@ -78,6 +86,6 @@ if(withAdvanced){
   }
 }
 for(const action of Object.values(manifest.componentHost.service.lifecycleActions||{})) action.sha256=sha256File(path.join(packageRoot,action.entry));
-fs.writeFileSync(path.join(packageRoot,'component.json'),`${JSON.stringify(manifest,null,2)}\n`); for(const file of [packagedEntrypoint,...(manifest.requiredFiles||[])]) if(!fs.existsSync(path.join(packageRoot,file))) throw new Error(`Packaged component is missing required file: ${file}`);
+fs.writeFileSync(path.join(packageRoot,'component.json'),`${JSON.stringify(manifest,null,2)}\n`); writePackageInventory(packageRoot, { componentId: manifest.id, version: manifest.version, buildMode: developmentPackage ? 'development' : 'release', variant: withAdvanced ? 'advanced' : 'base' }); for(const file of [packagedEntrypoint,...(manifest.requiredFiles||[])]) if(!fs.existsSync(path.join(packageRoot,file))) throw new Error(`Packaged component is missing required file: ${file}`);
 fs.mkdirSync(archiveRoot,{recursive:true}); const archive=path.join(archiveRoot,`PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`);
 const script=['import pathlib,sys,zipfile','source,target=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2])','target.unlink(missing_ok=True)','with zipfile.ZipFile(target,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:','    for item in sorted(source.rglob("*")):','        if item.is_file():','            mode=zipfile.ZIP_STORED if item.suffix.lower()==".zip" else zipfile.ZIP_DEFLATED','            z.write(item,pathlib.Path(source.name)/item.relative_to(source),compress_type=mode)'].join('\n'); run(python,['-c',script,packageRoot,archive]); console.log(`Installable component package: ${archive}`);

@@ -20,6 +20,7 @@ import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
 import { historyToastTransition, type HistoryToastSnapshot } from './history-toast-model';
 import './host-api-ui.css';
+import './team-dialog.css';
 import './tailwind.css';
 import './legacy-style.css';
 

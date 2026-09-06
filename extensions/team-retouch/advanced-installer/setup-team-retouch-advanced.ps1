@@ -10,6 +10,17 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $OutputEncoding = [Text.Encoding]::UTF8
 
+function Resolve-AdvancedLinuxUser([object]$Manifest, [string]$RequestedUser, [bool]$ExplicitUser) {
+    $value = [string]$Manifest.linuxUser
+    if ($value -notmatch '^[a-z_][a-z0-9_-]*$' -or ($ExplicitUser -and $RequestedUser -cne $value)) { throw 'Advanced package Linux user is invalid or does not match the explicit request.' }
+    return $value
+}
+function Get-AdvancedWslText([string]$Name, [string]$User, [string[]]$CommandArguments) {
+    $lines = @(& wsl.exe -d $Name -u $User --exec @CommandArguments)
+    if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or -not ([string]$lines[0]).Trim()) { throw 'Unable to resolve an advanced runtime path in WSL.' }
+    return ([string]$lines[0]).Trim()
+}
+
 # Advanced VHDs are legitimately large, but a release package must remain
 # bounded. These limits allow a 128 GiB provisioned runtime and a 64 GiB ZIP,
 # while the ratio cap rejects tiny highly-compressible archives that could
@@ -159,12 +170,13 @@ function Test-Distro([string]$Name, [string]$User) {
     $componentRoot = Split-Path -Parent $PSScriptRoot
     $pairWindows = Join-Path $componentRoot 'advanced\pairdetr_service.py'
     $samWindows = Join-Path $componentRoot 'advanced\sam2_service.py'
-    $pairLinux = (& wsl.exe -d $Name -u $User -- wslpath -a $pairWindows).Trim()
-    $samLinux = (& wsl.exe -d $Name -u $User -- wslpath -a $samWindows).Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $pairLinux -or -not $samLinux) { throw 'Unable to resolve component self-test scripts inside WSL.' }
-    $probe = "set -e; test -x `$HOME/miniforge3/envs/pairdetr/bin/python; test -x `$HOME/miniforge3/envs/sam2/bin/python; test -s `$HOME/model-lab/checkpoints/pairdetr/pytorch_model.bin; test -s `$HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt; timeout 180 `$HOME/miniforge3/envs/pairdetr/bin/python '$pairLinux' --self-test; timeout 240 `$HOME/miniforge3/envs/sam2/bin/python '$samLinux' --self-test"
-    & wsl.exe -d $Name -u $User -- bash -lc $probe
-    if ($LASTEXITCODE -ne 0) { throw "The imported advanced environment failed its runtime probe: $Name" }
+    $pairLinux = Get-AdvancedWslText $Name $User @('wslpath', '-a', $pairWindows)
+    $samLinux = Get-AdvancedWslText $Name $User @('wslpath', '-a', $samWindows)
+    $runtimeHome = Get-AdvancedWslText $Name $User @('printenv', 'HOME')
+    & wsl.exe -d $Name -u $User --exec timeout 180 "$runtimeHome/miniforge3/envs/pairdetr/bin/python" $pairLinux --self-test
+    if ($LASTEXITCODE -ne 0) { throw "The imported PairDETR environment failed its runtime probe: $Name" }
+    & wsl.exe -d $Name -u $User --exec timeout 240 "$runtimeHome/miniforge3/envs/sam2/bin/python" $samLinux --self-test
+    if ($LASTEXITCODE -ne 0) { throw "The imported SAM environment failed its runtime probe: $Name" }
 }
 function Open-ValidatedAdvancedArchive([string]$ArchivePath) {
     Add-Type -AssemblyName System.IO.Compression
@@ -366,6 +378,8 @@ $manifest = $validatedPackage.Manifest
 if ([int]$manifest.formatVersion -ne 1 -or [string]$manifest.componentId -ne 'team-retouch' -or [string]$manifest.architecture -ne 'x64') { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Unsupported advanced package manifest.' }
 if (-not $ExpectedComponentVersion -or [string]$manifest.componentVersion -ne $ExpectedComponentVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced package component version does not match exactly.' }
 if ($ExpectedAdvancedRuntimeApiVersion -le 0 -or [int]$manifest.advancedRuntimeApiVersion -ne $ExpectedAdvancedRuntimeApiVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced runtime API version does not match exactly.' }
+try { $LinuxUser = Resolve-AdvancedLinuxUser $manifest $LinuxUser ($PSBoundParameters.ContainsKey('LinuxUser')) }
+catch { Close-ValidatedAdvancedArchive $validatedPackage; throw }
 
 $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
 if (-not $nvidia) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'A CUDA-capable NVIDIA driver is required.' }

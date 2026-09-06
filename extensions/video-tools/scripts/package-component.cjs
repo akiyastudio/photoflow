@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.json'), 'utf8'));
 const dist = path.join(root, 'dist');
 const outputOption = process.argv.indexOf('--output-dir');
-const archiveRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : dist;
+const archiveRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : path.resolve(root, '..', '..', 'artifacts', 'installers', 'base');
 const packageRoot = path.join(dist, 'component');
 const buildRoot = path.join(dist, 'pyinstaller');
 const python = process.platform === 'win32' ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');

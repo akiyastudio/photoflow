@@ -91,7 +91,7 @@ def run_shell(command, timeout=900):
     missing_errors = []
     for candidate in distro_candidates():
         try:
-            return run_process(["wsl.exe", "-d", candidate, "--", "bash", "-lc", command], timeout)
+            return run_process(["wsl.exe", "-d", candidate, "--exec", "bash", "-lc", command], timeout)
         except RuntimeError as error:
             if not is_unavailable_distro_error(error):
                 raise
@@ -111,7 +111,7 @@ class _WslJsonService:
         for candidate in distro_candidates():
             output_chunks = []
             process = subprocess.Popen(
-                ["wsl.exe", "-d", candidate, "--", "bash", "-lc", command],
+                ["wsl.exe", "-d", candidate, "--exec", "bash", "-lc", command],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )

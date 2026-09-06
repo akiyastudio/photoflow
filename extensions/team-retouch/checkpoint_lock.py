@@ -28,7 +28,8 @@ def read_checkpoint_lock(lock_path):
 def verify_checkpoint(checkpoint_path, relative_path, lock_path=None):
     if relative_path not in EXPECTED_CHECKPOINTS or Path(checkpoint_path).name != EXPECTED_CHECKPOINTS[relative_path]:
         raise RuntimeError(f"Checkpoint path is not canonical: {relative_path}")
-    lock_path = Path(lock_path or Path.home() / "model-lab/release-locks/checkpoints.sha256")
+    packaged_lock = Path(__file__).resolve().parent / "advanced/locks/checkpoints.sha256"
+    lock_path = Path(lock_path or (packaged_lock if packaged_lock.is_file() else Path.home() / "model-lab/release-locks/checkpoints.sha256"))
     expected = read_checkpoint_lock(lock_path)[relative_path]
     digest = hashlib.sha256()
     with Path(checkpoint_path).open("rb") as source:

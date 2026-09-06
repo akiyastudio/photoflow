@@ -21,6 +21,7 @@ if (releaseQuality) {
 }
 
 const steps = [
+  ['output directory policy', ['run', 'test:output-paths']],
   ['Python environment', ['run', 'check:python']],
   ...(!testsOnly ? [
     ['lint', ['run', 'lint']],

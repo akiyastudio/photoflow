@@ -11,41 +11,41 @@ assert.deepEqual(failedInitial.getState(), { loaded: false, loading: true, error
 assert.equal(await failedInitial.refresh(), false); assert.equal(failedInitial.getState().loaded, false); assert.equal(failedInitial.getState().settings, undefined, 'failed initial reads never expose editable defaults');
 const freshPatches = [];
 const freshController = createTeamSettingsController({ read: async () => ({ settings: {} }), merge: async patch => { freshPatches.push(patch); return { settings: patch }; } });
-assert(await freshController.refresh()); assert.deepEqual(freshController.getState().settings, { useGpu: true, oversizeCropMode: 'face-centered' }, 'fresh installs normalize an empty settings object to editable defaults');
-await freshController.patch({ useGpu: false }); assert.deepEqual(freshController.getState().settings, { useGpu: false, oversizeCropMode: 'face-centered' }, 'a partial useGpu merge response retains the normalized crop default');
-await freshController.patch({ oversizeCropMode: 'expand' }); assert.deepEqual(freshController.getState().settings, { useGpu: false, oversizeCropMode: 'expand' }, 'a partial crop merge response retains the previously saved GPU value');
+assert(await freshController.refresh()); assert.deepEqual(freshController.getState().settings, { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' }, 'fresh installs normalize an empty settings object to editable defaults');
+await freshController.patch({ useGpu: false }); assert.deepEqual(freshController.getState().settings, { useGpu: false, oversizeCropMode: 'face-centered', workTileMode: 'grouped' }, 'a partial useGpu merge response retains the normalized crop default');
+await freshController.patch({ oversizeCropMode: 'expand' }); assert.deepEqual(freshController.getState().settings, { useGpu: false, oversizeCropMode: 'expand', workTileMode: 'grouped' }, 'a partial crop merge response retains the previously saved GPU value');
 assert.deepEqual(freshPatches, [{ useGpu: false }, { oversizeCropMode: 'expand' }]);
-for (const [partial, expected] of [[{ useGpu: false }, { useGpu: false, oversizeCropMode: 'face-centered' }], [{ oversizeCropMode: 'expand' }, { useGpu: true, oversizeCropMode: 'expand' }]]) {
+for (const [partial, expected] of [[{ useGpu: false }, { useGpu: false, oversizeCropMode: 'face-centered', workTileMode: 'grouped' }], [{ oversizeCropMode: 'expand' }, { useGpu: true, oversizeCropMode: 'expand', workTileMode: 'grouped' }]]) {
   const partialController = createTeamSettingsController({ read: async () => ({ settings: partial }), merge: async patch => ({ settings: patch }) });
   await partialController.refresh(); assert.deepEqual(partialController.getState().settings, expected, 'partial stored settings normalize missing fields with existing defaults');
 }
-for (const invalidSettings of [{ useGpu: 'yes' }, { oversizeCropMode: 'invalid' }, { useGpu: null }]) {
+for (const invalidSettings of [{ useGpu: 'yes' }, { oversizeCropMode: 'invalid' }, { workTileMode: 'invalid' }, { useGpu: null }]) {
   const invalidController = createTeamSettingsController({ read: async () => ({ settings: invalidSettings }), merge: async patch => ({ settings: patch }) });
   assert.equal(await invalidController.refresh(), false); assert.equal(invalidController.getState().loaded, false, 'explicit invalid values remain rejected');
 }
-const staleController = createTeamSettingsController({ read: () => { const item = deferred(); reads.push(item); return item.promise; }, merge: async () => ({ settings: { useGpu: true, oversizeCropMode: 'face-centered' } }) });
+const staleController = createTeamSettingsController({ read: () => { const item = deferred(); reads.push(item); return item.promise; }, merge: async () => ({ settings: { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' } }) });
 await assert.rejects(staleController.patch({ useGpu: false }), /尚未读取完成/);
 const loadA = staleController.refresh(); await tick(); assert.equal(reads.length, 1);
 const loadB = staleController.refresh(); await tick(); assert.equal(reads.length, 2);
-reads[1].resolve({ settings: { useGpu: false, oversizeCropMode: 'expand' } }); await loadB;
-reads[0].resolve({ settings: { useGpu: true, oversizeCropMode: 'face-centered' } }); await loadA;
-assert.deepEqual(staleController.getState().settings, { useGpu: false, oversizeCropMode: 'expand' }, 'a stale settings read cannot overwrite a newer generation');
+reads[1].resolve({ settings: { useGpu: false, oversizeCropMode: 'expand', workTileMode: 'grouped' } }); await loadB;
+reads[0].resolve({ settings: { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' } }); await loadA;
+assert.deepEqual(staleController.getState().settings, { useGpu: false, oversizeCropMode: 'expand', workTileMode: 'grouped' }, 'a stale settings read cannot overwrite a newer generation');
 
 const lateRefresh = deferred(); let interleavedReadCount = 0;
-const interleavedController = createTeamSettingsController({ read: async () => ++interleavedReadCount === 1 ? { settings: { useGpu: true, oversizeCropMode: 'face-centered' } } : lateRefresh.promise, merge: async patch => ({ settings: patch }) });
+const interleavedController = createTeamSettingsController({ read: async () => ++interleavedReadCount === 1 ? { settings: { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' } } : lateRefresh.promise, merge: async patch => ({ settings: patch }) });
 await interleavedController.refresh(); const oldRefresh = interleavedController.refresh(); await tick();
 await interleavedController.patch({ useGpu: false });
-lateRefresh.resolve({ settings: { useGpu: true, oversizeCropMode: 'face-centered' } }); await oldRefresh;
-assert.deepEqual(interleavedController.getState().settings, { useGpu: false, oversizeCropMode: 'face-centered' }, 'a patch advances the shared epoch so an older refresh cannot roll back its successful value');
+lateRefresh.resolve({ settings: { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' } }); await oldRefresh;
+assert.deepEqual(interleavedController.getState().settings, { useGpu: false, oversizeCropMode: 'face-centered', workTileMode: 'grouped' }, 'a patch advances the shared epoch so an older refresh cannot roll back its successful value');
 
-let patchRefreshServer = { useGpu: true, oversizeCropMode: 'face-centered' }; const delayedMerge = deferred(); let patchRefreshReads = 0;
+let patchRefreshServer = { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' }; const delayedMerge = deferred(); let patchRefreshReads = 0;
 const patchRefreshController = createTeamSettingsController({ read: async () => { patchRefreshReads += 1; return { settings: { ...patchRefreshServer } }; }, merge: async patch => { await delayedMerge.promise; patchRefreshServer = { ...patchRefreshServer, ...patch }; return { settings: patchRefreshServer }; } });
 await patchRefreshController.refresh(); const patchBeforeRefresh = patchRefreshController.patch({ oversizeCropMode: 'expand' }); await tick();
 const refreshAfterPatch = patchRefreshController.refresh(); await tick(); assert.equal(patchRefreshReads, 1, 'refresh waits behind the active settings mutation before taking its snapshot');
 delayedMerge.resolve(); await patchBeforeRefresh; await refreshAfterPatch;
 assert.deepEqual(patchRefreshController.getState().settings, patchRefreshServer, 'patch then refresh cannot restore a pre-mutation server snapshot');
 
-let server = { useGpu: true, oversizeCropMode: 'face-centered' };
+let server = { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' };
 const writes = [];
 const queueController = createTeamSettingsController({
   read: async () => ({ settings: server }),
@@ -58,10 +58,10 @@ await tick(); assert.equal(writes.length, 1, 'settings patches are serialized');
 server = { ...server, ...writes[0].patch }; writes[0].item.resolve({ settings: server }); await saveGpu; await tick();
 assert.equal(writes.length, 2); assert.deepEqual(Object.keys(writes[0].patch), ['useGpu']); assert.deepEqual(Object.keys(writes[1].patch), ['oversizeCropMode']);
 server = { ...server, ...writes[1].patch }; writes[1].item.resolve({ settings: server }); await saveCrop;
-assert.deepEqual(queueController.getState().settings, { useGpu: false, oversizeCropMode: 'expand' }, 'the final queued input is persisted and remains visible');
+assert.deepEqual(queueController.getState().settings, { useGpu: false, oversizeCropMode: 'expand', workTileMode: 'grouped' }, 'the final queued input is persisted and remains visible');
 
 const notices = [];
-let failingServer = { useGpu: true, oversizeCropMode: 'face-centered' };
+let failingServer = { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' };
 let failNext = true;
 const failureController = createTeamSettingsController({ read: async () => ({ settings: failingServer }), merge: async patch => { if (failNext) { failNext = false; throw new Error('disk full'); } failingServer = { ...failingServer, ...patch }; return { settings: failingServer }; }, notice: message => notices.push(message) });
 await failureController.refresh();
@@ -71,7 +71,7 @@ await failureController.patch({ oversizeCropMode: 'expand' });
 assert.equal(failureController.getState().settings.oversizeCropMode, 'expand', 'a failed write does not poison the following queue');
 assert.equal(notices.length, 1);
 
-let shared = { useGpu: true, oversizeCropMode: 'face-centered' };
+let shared = { useGpu: true, oversizeCropMode: 'face-centered', workTileMode: 'grouped' };
 const surface = () => createTeamSettingsController({ read: async () => ({ settings: shared }), merge: async patch => { shared = { ...shared, ...patch }; return { settings: shared }; } });
 const surfaceA = surface(); const surfaceB = surface(); await Promise.all([surfaceA.refresh(), surfaceB.refresh()]);
 await surfaceA.patch({ useGpu: false }); await surfaceB.patch({ oversizeCropMode: 'expand' });
@@ -111,5 +111,13 @@ const coldStartTimeout = advancedEnvironmentPresentation({ state: 'unavailable',
 assert.equal(coldStartTimeout.label, '启动较慢');
 assert.match(coldStartTimeout.description, /稍候/);
 
+await freshController.patch({ workTileMode: 'per-person' });
+assert.equal(freshController.getState().settings.workTileMode, 'per-person');
+await freshController.patch({ useGpu: true });
+assert.equal(freshController.getState().settings.workTileMode, 'per-person', 'partial merge of another preference preserves single-person mode');
+await assert.rejects(freshController.patch({ workTileMode: 'invalid' }), /补丁无效/);
+const olderSettings = createTeamSettingsController({ read: async () => ({ settings: { useGpu: false, oversizeCropMode: 'expand' } }), merge: async patch => ({ settings: patch }) });
+await olderSettings.refresh();
+assert.equal(olderSettings.getState().settings.workTileMode, 'grouped', 'existing users keep grouped work tiles until they opt in');
 console.log('Team settings state-machine tests passed');
 

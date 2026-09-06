@@ -4,18 +4,16 @@ const path = require('node:path');
 const { Readable, Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const zlib = require('node:zlib');
+const { uint64, zip64Extra, directoryLocation } = require('./component-zip64.cjs');
 
 const MAX_ENTRIES = 10_000;
 const MAX_DIRECTORY_BYTES = 32 * 1024 * 1024;
-// This parser intentionally accepts classic ZIP32 only. Its 32-bit central
-// directory offset makes archives above roughly 4 GiB invalid regardless.
-// The September 2026 four-package release set peaks at 294,486,162 archive
-// bytes, 451,802,764 declared-expanded bytes, and 115,736,422 bytes for one
-// entry. These UI/runtime limits retain explicit headroom without allowing a
-// multi-GiB snapshot or expansion before the user confirms installation.
-const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
-const MAX_ENTRY_BYTES = 256 * 1024 * 1024;
-const MAX_PACKAGE_BYTES = 1024 * 1024 * 1024;
+// No product-size ceiling: ZIP64 files are bounded by exact integer arithmetic,
+// streaming verification and reserved disk space, not an arbitrary MiB limit.
+const MAX_ARCHIVE_BYTES = Number.MAX_SAFE_INTEGER;
+const MAX_ENTRY_BYTES = Number.MAX_SAFE_INTEGER;
+const MAX_PACKAGE_BYTES = Number.MAX_SAFE_INTEGER;
+const MAX_COMPRESSION_RATIO = 200;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_TREE_ENTRIES = 20_000;
 const MAX_ARCHIVE_PATH_BYTES = 8 * 1024 * 1024;
@@ -201,11 +199,18 @@ const localDataRange = (fd, archive, entry, operation) => {
   const flags = local.readUInt16LE(6);
   const method = local.readUInt16LE(8);
   const crc = local.readUInt32LE(14);
-  const compressedSize = local.readUInt32LE(18);
-  const uncompressedSize = local.readUInt32LE(22);
+  let compressedSize = local.readUInt32LE(18);
+  let uncompressedSize = local.readUInt32LE(22);
   const nameLength = local.readUInt16LE(26);
   const extraLength = local.readUInt16LE(28);
   const localNameBytes = readExact(fd, nameLength, entry.localOffset + 30);
+  const usesZip64Sizes = compressedSize === 0xffffffff || uncompressedSize === 0xffffffff;
+  if (usesZip64Sizes) {
+    if (local.readUInt16LE(4) < 45) throw new Error('ZIP64 本地版本无效');
+    const values = zip64Extra(readExact(fd, extraLength, entry.localOffset + 30 + nameLength), ['uncompressedSize', 'compressedSize']);
+    if (compressedSize !== 0xffffffff && compressedSize !== values.compressedSize || uncompressedSize !== 0xffffffff && uncompressedSize !== values.uncompressedSize) throw new Error('ZIP64 本地大小字段不一致');
+    ({ compressedSize, uncompressedSize } = values);
+  }
   const localName = normalizeName(localNameBytes.toString('utf8'));
   if (!localNameBytes.equals(entry.nameBytes) || localName !== entry.name || flags !== entry.flags || method !== entry.method) throw new Error(`ZIP 本地条目与中央目录不一致：${entry.name}`);
   if (!(flags & 8) && (crc !== entry.expectedCrc || compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize)) throw new Error(`ZIP 本地条目大小或校验值与中央目录不一致：${entry.name}`);
@@ -215,12 +220,18 @@ const localDataRange = (fd, archive, entry, operation) => {
   let recordEnd = dataEnd;
   if (flags & 8) {
     const available = archive.directoryOffset - dataEnd;
-    const descriptor = readExact(fd, Math.min(16, available), dataEnd);
-    const matchesAt = base => descriptor.length >= base + 12 && descriptor.readUInt32LE(base) === entry.expectedCrc && descriptor.readUInt32LE(base + 4) === entry.compressedSize && descriptor.readUInt32LE(base + 8) === entry.uncompressedSize;
+    const wide = usesZip64Sizes || entry.zip64Sizes;
+    const length = wide ? 20 : 12;
+    const descriptor = readExact(fd, Math.min(length + 4, available), dataEnd);
+    const matchesAt = base => {
+      if (descriptor.length < base + length || descriptor.readUInt32LE(base) !== entry.expectedCrc) return false;
+      try { return (wide ? uint64(descriptor, base + 4) : descriptor.readUInt32LE(base + 4)) === entry.compressedSize && (wide ? uint64(descriptor, base + 12) : descriptor.readUInt32LE(base + 8)) === entry.uncompressedSize; }
+      catch { return false; }
+    };
     const unsignedMatches = matchesAt(0);
-    const signedMatches = descriptor.length >= 16 && descriptor.readUInt32LE(0) === 0x08074b50 && matchesAt(4);
+    const signedMatches = descriptor.length >= length + 4 && descriptor.readUInt32LE(0) === 0x08074b50 && matchesAt(4);
     if (!unsignedMatches && !signedMatches) throw new Error(`ZIP data descriptor 与中央目录不一致：${entry.name}`);
-    recordEnd += signedMatches ? 16 : 12;
+    recordEnd += length + (signedMatches ? 4 : 0);
     if (recordEnd > archive.directoryOffset) throw new Error(`ZIP data descriptor 越界：${entry.name}`);
   }
   return { start: entry.localOffset, dataStart, dataEnd, recordEnd };
@@ -244,12 +255,10 @@ const inspectComponentArchive = (archivePath, options = {}) => {
       if (tail.readUInt32LE(offset) === 0x06054b50 && offset + 22 + tail.readUInt16LE(offset + 20) === tail.length) { eocd = offset; break; }
     }
     if (eocd < 0) throw new Error('ZIP 中央目录缺失或包已损坏');
-    if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0 || tail.readUInt16LE(eocd + 8) !== tail.readUInt16LE(eocd + 10)) throw new Error('不支持多卷 ZIP 组件包');
-    const count = tail.readUInt16LE(eocd + 10);
-    const directorySize = tail.readUInt32LE(eocd + 12);
-    const directoryOffset = tail.readUInt32LE(eocd + 16);
+    if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0) throw new Error('不支持多卷 ZIP 组件包');
     const absoluteEocd = tailStart + eocd;
-    if (!count || count > MAX_ENTRIES || count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff || directorySize > MAX_DIRECTORY_BYTES || directoryOffset + directorySize !== absoluteEocd) throw new Error('ZIP 中央目录越界或包已损坏');
+    const location = directoryLocation(fd, readExact, tail, eocd, absoluteEocd, { maxEntries: MAX_ENTRIES, maxDirectoryBytes: MAX_DIRECTORY_BYTES });
+    const { count, size: directorySize, offset: directoryOffset } = location;
     const archive = Object.freeze({ archivePath: resolved, size: archiveStat.size, directoryOffset });
     const directory = readExact(fd, directorySize, directoryOffset);
     const entries = [];
@@ -274,13 +283,14 @@ const inspectComponentArchive = (archivePath, options = {}) => {
       const flags = directory.readUInt16LE(offset + 8);
       const method = directory.readUInt16LE(offset + 10);
       const expectedCrc = directory.readUInt32LE(offset + 16);
-      const compressedSize = directory.readUInt32LE(offset + 20);
-      const uncompressedSize = directory.readUInt32LE(offset + 24);
+      let compressedSize = directory.readUInt32LE(offset + 20);
+      let uncompressedSize = directory.readUInt32LE(offset + 24);
       const nameLength = directory.readUInt16LE(offset + 28);
       const extraLength = directory.readUInt16LE(offset + 30);
       const commentLength = directory.readUInt16LE(offset + 32);
       const externalAttributes = directory.readUInt32LE(offset + 38);
-      const localOffset = directory.readUInt32LE(offset + 42);
+      let localOffset = directory.readUInt32LE(offset + 42);
+      let disk = directory.readUInt16LE(offset + 34);
       const entryEnd = offset + 46 + nameLength + extraLength + commentLength;
       if (!nameLength || entryEnd > directory.length) throw new Error('ZIP 条目目录越界');
       const nameBytes = directory.subarray(offset + 46, offset + 46 + nameLength);
@@ -300,7 +310,17 @@ const inspectComponentArchive = (archivePath, options = {}) => {
       if (unixType === 0xa000) throw new Error(`安装包包含不安全的符号链接：${name}`);
       if (unixType && unixType !== 0x8000 && unixType !== 0x4000) throw new Error(`安装包包含不安全的特殊文件：${name}`);
       if (unixType === 0x4000 && !isDirectory || unixType === 0x8000 && isDirectory) throw new Error(`ZIP 条目类型与路径不一致：${name}`);
-      if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) throw new Error('不支持 ZIP64 组件包');
+      const zip64Sizes = compressedSize === 0xffffffff || uncompressedSize === 0xffffffff;
+      const required64 = [['uncompressedSize', uncompressedSize, 0xffffffff], ['compressedSize', compressedSize, 0xffffffff], ['localOffset', localOffset, 0xffffffff], ['disk', disk, 0xffff]].filter(([, value, marker]) => value === marker).map(([key]) => key);
+      if (required64.length) {
+        if (directory.readUInt16LE(offset + 6) < 45) throw new Error('ZIP64 中央目录版本无效');
+        const values = zip64Extra(directory.subarray(offset + 46 + nameLength, offset + 46 + nameLength + extraLength), required64);
+        uncompressedSize = values.uncompressedSize ?? uncompressedSize; compressedSize = values.compressedSize ?? compressedSize;
+        localOffset = values.localOffset ?? localOffset; disk = values.disk ?? disk;
+      }
+      if (disk !== 0) throw new Error('不支持多卷 ZIP 条目');
+      if (method === 0 && compressedSize !== uncompressedSize) throw new Error(`ZIP 存储条目大小不一致：${name}`);
+      if (method === 8 && uncompressedSize > Math.max(compressedSize, 1) * MAX_COMPRESSION_RATIO) throw new Error(`ZIP 条目压缩倍率超过安全上限：${name}`);
       if (!Number.isSafeInteger(uncompressedSize) || uncompressedSize > MAX_ENTRY_BYTES) throw new Error(`安装包条目过大：${name}`);
       total += uncompressedSize;
       if (!Number.isSafeInteger(total) || total > MAX_PACKAGE_BYTES) throw new Error('安装包展开大小超过安全上限');
@@ -326,7 +346,8 @@ const inspectComponentArchive = (archivePath, options = {}) => {
         accountPath('file', pathName);
       }
       if (unixMode & 0o7000) throw new Error(`安装包条目包含不安全的特殊权限位：${name}`);
-      entries.push({ name, nameBytes: Buffer.from(nameBytes), isDirectory, flags, method, expectedCrc, compressedSize, uncompressedSize, localOffset, unixMode: unixMode & 0o777 });
+      if (!Number.isSafeInteger(localOffset + 30) || localOffset < 0 || localOffset + 30 > directoryOffset) throw new Error('ZIP 本地头位置越界');
+      entries.push({ name, nameBytes: Buffer.from(nameBytes), isDirectory, flags, method, expectedCrc, compressedSize, uncompressedSize, localOffset, zip64Sizes, unixMode: unixMode & 0o777 });
       offset = entryEnd;
     }
     if (offset !== directory.length) throw new Error('ZIP 中央目录条目数量不一致');
@@ -389,7 +410,8 @@ const extractEntry = async (archiveHandle, inspection, entry, target, actualBudg
     actualBudget.bytes += chunk.length;
     if (bytes > entry.uncompressedSize || bytes > MAX_ENTRY_BYTES || actualBudget.bytes > MAX_PACKAGE_BYTES) { callback(new Error(`ZIP 条目实际展开大小超过声明或安全上限：${entry.name}`)); return; }
     digest.update(chunk);
-    for (const byte of chunk) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+    if (typeof zlib.crc32 === 'function') crc = (zlib.crc32(chunk, (crc ^ 0xffffffff) >>> 0) ^ 0xffffffff) >>> 0;
+    else for (const byte of chunk) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
     callback(null, chunk);
   } });
   const streams = [source];

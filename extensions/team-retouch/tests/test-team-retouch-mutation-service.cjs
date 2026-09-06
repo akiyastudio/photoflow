@@ -36,6 +36,7 @@ fs.writeFileSync(returnedInputPath, 'returned');
 fs.writeFileSync(enginePath, `
 const fs = require('fs'); const path = require('path');
 const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1];
+if (['detect','detect-batch'].includes(args[0]) && value('--work-tile-mode') !== 'per-person') throw new Error('work tile preference was not forwarded');
 if (args[0] === 'match-batch') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); const returned = manifest.returned[0]; const candidate = manifest.candidates[0]; console.log(JSON.stringify({ type: 'progress', progress: 12, message: '读取返图 1/1' })); console.log(JSON.stringify({ type: 'progress', progress: 67, message: '比对图片 1/1' })); console.log(JSON.stringify({ matches: [{ ...returned, ...candidate, confidence: 'high', matchConfidence: 'high', editEvidence: { reallyModified: true }, returnWarnings: [] }] })); process.exit(0); }
 if (args[0] === 'merge') { fs.mkdirSync(path.dirname(value('--output')), { recursive: true }); fs.writeFileSync(value('--output'), 'merged'); console.log(JSON.stringify({ mergedCount: 1, conflictPixels: 0, seamScore: 1, width: 100, height: 100, metrics: [] })); process.exit(0); }
 if (args[0] === 'restore') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); const outputs = manifest.tasks.map(task => { fs.mkdirSync(path.dirname(task.patchPath), { recursive: true }); fs.writeFileSync(task.patchPath, 'recropped-large-source'); return { id: task.id, width: 6000, height: 6000, digest: require('crypto').createHash('sha256').update(fs.readFileSync(task.patchPath)).digest('hex') }; }); console.log(JSON.stringify({ outputs })); process.exit(0); }
@@ -89,7 +90,7 @@ const ready = new Promise((resolve, reject) => {
       let error;
       try {
         if (frame.method === 'component.storage') result = { dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
-        else if (frame.method === 'component.settings') result = { revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
+        else if (frame.method === 'component.settings') result = { revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand', workTileMode: 'per-person' } };
         else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { emitted: true }; }
         else if (frame.method === 'tasks') result = { task: null, cancelled: false };
         else if (frame.method === 'dialogs') result = { cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
@@ -126,6 +127,7 @@ const ready = new Promise((resolve, reject) => {
 (async () => {
   try {
     await ready;
+    await assert.rejects(invoke('team.settings.update.v1', { workTileMode: 'invalid' }), /补丁无效/);
     const detected = await invoke('team.patch.detect.v1', { photoId: 'photo-1', baseVersionId: 'version-1' });
     assert.equal(detected.tasks.length, 1, 'real child-process output must commit one patch');
     assert.equal(materializeCount, 1, 'single-photo detection materializes exactly one unique original');

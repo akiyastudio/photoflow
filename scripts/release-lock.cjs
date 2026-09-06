@@ -2,11 +2,14 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { releaseOperationsRoot, assertLegacyReleaseStateAbsent } = require('./project-output-paths.cjs');
 const identityFor = stat => ({ dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs });
 const sameIdentity = (left, right) => left && right && Object.keys(left).every(key => left[key] === right[key]);
 
 const acquireReleaseLock = repositoryRoot => {
-  const lockPath = path.join(repositoryRoot, 'artifacts', 'release.lock');
+  assertLegacyReleaseStateAbsent(repositoryRoot, 'release.lock');
+  assertLegacyReleaseStateAbsent(repositoryRoot, 'release-publish-attempts');
+  const lockPath = path.join(releaseOperationsRoot(repositoryRoot), 'release.lock');
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const record = { schemaVersion: 1, pid: process.pid, host: os.hostname(), attemptId: crypto.randomUUID(), startedAt: new Date().toISOString() };
   const attempt = () => { const fd = fs.openSync(lockPath, 'wx'); fs.writeFileSync(fd, `${JSON.stringify(record)}\n`); fs.fsyncSync(fd); return { fd, lockPath, record, identity: identityFor(fs.fstatSync(fd)) }; };

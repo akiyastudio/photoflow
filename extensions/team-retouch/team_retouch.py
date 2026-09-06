@@ -695,8 +695,10 @@ def reposition_crop_to_avoid_bystanders(crop, focus_box, image_width, image_heig
     return best[1] if best else crop
 
 
-def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, oversize_crop_mode="expand"):
+def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, oversize_crop_mode="expand", work_tile_mode="grouped"):
     """Plan spatially coherent work tiles with as little bystander duplication as possible."""
+    if work_tile_mode not in ("grouped", "per-person"):
+        raise ValueError("工作图分组方式无效")
     count = len(items)
     if not count:
         return []
@@ -822,7 +824,13 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                 }
         return candidate_cache[key]
 
-    if count <= 18:
+    if work_tile_mode == "per-person":
+        # Every target gets its own task and mask, even when rectangular crops
+        # overlap. Keep the same crop-size and bystander safety rules.
+        tiles = [candidate((index,)) for index in range(count)]
+        if any(tile is None for tile in tiles):
+            raise ValueError("无法为每个人物生成安全裁剪，请调整超大人物裁剪方式")
+    elif count <= 18:
         memo = {}
 
         def solve(remaining):
@@ -921,14 +929,14 @@ def payload_box(value):
 
 
 def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, detector,
-                        oversize_crop_mode="expand", progress_message="正在重新生成工作图"):
+                        oversize_crop_mode="expand", progress_message="正在重新生成工作图", work_tile_mode="grouped"):
     """Build crops and masks from an already-known, deterministic person set."""
     height, width = rgb.shape[:2]
     people = spatially_order_people(people)
     if not people:
         return people, []
     proxy_width, proxy_height, proxy_scale = proxy_size(width, height)
-    tiles = plan_work_tiles(people, width, height, oversize_crop_mode=oversize_crop_mode)
+    tiles = plan_work_tiles(people, width, height, oversize_crop_mode=oversize_crop_mode, work_tile_mode=work_tile_mode)
     emit_progress(78, f"{progress_message}：共 {len(tiles)} 张")
     tasks = []
     mask_directory = output_root / "masks"
@@ -978,7 +986,7 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
             "maskPath": str(mask_file),
             "mask": {"width": proxy_width, "height": proxy_height, "scale": proxy_scale},
             "generation": {
-                "version": 2, "strategy": oversize_crop_mode,
+                "version": 2, "strategy": oversize_crop_mode, "workTileMode": work_tile_mode,
                 "sourceWidth": width, "sourceHeight": height,
                 "workWidth": output_width, "workHeight": output_height,
                 "sourceCropWidth": crop_width, "sourceCropHeight": crop_height,
@@ -1001,7 +1009,7 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
 
 def detect(input_path, output_dir, preference="auto", delivery_dir=None, delivery_prefix=None,
            oversize_crop_mode="expand", advanced_runner=None, session_bundle=None,
-           advanced_mode="auto", excluded_boxes=None):
+           advanced_mode="auto", excluded_boxes=None, work_tile_mode="grouped"):
     if advanced_mode != "basic" and not packaged_advanced_available():
         advanced_mode = "basic"
     emit_progress(2, "正在读取原图")
@@ -1123,13 +1131,14 @@ def detect(input_path, output_dir, preference="auto", delivery_dir=None, deliver
         rgb, people, output_root, delivery_root, delivery_name, detector,
         oversize_crop_mode=oversize_crop_mode,
         progress_message="人物识别完成，正在生成工作图",
+        work_tile_mode=work_tile_mode,
     )
 
     manifest_path = output_root / "manifest.json"
     manifest_path.write_text(json.dumps({
         "source": str(input_path), "width": width, "height": height,
         "personCount": len(fused), "workTileEdge": WORK_TILE_EDGE,
-        "oversizeCropMode": oversize_crop_mode, "tasks": tasks,
+        "oversizeCropMode": oversize_crop_mode, "workTileMode": work_tile_mode, "tasks": tasks,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     emit_progress(100, f"完成：{len(fused)} 个人物已生成 {len(tasks)} 张工作图")
     return {
@@ -1507,7 +1516,7 @@ class UnavailableAdvancedRunner:
 
 
 def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-centered", advanced_mode="auto",
-                 session_bundle=None, batch_runner=None):
+                 session_bundle=None, batch_runner=None, work_tile_mode="grouped"):
     payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     items = payload.get("items") or []
     if not items:
@@ -1544,6 +1553,7 @@ def detect_batch(manifest_path, preference="auto", oversize_crop_mode="face-cent
                     preference, os.path.abspath(item["deliveryDir"]), item.get("deliveryPrefix"),
                     oversize_crop_mode, batch_runner, session_bundle, advanced_mode,
                     item.get("excludedBoxes") or [],
+                    work_tile_mode=work_tile_mode,
                 )
                 results.append({
                     "success": True, "key": item.get("key"), "name": item.get("name"),
@@ -1715,6 +1725,7 @@ def create_parser():
     parser.add_argument("--provider", choices=("auto", "gpu", "cpu"), default="auto")
     parser.add_argument("--advanced-mode", choices=("auto", "basic", "advanced"), default="auto")
     parser.add_argument("--oversize-crop-mode", choices=("face-centered", "expand"), default="face-centered")
+    parser.add_argument("--work-tile-mode", choices=("grouped", "per-person"), default="grouped")
     parser.add_argument("--excluded-boxes", default="[]")
     return parser
 
@@ -1740,7 +1751,7 @@ def run(args_list=None):
     if args.action == "detect-batch":
         if not args.manifest:
             parser.error("detect-batch requires --manifest")
-        emit(detect_batch(os.path.abspath(args.manifest), args.provider, args.oversize_crop_mode, args.advanced_mode))
+        emit(detect_batch(os.path.abspath(args.manifest), args.provider, args.oversize_crop_mode, args.advanced_mode, work_tile_mode=args.work_tile_mode))
         return
     if args.action == "match-batch":
         if not args.manifest:
@@ -1764,6 +1775,7 @@ def run(args_list=None):
         os.path.abspath(args.delivery_dir) if args.delivery_dir else None,
         args.delivery_prefix, args.oversize_crop_mode, advanced_mode=args.advanced_mode,
         excluded_boxes=json.loads(args.excluded_boxes or "[]"),
+        work_tile_mode=args.work_tile_mode,
     ))
 
 

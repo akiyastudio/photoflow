@@ -7,7 +7,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.
 const sdk = fs.readFileSync(path.join(root, 'renderer', 'src', 'sdk.ts'), 'utf8');
 const service = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8');
 const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
-const advancedPackageScript = fs.readFileSync(path.join(root, 'scripts', 'build-advanced-package.cjs'), 'utf8');
+const advancedBuilder = require('../scripts/build-advanced-package.cjs');
 const icon = fs.readFileSync(path.join(root, 'renderer', 'team-retouch.svg'), 'utf8');
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 assert.equal(manifest.apiVersion, 1);
@@ -24,7 +24,10 @@ for (const capability of ['project.media.page','project.output','version.create'
 assert(packageScript.includes("path.join(root,'models'") && packageScript.includes('PyInstaller') && packageScript.includes('component.json'));
 assert(packageScript.includes("require.resolve('vite/package.json'") && packageScript.includes('packagedEntrypoint') && packageScript.includes('fs.renameSync(generatedExecutable, declaredExecutable)'), 'production packaging must resolve hoisted build tools and publish the manifest-declared executable');
 assert(packageScript.includes("require('./package-layout.cjs')") && packageScript.includes('copyServiceRuntime(root,packageRoot)'), 'production packaging must stage the complete isolated service runtime');
-assert(packageScript.includes("process.argv.indexOf('--output-dir')") && advancedPackageScript.includes("process.argv.indexOf('--output-dir')"), 'standard and advanced packages must honor an explicit output directory');
+assert(packageScript.includes("process.argv.indexOf('--output-dir')"), 'standard packages honor an explicit output directory');
+assert.equal(advancedBuilder.parseArguments(['--output-dir', './release output'])['--output-dir'], path.resolve('./release output'));
+assert.equal(advancedBuilder.parseArguments(['--linux-user', 'photoflowlab'])['--linux-user'], 'photoflowlab');
+for (const values of [['--output-dir'], ['--skip-checks'], ['--linux-user', 'user;command'], ['--distro-name', '../other']]) assert.throws(() => advancedBuilder.parseArguments(values));
 for (const action of Object.values(manifest.componentHost.service.lifecycleActions)) assert.equal(action.sha256, sha256(path.join(root, action.entry)));
 for (const entry of ['renderer/index.html','renderer/settings.html','renderer/team-retouch.svg','service.cjs','workflow-generation.cjs','workflow-manifest.cjs','backup-restore.cjs','package.json','package-lock.json']) assert(fs.existsSync(path.join(root, entry)), `missing plugin-owned file: ${entry}`);
 assert(icon.includes('fill="#eff6ff"') && icon.includes('stroke="#1c60e6"') && icon.includes('M18 21a8 8 0 0 0-16 0'), 'team-retouch brand icon must use the video-transcription light background while retaining the blue UsersRound mark');

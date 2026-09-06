@@ -1,0 +1,12 @@
+# Inference-only inputs; training dependencies are not shipped intentionally.
+# PairDETR's Transformers/tokenizers stack requires Python 3.10 wheels.
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0+cu128
+torchvision==0.25.0+cu128
+transformers==4.27.3
+timm==0.6.13
+numpy==1.26.4
+pillow==12.3.0
+setuptools==69.5.1
+wheel==0.45.1

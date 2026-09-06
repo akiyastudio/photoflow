@@ -15,6 +15,12 @@ from team_retouch import bounded_planning_box, emit_progress, identify_people, m
 from patch_merge import align_patch, constrain_person_boundary, edit_weight_and_delta, fuse_patch_delta, merge
 
 def main():
+    from work_tile_scenarios import verify_work_tile_modes
+    verify_work_tile_modes()
+    command = "printf '%s' \"a path/O'Name/$literal\""
+    with mock.patch.object(advanced_bridge, 'run_process', return_value='ok') as invoked:
+        assert advanced_bridge.run_shell(command, 5) == 'ok'
+        assert invoked.call_args.args[0][-4:] == ['--exec', 'bash', '-lc', command], 'WSL must not interpret the command through a second shell'
     stream=io.StringIO()
     with redirect_stdout(stream): emit_progress(34,'working')
     assert json.loads(stream.getvalue())['progress']==34

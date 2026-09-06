@@ -7,6 +7,7 @@ const { createComponentTransactionService, nodeIdentity: componentPathIdentity }
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
 const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath, componentSubtreeIdentity, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentCleanupReceipt, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
+const { componentInstallTimeoutMs } = require('../component-zip64.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 const { validateComponentPackageInspection } = require('../component-registry.cjs');
 
@@ -978,7 +979,7 @@ const registerSystemIpc = context => {
       const archiveStat = await fs.promises.lstat(archivePath);
       if (!archiveStat.isFile() || archiveStat.isSymbolicLink()) throw new Error('组件包必须是普通文件且不能是链接');
       capacityReservation = await reserveComponentInstallCapacity(app.getPath('temp'), archiveStat.size + 128 * 1024 * 1024);
-      const operation = { signal: installAbortController.signal, deadlineAt: Date.now() + 5 * 60 * 1000 };
+      const operation = { signal: installAbortController.signal, deadlineAt: Date.now() + componentInstallTimeoutMs(archiveStat.size) };
       const assertInstallActive = () => { if (operation.signal.aborted) throw Object.assign(new Error('组件安装已取消'), { name: 'AbortError' }); if (Date.now() >= operation.deadlineAt) throw Object.assign(new Error('组件安装超时'), { name: 'AbortError' }); };
       installOperationId = crypto.randomUUID();
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${componentId}-${installOperationId}`);
@@ -989,6 +990,7 @@ const registerSystemIpc = context => {
       packageSnapshotReceipt = { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity, size: packageSnapshotStat.size, sha256: sourceIdentity.sha256, mode: packageSnapshotStat.mode & 0o777 };
       const packageSizeBytes = sourceIdentity.size;
       const snapshotPackage = inspectComponentArchive(packageSnapshotPath, { ...operation, inspectionToken: sourceIdentity.inspectionToken });
+      operation.deadlineAt = Date.now() + componentInstallTimeoutMs(packageSizeBytes, snapshotPackage.totalUncompressedBytes);
       validateComponentPackageInspection(snapshotPackage, { expectedId: componentId, platform: process.platform, arch: process.arch });
       await capacityReservation.resize(packageSizeBytes + snapshotPackage.totalUncompressedBytes + 64 * 1024 * 1024);
       installVolumeReservation = await reserveComponentInstallCapacity(pluginService.installRoot, snapshotPackage.totalUncompressedBytes + 128 * 1024 * 1024);

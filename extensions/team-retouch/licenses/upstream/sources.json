@@ -1,0 +1,44 @@
+[
+  {
+    "name": "yunet",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/face_detection_yunet/LICENSE",
+    "sha256": "c83b8120c50ccbd4c4f96edf53141bdd566ebb8f8e9227e415326aa1b1aba958",
+    "retrievedAt": "2026-09-05"
+  },
+  {
+    "name": "adaface",
+    "url": "https://raw.githubusercontent.com/mk-minchul/AdaFace/master/LICENSE",
+    "sha256": "95b6e493eb9dba27f2150304e790ae254bab18d1611f4d6e2ade28fa3a271583",
+    "retrievedAt": "2026-09-05"
+  },
+  {
+    "name": "osnet",
+    "url": "https://raw.githubusercontent.com/KaiyangZhou/deep-person-reid/master/LICENSE",
+    "sha256": "3ac8ce2a83d170cb1c7c84152e0c1faca1f187794303514383960d2441716247",
+    "retrievedAt": "2026-09-05"
+  },
+  {
+    "name": "mmdetection",
+    "url": "https://raw.githubusercontent.com/open-mmlab/mmdetection/main/LICENSE",
+    "sha256": "874b8b2e6f12306a1ff7812c068a0dbf880418b8ac1f7190382bd6c6da9f23a1",
+    "retrievedAt": "2026-09-05"
+  },
+  {
+    "name": "mmdeploy",
+    "url": "https://raw.githubusercontent.com/open-mmlab/mmdeploy/main/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "retrievedAt": "2026-09-05"
+  },
+  {
+    "name": "sam2",
+    "url": "https://raw.githubusercontent.com/facebookresearch/sam2/2b90b9f5ceec907a1c18123530e92e794ad901a4/LICENSE",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+    "retrievedAt": "2026-09-05"
+  },
+  {
+    "name": "flatbuffers",
+    "url": "https://raw.githubusercontent.com/google/flatbuffers/master/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "retrievedAt": "2026-09-05"
+  }
+]

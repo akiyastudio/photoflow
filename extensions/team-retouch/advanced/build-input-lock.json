@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "componentId": "team-retouch",
+  "componentVersion": "26.9.4",
+  "advancedRuntimeApiVersion": 1,
+  "pairDetrCommit": "fbcdebdff44bb5e9e6a9d92240ff01f8eec30ebc",
+  "sam2Commit": "2b90b9f5ceec907a1c18123530e92e794ad901a4",
+  "artifacts": [
+    {
+      "path": "advanced/locks/pairdetr-requirements.lock",
+      "sha256": "b9cb182012c76c912ca17bd5917530e6e58c77547cdb111398a418af4dfc01ca"
+    },
+    {
+      "path": "advanced/locks/sam2-requirements.lock",
+      "sha256": "6047a9d5dcdec37a04522a17c2ae8ce0d03b4892425f1447f5a3c31a104cdeeb"
+    },
+    {
+      "path": "advanced/locks/checkpoints.sha256",
+      "sha256": "905fc4fb3cb89747233708ca22626e2f74766bf11653c60dac6c0c3cab550c8c"
+    },
+    {
+      "path": "advanced/source-metadata.json",
+      "sha256": "6e5f2beb30b3de5fbeb8c08f3d316da80c03ebe18c5f5d43d62bfdb514b2976f"
+    },
+    {
+      "path": "advanced/pairdetr-requirements.in",
+      "sha256": "2ba730d06e569c559344919fa98bd1913b4401fe87bbcde4cbfce48568200c6c"
+    },
+    {
+      "path": "advanced/sam2-requirements.in",
+      "sha256": "d44a14adec66d77863b27af7228ce3900eea88748a1c486288cbc5633a6fb015"
+    },
+    {
+      "path": "advanced/vendor/hf_utils.py",
+      "sha256": "9b287d932345da80d324c87c327e9f0da3e9ad661f78dcca32b2c4610ee14d03"
+    },
+    {
+      "path": "advanced/vendor/preprocessor_config.json",
+      "sha256": "14e77285cf4ef30c82a9c1697a6fad0467b47da395e5a3d1d38c5b9dd1e00751"
+    },
+    {
+      "path": "advanced/pairdetr_service.py",
+      "sha256": "e612505d4f6be8c1468a9d5c2511f9166999bfb3837d6868fff8940e7092dcd8"
+    },
+    {
+      "path": "advanced/sam2_service.py",
+      "sha256": "48ad0b5339ebecc690396c2152c422eef9f1cb863bf72fe13079f39d71eae8b4"
+    },
+    {
+      "path": "advanced_geometry.py",
+      "sha256": "e04cc4bc0677b305ad388fcaa22dc28a15e5af5081a6ff5d60bd6b0a7cb94b3f"
+    },
+    {
+      "path": "checkpoint_lock.py",
+      "sha256": "63af1a7e1e749942ef8cf1bd51fd339869f5ad0585ad1efd47428d5b9b153256"
+    },
+    {
+      "path": "image_safety.py",
+      "sha256": "c281d414f4a77907edf5c8c66009caf34cd7f00cbe7675b11fbed0e9efc14d81"
+    },
+    {
+      "path": "scripts/setup-advanced-wsl.sh",
+      "sha256": "7710c5023b76d5f93076de31bcb50b9139e5ed278b7ac70d8e9bc0f8b78548ab"
+    },
+    {
+      "path": "scripts/verify-advanced-environment.py",
+      "sha256": "15707d12dbf4a9dcba82947026c859c17289b656139d6d45b11994d09ef3f409"
+    },
+    {
+      "path": "scripts/create-advanced-offline-package.ps1",
+      "sha256": "9e1af854187b132feb50938d40c443d3793ab6c8e7d1b39576430cf2cfaf928a"
+    }
+  ]
+}

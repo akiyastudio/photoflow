@@ -153,13 +153,14 @@ const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathImplementa
       assert.match(competing.find(result => result.status === 'rejected').reason.message, /容量已被其他安装预留/);
       await competing.find(result => result.status === 'fulfilled').value.release();
     } finally { fs.promises.statfs = originalStatfs; }
-    const logicalPayload = Buffer.alloc(100 * 1024 * 1024, 0x61);
+    const logicalPayload = crypto.randomBytes(100 * 1024 * 1024);
     const benchmarkArchives = Array.from({ length: 3 }, (_, index) => path.join(root, `benchmark-${index}.zip`));
     for (const target of benchmarkArchives) writeZip(target, [['pkg/component.json', manifest], ['pkg/model.bin', logicalPayload, { method: 8 }], ['pkg/worker.cjs', 'ok']]);
     const benchmarkStart = performance.now();
     for (const target of benchmarkArchives) assert.equal(inspectComponentArchive(target).totalUncompressedBytes > 100 * 1024 * 1024, true);
     const benchmarkMs = performance.now() - benchmarkStart;
     assert(benchmarkMs < 5_000, `bounded inspection of three ~100 MiB logical packages regressed: ${Math.round(benchmarkMs)} ms`);
+    await require('./test-component-zip64.cjs')();
     console.log('Component archive parser parity tests passed');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

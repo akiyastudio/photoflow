@@ -30,7 +30,7 @@ const assertComponentBuildReceipt = (receipt, component, gitCommit) => {
 const createStableManifest = ({ product, version, buildSourceCommit, buildSourceTree, artifacts }) => ({ schemaVersion: 2, product, version, buildSourceCommit, buildSourceTree, artifacts: [...artifacts].sort((a, b) => a.fileName.localeCompare(b.fileName, 'en')) });
 const stageRelease = async ({ repositoryRoot, installerRoot, product, version, gitCommit, gitTree }) => {
   assertGitHead(repositoryRoot, gitCommit); assertCleanGitWorktree(repositoryRoot);
-  const finalRoot = path.join(repositoryRoot, 'artifacts', 'releases', gitCommit, version);
+  const finalRoot = path.join(repositoryRoot, 'artifacts', 'installers', 'releases', gitCommit, version);
   if (fs.existsSync(finalRoot)) throw new Error(`不可变发布 staging 已存在：${finalRoot}`);
   const temporary = `${finalRoot}.tmp-${crypto.randomUUID()}`;
   fs.mkdirSync(temporary, { recursive: true });
@@ -74,7 +74,7 @@ const verifyStagedRelease = async ({ repositoryRoot, manifestPath }) => {
   const commit = String(manifest.buildSourceCommit || '');
   const treeResult = require('node:child_process').spawnSync('git', ['rev-parse', `${commit}^{tree}`], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
   if (manifest.schemaVersion !== 2 || !/^[a-f0-9]{40}$/i.test(commit) || treeResult.error || treeResult.status !== 0 || treeResult.stdout.trim() !== manifest.buildSourceTree) throw new Error('交付清单构建源码 commit/tree 不可验证');
-  const canonicalRoot = path.join(repositoryRoot, 'artifacts', 'releases', commit, String(manifest.version));
+  const canonicalRoot = path.join(repositoryRoot, 'artifacts', 'installers', 'releases', commit, String(manifest.version));
   if (!Array.isArray(manifest.artifacts) || manifest.artifacts.length < 2 || manifest.artifacts.length > 64 || path.resolve(root) !== path.resolve(canonicalRoot)) throw new Error('交付清单集合或 staging 路径无效');
   const names = new Set();
   for (const artifact of manifest.artifacts) {

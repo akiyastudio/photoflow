@@ -1,6 +1,40 @@
 $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'advanced-installer\setup-team-retouch-advanced.ps1'
 . $setup -TestHelpersOnly
+if ((Resolve-AdvancedLinuxUser @{linuxUser='photoflowlab'} 'photoflow' $false) -cne 'photoflowlab') { throw 'Trusted package user was not selected' }
+foreach ($case in @(@{linuxUser=''}, @{linuxUser='../root'}, @{linuxUser='user;id'})) {
+    $rejected = $false
+    try { Resolve-AdvancedLinuxUser $case '' $false | Out-Null } catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid package Linux user was accepted' }
+}
+$rejected = $false
+try { Resolve-AdvancedLinuxUser @{linuxUser='photoflowlab'} 'photoflow' $true | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'Explicit Linux user mismatch was accepted' }
+$script:recordedWslArguments = @()
+function wsl.exe { $script:recordedWslArguments = @($args); $global:LASTEXITCODE = 0; return '/mnt/c/path with spaces/script.py' }
+try {
+    $windowsFixturePath = "C:\path with spaces\O'Name\script.py"
+    Get-AdvancedWslText 'test-distro' 'testuser' @('wslpath', '-a', $windowsFixturePath) | Out-Null
+    if ($script:recordedWslArguments -notcontains '--exec' -or $script:recordedWslArguments[-1] -cne $windowsFixturePath) { throw 'WSL path must be passed as one literal argument without an intermediate shell' }
+} finally { Remove-Item Function:\wsl.exe }
+$exporter = Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\create-advanced-offline-package.ps1'
+. $exporter -OutputPath 'unused-test-output.zip' -TestHelpersOnly
+$script:wslListMode = 'busy'; $script:wslShutdownCalls = 0
+function wsl.exe {
+    $global:LASTEXITCODE = 0
+    if ($args[0] -eq '--list') {
+        if ($script:wslListMode -eq 'busy') { return 'AnotherUserTask' }
+        if ($script:wslListMode -eq 'error') { $global:LASTEXITCODE = 1 }
+    } elseif ($args[0] -eq '--shutdown') { $script:wslShutdownCalls += 1 }
+}
+try {
+    if ((Stop-IdleWslVirtualMachine) -ne $false -or $script:wslShutdownCalls -ne 0) { throw 'Exporter interrupted another running distribution' }
+    $script:wslListMode = 'idle'
+    if ((Stop-IdleWslVirtualMachine) -ne $true -or $script:wslShutdownCalls -ne 1) { throw 'Exporter did not release an idle VM' }
+    $script:wslListMode = 'error'; $rejected = $false
+    try { Stop-IdleWslVirtualMachine | Out-Null } catch { $rejected = $true }
+    if (-not $rejected -or $script:wslShutdownCalls -ne 1) { throw 'Exporter must refuse VM shutdown when running state cannot be read' }
+} finally { Remove-Item Function:\wsl.exe }
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 

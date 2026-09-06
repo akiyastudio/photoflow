@@ -6,6 +6,7 @@ import { notify, rpc, type ComponentContext } from './sdk';
 import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
 import './host-api-ui.css';
+import './team-dialog.css';
 import './tailwind.css';
 import './settings-style.css';
 

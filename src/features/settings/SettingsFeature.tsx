@@ -4,7 +4,6 @@ import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProgres
 import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentSettingsPageContribution, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
 import { ComponentIcon } from '../../components/ComponentIcon';
 import { useAppDialog } from '../../components/AppDialogProvider';
-import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
 import { THIRD_PARTY_SOFTWARE_LICENSES } from '../../licenses/softwareLicenses';
 import { VideoSplitView, VideoTranscodeView } from '../tools/ToolViews';
 import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegacySdMirrors } from '../tools/sd-startup-import-model';
@@ -1239,8 +1238,8 @@ const AboutSettings = () => {
       <SettingsRow title="官方网站" description="访问照片流官方网站。"><button type="button" onClick={() => openExternal('https://qingstudio.cn/')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">打开<ExternalLink size={13}/></button></SettingsRow>
       <SettingsRow title="联系作者" description="通过电子邮件发送联系信息。"><button type="button" onClick={() => openExternal('mailto:akiyastudio@qq.com')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">akiyastudio@qq.com<ExternalLink size={13}/></button></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="模型与权重">
-      {FORMAL_MODEL_LICENSES.map(model => <SettingsRow key={model.bundledFile} title={model.name} description={`${model.purpose} · ${model.version} · ${model.license}`} align="start"><div><p className="break-all font-mono text-[11px] text-slate-500">{model.bundledFile}</p><p className="mt-1 break-all font-mono text-[10px] text-slate-400">SHA-256: {model.sha256}</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => openExternal(model.sourceUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">来源<ExternalLink size={13}/></button><button type="button" onClick={() => openExternal(model.downloadUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">下载<ExternalLink size={13}/></button></div><details className="mt-2 rounded-lg border border-slate-200 bg-white"><summary className="cursor-pointer px-3 py-2 text-xs font-bold text-slate-700">许可证全文</summary><pre className="max-h-80 overflow-auto whitespace-pre-wrap border-t border-slate-200 p-3 font-mono text-[11px] leading-5 text-slate-600">{model.licenseText}</pre></details></div></SettingsRow>)}
+    <SettingsPageGroup title="可选组件的许可说明">
+      <SettingsRow title="组件模型与运行库" description="可选组件专属的模型、权重和依赖清单由组件提供，请在对应组件的设置页查看。主程序及共用运行库列在下方。"><span className="ml-auto text-xs text-slate-500">在组件设置中查看</span></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="第三方软件与运行库">
       {THIRD_PARTY_SOFTWARE_LICENSES.map(item => <SettingsRow key={`${item.group}-${item.name}`} title={item.name} description={`${item.group} · ${item.version} · ${item.purpose}${item.note ? ` · ${item.note}` : ''}`}><div className="ml-auto flex w-fit items-center gap-2"><span className="text-xs font-bold text-slate-500">{item.license}</span><button type="button" onClick={() => openExternal(item.sourceUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">来源<ExternalLink size={13}/></button><button type="button" onClick={() => openExternal(item.licenseUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">许可<ExternalLink size={13}/></button></div></SettingsRow>)}

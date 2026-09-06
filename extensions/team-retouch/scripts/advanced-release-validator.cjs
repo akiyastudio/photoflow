@@ -7,12 +7,17 @@ const INPUT_ARTIFACTS = Object.freeze([
   'advanced/locks/sam2-requirements.lock',
   'advanced/locks/checkpoints.sha256',
   'advanced/source-metadata.json',
+  'advanced/pairdetr-requirements.in',
+  'advanced/sam2-requirements.in',
+  'advanced/vendor/hf_utils.py',
+  'advanced/vendor/preprocessor_config.json',
   'advanced/pairdetr_service.py',
   'advanced/sam2_service.py',
   'advanced_geometry.py',
   'checkpoint_lock.py',
   'image_safety.py',
   'scripts/setup-advanced-wsl.sh',
+  'scripts/verify-advanced-environment.py',
   'scripts/create-advanced-offline-package.ps1',
 ]);
 const PAIR_COMMIT = 'fbcdebdff44bb5e9e6a9d92240ff01f8eec30ebc';

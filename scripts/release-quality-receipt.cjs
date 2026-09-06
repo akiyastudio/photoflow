@@ -2,11 +2,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
+const { releaseOperationsRoot } = require('./project-output-paths.cjs');
 
 const SCHEMA_VERSION = 1;
 const TOOL_VERSION = 1;
 const COMMAND = 'npm run check:release:quality';
-const receiptPathFor = repositoryRoot => path.join(repositoryRoot, 'artifacts', 'release-quality-receipt.json');
+const receiptPathFor = repositoryRoot => path.join(releaseOperationsRoot(repositoryRoot), 'release-quality-receipt.json');
 const identityFor = stat => ({ dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs });
 const sameIdentity = (left, right) => left && right && Object.keys(left).every(key => left[key] === right[key]);
 

@@ -311,7 +311,7 @@ const run = async () => {
     assert.match(`${publish.stdout}\n${publish.stderr}`, /发布必须显式提供 --manifest|legal release approval is missing/i);
 
     const releaseVersion = `99.${crypto.randomInt(10, 90)}.${crypto.randomInt(10, 90)}`;
-    const candidatePath = path.join(root, 'artifacts', 'cloudbase', `app-release-${releaseVersion}.json`);
+    const candidatePath = path.join(root, 'artifacts', 'installers', 'metadata', `app-release-${releaseVersion}.json`);
     assert(!fs.existsSync(candidatePath), 'legal gate regression candidate must start absent');
     const generate = spawnSync(process.execPath, [
       path.join(root, 'scripts', 'generate-release-json.cjs'),
