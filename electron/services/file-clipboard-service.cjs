@@ -8,7 +8,7 @@ const runJson = (command, args, stdin = '', timeoutMs = 12000, processSupervisor
   const child = processSupervisor
     ? processSupervisor.launch({
       id: `csharp:file-clipboard:${++clipboardProcessSequence}`,
-      kind: 'csharp-helper', command, args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true,
+      kind: 'csharp-helper', command, args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true, windowsJob: true,
     }).child
     : spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';

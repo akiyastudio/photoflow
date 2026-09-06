@@ -137,5 +137,33 @@ class WebContentsView {
   while (loadGates.length === gatesBeforeReplacement) await new Promise(resolve => setImmediate(resolve));
   loadGates.at(-1).release(); await replacementOpen; await manager.closeComponentAndWait(componentId);
 
+  let passiveClears = 0;
+  manager.clearComponentViewState = async () => { passiveClears += 1; };
+  descriptor = { ...descriptor, service: { ...descriptor.service, events: ['fixture.progress.v1'] } };
+  const openFixture = async projectId => {
+    const gateIndex = loadGates.length;
+    const opening = manager.openSurface({ ...request, componentVersion: '2', projectId }, 'component.fullPage');
+    while (!loadGates[gateIndex]) await new Promise(resolve => setImmediate(resolve));
+    loadGates[gateIndex].release();
+    return opening;
+  };
+  const panel = await openFixture('background-project');
+  const originalInstance = manager.instancesById.get(panel.instanceId);
+  const fullClearsBeforePanelClose = capabilityClearAttempts;
+  manager.close(panel.instanceId);
+  await Promise.all(manager.viewCapabilityClearOperations.values());
+  assert.equal(passiveClears, 1, 'normal panel close only clears unused view grants');
+  assert.equal(capabilityClearAttempts, fullClearsBeforePanelClose, 'normal close must not cancel component background work');
+  const reopened = await openFixture('background-project');
+  const otherProject = await openFixture('other-project');
+  const delivered = [], leaked = [];
+  manager.instancesById.get(reopened.instanceId).view.webContents.send = (channel, value) => delivered.push({ channel, value });
+  manager.instancesById.get(otherProject.instanceId).view.webContents.send = (channel, value) => leaked.push({ channel, value });
+  originalInstance.context.emitComponentEvent('fixture.progress.v1', { progress: 50 });
+  assert.equal(delivered.length, 1, 'background progress reaches the reopened panel');
+  assert.equal(leaked.length, 0, 'background progress cannot cross project bindings');
+  await manager.closeComponentAndWait(componentId);
+  assert.equal(capabilityClearAttempts, fullClearsBeforePanelClose + 1, 'explicit component shutdown still clears active work');
+
   console.log('Component view lifecycle lease tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

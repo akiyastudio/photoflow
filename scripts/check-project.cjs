@@ -51,6 +51,7 @@ const steps = [
   ['global search 100k', ['run', 'test:global-search']],
   ['SD startup import', ['run', 'test:sd-startup-import']],
   ['startup catalog hydration', ['run', 'test:startup-catalog']],
+  ['development startup and application quit', ['run', 'test:electron-dev-contract']],
   ['file entry interaction', ['run', 'test:file-entry-interaction']],
   ['file entry sort', ['run', 'test:file-entry-sort']],
   ['Electron security', ['run', 'test:electron-security']],

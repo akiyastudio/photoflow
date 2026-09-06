@@ -73,8 +73,13 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
     error.code = 'PROCESS_TREE_TERMINATION_UNCONFIRMED'; error.pid = child.pid || null;
     throw error;
   }
-  try { child.stdin?.end?.(); } catch { /* stdin may already be closed */ }
-  try { child.stdin?.destroy?.(); } catch { /* best effort */ }
+  const closeInput = () => {
+    try { child.stdin?.end?.(); } catch { /* stdin may already be closed */ }
+    try { child.stdin?.destroy?.(); } catch { /* best effort */ }
+  };
+  // EOF makes JSON-line workers exit immediately. On Windows, keep the parent
+  // alive until taskkill has inspected and terminated its entire process tree.
+  if (platform !== 'win32') closeInput();
   let forced = false;
   let treeTerminationError = null;
   if (!childHasExited(child) && platform === 'win32') {
@@ -84,6 +89,7 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
   } else if (!childHasExited(child)) {
     try { child.kill(); } catch { /* exit may already be in flight */ }
   }
+  if (platform === 'win32') closeInput();
   if (treeTerminationError) {
     // The PID/tree operation failed, but signalling the ChildProcess handle is
     // still useful for fencing its streams. This never upgrades the result to

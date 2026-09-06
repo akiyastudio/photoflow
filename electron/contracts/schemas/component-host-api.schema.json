@@ -302,6 +302,16 @@
                 },
                 "control": {
                   "$ref": "#/$defs/runtimeControlPolicy"
+                },
+                "projectArtifacts": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["mode", "mediaKind"],
+                  "properties": {
+                    "mode": { "enum": ["preview", "transcode"] },
+                    "mediaKind": { "enum": ["image", "video"] }
+                  },
+                  "allOf": [{ "if": { "properties": { "mode": { "const": "transcode" } } }, "then": { "properties": { "mediaKind": { "const": "video" } } } }]
                 }
               }
             },
@@ -400,6 +410,9 @@
                 },
                 "result": {
                   "$ref": "#/$defs/jsonObject"
+                },
+                "task": {
+                  "type": ["object", "null"]
                 }
               }
             },

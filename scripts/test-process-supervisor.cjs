@@ -33,6 +33,21 @@ const main = async () => {
   const supervisorSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'process-supervisor.cjs'), 'utf8');
   assert.equal((supervisorSource.match(/'Managed process stopped'/g) || []).length, 1, 'a confirmed stop writes exactly one completion log');
   const rawWindowsChild = pid => { const child = new EventEmitter(); child.pid = pid; child.exitCode = null; child.signalCode = null; child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); return child; };
+  const eofChild = rawWindowsChild(12348);
+  let eofTreeKills = 0;
+  const exitEofChild = () => { eofChild.exitCode = 0; eofChild.emit('exit', 0, null); eofChild.emit('close', 0, null); };
+  eofChild.stdin.end = () => { queueMicrotask(exitEofChild); };
+  await terminateAndWait(eofChild, Date.now() + 500, {
+    platform: 'win32', rollbackSettleMs: 0,
+    execFileImpl: (_file, _args, _options, callback) => {
+      eofTreeKills += 1;
+      setImmediate(() => {
+        if (eofChild.exitCode !== null) { callback(new Error('PID no longer exists after stdin EOF')); return; }
+        exitEofChild(); callback(null);
+      });
+    },
+  });
+  assert.equal(eofTreeKills, 1, 'Windows must confirm taskkill before stdin EOF can make a worker exit');
   const invalidPidChild = rawWindowsChild(0); let invalidPidSettled = false;
   const invalidPidTermination = terminateAndWait(invalidPidChild, Date.now() + 200, { platform: 'win32' }).finally(() => { invalidPidSettled = true; });
   const invalidPidRejected = assert.rejects(invalidPidTermination, error => error.code === 'PROCESS_TREE_TERMINATION_FAILED' && error.cause?.code === 'PROCESS_TERMINATION_INVALID_PID');

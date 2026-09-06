@@ -228,7 +228,7 @@ class PythonDatabaseClient {
     const finish = error => {
       const barrier = this.processStops.get(child);
       if (barrier) void barrier.then(() => finishRequests(error, true), stopError => finishRequests(stopError));
-      else finishRequests(error);
+      else finishRequests(error, Boolean(this.stopping || managedProcess?.stopping || this.processSupervisor?.stopping));
     };
     child.on('error', finish);
     child.on('exit', code => finish(new Error(stderr.trim() || `Workspace database service exited with code ${code}`)));

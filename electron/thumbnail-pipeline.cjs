@@ -55,6 +55,7 @@ class ThumbnailDatabaseClient {
     this.processStops = new WeakMap();
     this.processReady = new WeakMap();
     this.terminationPromise = null;
+    this.stopFailure = null;
     this.permanentlyStopped = false;
   }
 
@@ -62,17 +63,26 @@ class ThumbnailDatabaseClient {
     const existing = this.processStops.get(child);
     if (existing) return existing;
     let resolveBarrier;
-    const barrier = new Promise(resolve => { resolveBarrier = resolve; });
+    let rejectBarrier;
+    const barrier = new Promise((resolve, reject) => { resolveBarrier = resolve; rejectBarrier = reject; });
     this.processStops.set(child, barrier);
     this.terminationPromise = barrier;
     this.terminationReasons.set(child, reason);
     if (this.process === child) this.process = null;
-    const managed = this.managedProcess?.child === child ? this.managedProcess : null;
-    if (managed) this.managedProcess = null;
-    const stopping = managed
+    const managed = this.managedProcess?.child === child || this.managedProcess?.lifecycle?.child === child ? this.managedProcess : null;
+    const stopping = Promise.resolve().then(() => managed
       ? managed.stop(reason, { timeoutMs, rollbackSettleMs: 25 })
-      : stopProcessAndWait(child, timeoutMs, { rollbackSettleMs: 25 });
-    Promise.resolve(stopping).catch(() => undefined).then(resolveBarrier).finally(() => {
+      : stopProcessAndWait(child, timeoutMs, { rollbackSettleMs: 25 }));
+    stopping.then(result => {
+      this.stopFailure = null;
+      if (this.managedProcess === managed) this.managedProcess = null;
+      resolveBarrier(result);
+    }, error => {
+      this.stopFailure = error;
+      this.processStops.delete(child);
+      try { this.log('error', 'Thumbnail database shutdown could not be confirmed', { processId: this.processId, error: error.message || String(error), code: error.code }); } catch { /* preserve the termination error */ }
+      rejectBarrier(error);
+    }).finally(() => {
       if (this.terminationPromise === barrier) this.terminationPromise = null;
     });
     return barrier;
@@ -80,6 +90,7 @@ class ThumbnailDatabaseClient {
 
   ensureProcess() {
     if (this.permanentlyStopped) throw Object.assign(new Error('thumbnail database client stopped'), { code: 'THUMBNAIL_STOPPED' });
+    if (this.stopFailure) throw this.stopFailure;
     if (this.process && !this.process.killed) return this.process;
     if (this.managedProcess && !this.managedProcess.released) {
       if (this.managedProcess.child && !this.managedProcess.child.killed) return this.managedProcess.child;
@@ -162,7 +173,7 @@ class ThumbnailDatabaseClient {
     };
     const finish = error => {
       const barrier = this.processStops.get(child);
-      if (barrier) void barrier.then(() => finishRequests(error));
+      if (barrier) void barrier.then(() => finishRequests(error), stopError => finishRequests(stopError));
       else finishRequests(error);
     };
     child.on('error', error => finish(error));
@@ -177,7 +188,7 @@ class ThumbnailDatabaseClient {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const error = Object.assign(new Error('Thumbnail database service readiness timed out'), { code: 'THUMBNAIL_DATABASE_READY_TIMEOUT' });
-        void this.stopChildAndWait(child, 'thumbnail-database-readiness-timeout').then(() => reject(error));
+        void this.stopChildAndWait(child, 'thumbnail-database-readiness-timeout').then(() => reject(error), reject);
       }, Math.min(10000, timeoutMs));
       ready.then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
     }).then(() => this.callReady(child, op, args, timeoutMs));
@@ -194,7 +205,7 @@ class ThumbnailDatabaseClient {
         // A synchronous Python handler can be stuck in filesystem I/O. Merely
         // rejecting this request leaves every later operation trapped behind
         // it, so recycle the service and let the caller retry safely via WAL.
-        void this.stopChildAndWait(child, `Thumbnail database service recycled after ${op} timed out`).then(() => reject(error));
+        void this.stopChildAndWait(child, `Thumbnail database service recycled after ${op} timed out`).then(() => reject(error), reject);
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer, child });
       try {
@@ -218,11 +229,12 @@ class ThumbnailDatabaseClient {
 
   stop(permanent = false) {
     if (permanent) this.permanentlyStopped = true;
+    if (this.terminationPromise) return this.terminationPromise;
     const child = this.process;
     if (child) return this.stopChildAndWait(child, 'thumbnail-database-stop');
     if (this.managedProcess) {
       const managed = this.managedProcess;
-      this.managedProcess = null;
+      if (managed.lifecycle?.child) return this.stopChildAndWait(managed.lifecycle.child, 'thumbnail-database-stop');
       return managed.stop('thumbnail-database-stop');
     }
     return Promise.resolve();

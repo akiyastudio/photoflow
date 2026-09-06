@@ -22,6 +22,8 @@ assert.equal(backend.features.transforms.crop, false);
 assert.equal(backend.features.hardwareDecoding.selectable, false);
 assert.deepEqual(backend.features.capture, { sourceFrame: true, displayedFrame: true });
 assert.equal(pkg.photoflowComponent.manifest, 'component.template.json');
+assert.equal(pkg.photoflowComponent.development.prepare, 'prepare:dev');
+assert.equal(pkg.scripts['prepare:dev'], 'node scripts/prepare-development.cjs');
 assert.equal(pkg.photoflowComponent.development.runtime.command, 'dist/components/video-playback-mpv/advanced-video-decoder.exe');
 assert.deepEqual(pkg.photoflowComponent.development.files, {
   'advanced-video-decoder.exe': 'dist/components/video-playback-mpv/advanced-video-decoder.exe',

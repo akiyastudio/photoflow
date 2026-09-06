@@ -8,6 +8,11 @@ const sourceFiles = ['src/**/*.{ts,tsx}']
 
 export default [
   { ignores: ['artifacts/**', '.cache/**', '**/artifacts/**', '**/.cache/**', '**/dist/**', '.venv', 'node_modules'] },
+  {
+    files: ['electron/main.cjs'],
+    languageOptions: { ecmaVersion: 'latest', sourceType: 'commonjs', globals: globals.node },
+    rules: { 'no-undef': 'error' },
+  },
   { ...js.configs.recommended, files: sourceFiles },
   ...tseslint.configs.recommended.map(config => ({ ...config, files: sourceFiles })),
   {

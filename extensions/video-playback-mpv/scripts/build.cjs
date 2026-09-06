@@ -175,6 +175,11 @@ for (const entry of runtimeManifest.files) {
 }
 verifyPeDependencyClosure(target, ['libmpv-2.dll']);
 
+if (process.argv.includes('--development')) {
+  console.log(`视频播放器开发运行文件已生成：${target}`);
+  process.exit(0);
+}
+
 for (const entry of fs.readdirSync(runtimeRoot, { withFileTypes: true })) {
   if (!entry.isFile() || !/^(license|copying|copyright|readme|build)/i.test(entry.name)) continue;
   fs.copyFileSync(path.join(runtimeRoot, entry.name), path.join(target, `upstream-${entry.name}`));

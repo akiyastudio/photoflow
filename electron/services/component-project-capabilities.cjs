@@ -1226,10 +1226,16 @@ const registerComponentProjectCapabilities = ({
     },
     commitReservation: async reservationId => { const cleanups=[];for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { inputGrants.delete(token);cleanups.push({token,grant,promise:discardInputGrant(fs,grant)}); }const results=await Promise.allSettled(cleanups.map(item=>item.promise));let pending=0;results.forEach((result,index)=>{if(result.status==='rejected'){pending+=1;const item=cleanups[index];const retry=setTimeout(()=>{void discardInputGrant(fs,item.grant).catch(()=>undefined);},1000);retry.unref?.();}});return{consumed:cleanups.length,cleanupPending:pending}; },
     releaseReservation: reservationId => { for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { delete grant.originalExpiresAt; delete grant.reservedBy; delete grant.reservationExpiresAt; grant.snapshotOwner = token; armGrantTimer(token,grant,grant.ttlRemainingMs||INPUT_TOKEN_TTL_MS); } },
-    clearComponent: async componentId => {
+    clearComponent: async (componentId, { preserveReservedInputs = false } = {}) => {
       const prefix = `${String(componentId || '')}\0`;
-      const cleanups=[];for (const [token, grant] of inputGrants) if (String(grant.scope || '').startsWith(prefix)) { inputGrants.delete(token); cleanups.push(discardInputGrant(fs, grant)); }
-      for(const root of componentInputRoots.get(String(componentId||''))||[]){inputRootInitialization.delete(path.resolve(root));cleanups.push(fs.promises.rm(root,{recursive:true,force:true}));}componentInputRoots.delete(String(componentId||''));
+      let retainedInputs = false;
+      const cleanups=[];for (const [token, grant] of inputGrants) if (String(grant.scope || '').startsWith(prefix)) {
+        if (preserveReservedInputs && grant.reservedBy) { retainedInputs = true; continue; }
+        inputGrants.delete(token); cleanups.push(discardInputGrant(fs, grant));
+      }
+      if (!retainedInputs) {
+        for(const root of componentInputRoots.get(String(componentId||''))||[]){inputRootInitialization.delete(path.resolve(root));cleanups.push(fs.promises.rm(root,{recursive:true,force:true}));}componentInputRoots.delete(String(componentId||''));
+      }
       const results=await Promise.allSettled(cleanups);const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);if(errors.length)throw new AggregateError(errors,`Unable to clear component input snapshots for ${componentId}`);
     },
   };

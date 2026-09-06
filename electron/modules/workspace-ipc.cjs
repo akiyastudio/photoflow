@@ -33,6 +33,7 @@ const INSPIRATION_VIRTUAL_PROJECT_NAME = '.__photoflow_inspiration__';
 const MAX_EXPLICIT_MATERIALIZE_PATHS = 512;
 const MAX_EXPLICIT_MATERIALIZE_PATH_BYTES = 64 * 1024;
 const registerWorkspaceIpc = context => {
+  const getReadyProjectPath = context.getReadyProjectPath || (async (...args) => context.getProjectPath(...args));
   const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number: workspaceNumber = Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, fileSystemService, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, rebaseCleanupOwnership = defaultRebaseCleanupOwnership, releaseCleanupOwnership = defaultReleaseCleanupOwnership, removeCreatedPasteTargets = defaultRemoveCreatedPasteTargets, removeOwnedPathIdentityBound = defaultRemoveOwnedPathIdentityBound, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const extractTimelineFrames = context.extractVideoTimelineFrames;
@@ -2269,7 +2270,7 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-project-contents', async (_event, workspacePath, status, projectName) => {
     try {
-      const projectPath = getProjectPath(workspacePath, status, projectName);
+      const projectPath = await getReadyProjectPath(workspacePath, status, projectName);
       if (!fs.existsSync(projectPath)) throw new Error('项目不存在');
       const entries = await fs.promises.readdir(projectPath, { withFileTypes: true });
       const folders = (await Promise.all(entries
@@ -2286,7 +2287,7 @@ const registerWorkspaceIpc = context => {
   });
 
   const watchProjectFileRoot = async (workspacePath, status, projectName, options = {}) => {
-    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const root = path.resolve(await getReadyProjectPath(workspacePath, status, projectName));
     const publishRoot = path.resolve(ensureWorkspace(workspacePath));
     const projectPrefix = path.relative(publishRoot, root).replace(/\\/g, '/');
     const key = watchedProjectFileRootKey(publishRoot, status, projectName);
@@ -2398,7 +2399,7 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
     const startedAt = Date.now();
     try {
-      const projectPath = getProjectPath(workspacePath, status, projectName);
+      const projectPath = await getReadyProjectPath(workspacePath, status, projectName);
       const root = path.resolve(projectPath);
       const normalizedRelativePath = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       const pathSegments = normalizedRelativePath ? normalizedRelativePath.split('/') : [];
@@ -2841,7 +2842,7 @@ const registerWorkspaceIpc = context => {
 
   ipcMain.handle('workspace-search-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', query = '') => {
     try {
-      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const root = path.resolve(await getReadyProjectPath(workspacePath, status, projectName));
       const supportsManagedExternalLinks = projectName !== INSPIRATION_VIRTUAL_PROJECT_NAME;
       const externalScope = supportsManagedExternalLinks ? await resolveManagedExternalScope(root, scopeRelativePath) : null;
       const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '搜索范围', true);
@@ -2934,7 +2935,7 @@ const registerWorkspaceIpc = context => {
     let releaseCursor = () => undefined;
     try {
       releaseCursor = await acquireCursorLock(fileListCursorLocks, String(requestedCursor || ''));
-      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const root = path.resolve(await getReadyProjectPath(workspacePath, status, projectName));
       const supportsManagedExternalLinks = projectName !== INSPIRATION_VIRTUAL_PROJECT_NAME;
       const externalScope = supportsManagedExternalLinks ? await resolveManagedExternalScope(root, scopeRelativePath) : null;
       const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '文件枚举范围', true);

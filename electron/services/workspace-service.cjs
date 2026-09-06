@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const createWorkspaceService = ({ repository, reconcileRepository = repository, catalogs, assertInside, assertExistingInside, getConfiguredInspirationRoot = () => '' }) => {
+  const initialCatalogLoads = new Map();
   const resolveRoot = workspacePath => {
     if (typeof workspacePath !== 'string' || !workspacePath.trim()) throw new Error('尚未选择工作目录');
     const requestedPath = path.resolve(workspacePath.trim());
@@ -85,7 +86,20 @@ const createWorkspaceService = ({ repository, reconcileRepository = repository, 
 
   const cleanProjectName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 
-  return { resolveRoot, ensureRoot, refreshCatalog, reconcileCatalog, mutateCatalog, getProjectPath, resolveNewProjectPath, cleanProjectName };
+  const getReadyProjectPath = async (workspacePath, status, projectName) => {
+    if (projectName !== '.__photoflow_inspiration__') {
+      const root = ensureRoot(workspacePath);
+      if (!catalogs.has(root)) {
+        if (!initialCatalogLoads.has(root)) {
+          initialCatalogLoads.set(root, refreshCatalog(root).finally(() => initialCatalogLoads.delete(root)));
+        }
+        await initialCatalogLoads.get(root);
+      }
+    }
+    return getProjectPath(workspacePath, status, projectName);
+  };
+
+  return { resolveRoot, ensureRoot, refreshCatalog, reconcileCatalog, mutateCatalog, getProjectPath, getReadyProjectPath, resolveNewProjectPath, cleanProjectName };
 };
 
 module.exports = { createWorkspaceService };

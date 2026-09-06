@@ -54,7 +54,7 @@ const run = async () => {
     assert.equal(indexed.thumbnail_state, 'READY');
   } finally {
     await pipeline.database.stop();
-    pipeline.stop();
+    await pipeline.stop();
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }
   console.log('thumbnail ambiguous publish tests passed');

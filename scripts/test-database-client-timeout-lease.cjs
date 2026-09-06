@@ -30,6 +30,12 @@ let spawnedChild = child;
 const originalLoad = Module._load;
 Module._load = function(request, parent, isMain) {
   if (request === 'child_process') return { spawn: () => spawnedChild };
+  if (request === '../infrastructure/process-termination.cjs') {
+    const implementation = originalLoad.call(this, request, parent, isMain);
+    // This fixture has no operating-system PID. Exercise the exit/lease fence
+    // with fake POSIX signals; real Windows ownership has separate Job tests.
+    return { ...implementation, stopProcessAndWait: (process, timeoutMs, options) => implementation.stopProcessAndWait(process, timeoutMs, { ...options, platform: 'linux' }) };
+  }
   return originalLoad.call(this, request, parent, isMain);
 };
 

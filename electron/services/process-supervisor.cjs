@@ -54,7 +54,7 @@ class ManagedProcess extends EventEmitter {
     const spec = this.specification;
     let child;
     try {
-      const spawnProcess = this.supervisor.terminationPlatform === 'win32' && spec.windowsJob === true
+      const spawnProcess = this.supervisor.terminationPlatform === 'win32' && (spec.windowsJob ?? this.supervisor.windowsJobByDefault) === true
         ? this.supervisor.spawnWindowsJobImpl
         : this.supervisor.spawnImpl;
       child = spawnProcess(spec.command, spec.args || [], {
@@ -455,12 +455,13 @@ class ManagedProcess extends EventEmitter {
 }
 
 class ProcessSupervisor {
-  constructor({ spawnImpl = defaultSpawn, spawnWindowsJobImpl = null, windowsJobOptions = {}, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform } = {}) {
+  constructor({ spawnImpl = defaultSpawn, spawnWindowsJobImpl = null, windowsJobOptions = {}, windowsJobByDefault = false, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform } = {}) {
     this.spawnImpl = spawnImpl;
     this.spawnWindowsJobImpl = spawnWindowsJobImpl || ((command, args, options) => launchWindowsJobProcess(command, args, options, windowsJobOptions));
     this.writeLog = writeLog;
     this.now = now;
     this.terminationPlatform = terminationPlatform;
+    this.windowsJobByDefault = windowsJobByDefault === true;
     this.processes = new Map();
     this.stopping = false;
   }
@@ -518,7 +519,17 @@ class ProcessSupervisor {
 
   async stopAll(reason = 'application-shutdown') {
     this.stopping = true;
-    const results = await Promise.allSettled([...this.processes.values()].map(process => process.stop(reason)));
+    const processes = [...this.processes.values()];
+    const results = await Promise.allSettled(processes.map(process => process.stop(reason)));
+    results.forEach((result, index) => {
+      if (result.status !== 'rejected') return;
+      try {
+        this.log('error', 'Managed process stop failed', {
+          processId: processes[index].id, processKind: processes[index].kind,
+          reason, error: safeError(result.reason), code: result.reason?.code, cause: result.reason?.cause ? safeError(result.reason.cause) : undefined,
+        });
+      } catch { /* logging must not replace the termination failure */ }
+    });
     const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
     if (errors.length) { this.stopping = false; throw new AggregateError(errors, 'Unable to stop every managed process'); }
     this.processes.clear();

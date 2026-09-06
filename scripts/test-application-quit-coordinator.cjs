@@ -2,10 +2,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
-const { registerMainWindowQuitGuard, runApplicationQuit } = require('../electron/services/application-quit-coordinator.cjs');
+const { registerMainWindowQuitGuard, runApplicationQuit, selectApplicationQuitTasks, applicationQuitTaskDetail } = require('../electron/services/application-quit-coordinator.cjs');
 
-const fixture = ({ background = true, failStopOnce = false, confirm = true } = {}) => {
+const fixture = ({ background = true, failStopOnce = false, confirm = true, taskSnapshots = background ? [{ id: 'transcode-task', type: 'component-runtime', title: '视频转码', state: 'running' }] : [] } = {}) => {
   const events = [];
+  const confirmations = [];
   let stopFailure = failStopOnce;
   let processesPresent = background;
   const lifecycle = {
@@ -31,15 +32,16 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
     componentLifecycleCoordinator: lifecycle,
     componentCapabilityBroker: { blockComponent: () => ({ drain: async () => events.push('broker-drained'), release: () => events.push('broker-released') }) },
     abortComponentNetworkRequests: () => events.push('network-aborted'),
-    confirmBackgroundProcesses: async () => { events.push('prompt'); return confirm; },
+    backgroundTasks: { list: () => taskSnapshots },
+    confirmPendingTasks: async tasks => { events.push('prompt'); confirmations.push(tasks); return confirm; },
     teardown: [() => events.push('video-disposed'), () => events.push('databases-closed')],
   };
-  return { events, options };
+  return { events, options, confirmations };
 };
 
 (async () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
-  assert.match(mainSource, /buttons:\s*\['关闭后台进程并继续退出',\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/);
+  assert.match(mainSource, /buttons:\s*\['仍然退出',\s*'暂不退出'\],\s*defaultId:\s*1,\s*cancelId:\s*1/);
   const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续退出'[\s\S]*?buttons:\s*\[presentation\.continueLabel,\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/, '卸载确认锁定真实退出文案与安全默认项');
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
@@ -66,6 +68,29 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   registerMainWindowQuitGuard({ window: macWindow, app: { quit: () => { macQuitCalls += 1; } }, getQuitState: () => 'idle', platform: 'darwin' });
   macWindow.emit('close', { preventDefault: () => { macPrevented = true; } });
   assert.equal(macPrevented, false); assert.equal(macQuitCalls, 0, 'macOS keeps close-without-quit behavior');
+
+  const idlePlugin = fixture({ taskSnapshots: [], confirm: false });
+  await runApplicationQuit(idlePlugin.options);
+  assert.equal(idlePlugin.events.includes('prompt'), false, 'idle plugin service processes are not unfinished tasks');
+  assert(idlePlugin.events.includes('services-stopped') && idlePlugin.events.includes('all-processes-stopped'), 'quiet exit still closes and confirms every process');
+  const automaticMaintenance = fixture({ taskSnapshots: [
+    { id: 'cache', type: 'thumbnail-cache-recovery', state: 'running', title: '修复缩略图缓存索引' },
+    { id: 'scan', type: 'version-stale-detection', state: 'running', title: '检查版本状态' },
+    { id: 'done', type: 'component-runtime', state: 'completed', title: '已完成转码' },
+    { id: 'failed', type: 'component-runtime', state: 'failed', title: '已失败任务' },
+    { id: 'interrupted', type: 'component-runtime', state: 'interrupted', title: '上次中断的任务' },
+  ] });
+  await runApplicationQuit(automaticMaintenance.options);
+  assert.equal(automaticMaintenance.events.includes('prompt'), false, 'automatic maintenance and history do not produce phantom task warnings');
+  const fileCopy = fixture({ background: false, confirm: false, taskSnapshots: [{ id: 'copy', type: 'project-file-operation', state: 'queued', title: '复制文件' }] });
+  await assert.rejects(runApplicationQuit(fileCopy.options), error => error.code === 'APP_QUIT_CANCELLED');
+  assert.equal(fileCopy.confirmations[0][0].title, '复制文件', 'core tasks require confirmation even without plugin processes');
+  const pausedTask = { id: 'paused', type: 'component-runtime', state: 'paused', title: '视频转码' };
+  const queuedTask = { id: 'queued', type: 'component-operation', state: 'queued', title: '视频转文字' };
+  assert.deepEqual(selectApplicationQuitTasks([pausedTask, queuedTask]), [pausedTask, queuedTask]);
+  const detail = applicationQuitTaskDetail([pausedTask, queuedTask]);
+  assert(detail.includes('视频转码（已暂停）') && detail.includes('视频转文字（等待中）'), 'confirmation must identify the actual unfinished tasks');
+  assert.match(applicationQuitTaskDetail(Array.from({ length: 7 }, () => pausedTask)), /另有 2 个任务/);
 
   const cancelled = fixture({ confirm: false });
   await assert.rejects(runApplicationQuit(cancelled.options), error => error.code === 'APP_QUIT_CANCELLED');
@@ -108,7 +133,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   unconfirmed.options.processSupervisor.stopAll = async () => { stopAttempts += 1; unconfirmed.events.push('all-processes-stop'); };
   unconfirmed.options.processSupervisor.hasUnconfirmedOwner = () => stopAttempts < 2;
   await assert.rejects(runApplicationQuit(unconfirmed.options), error => error.code === 'PROCESS_TERMINATION_FAILED');
-  assert.equal(unconfirmed.events.includes('prompt'), true, 'stopped but unconfirmed owner still requires confirmation');
+  assert.equal(unconfirmed.events.includes('prompt'), false, 'unconfirmed process termination must block exit without claiming that an unfinished task exists');
   assert.equal(unconfirmed.events.includes('commit'), false);
   assert.equal(unconfirmed.events.includes('video-disposed'), false);
   await runApplicationQuit(unconfirmed.options);

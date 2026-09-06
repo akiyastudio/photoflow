@@ -1094,6 +1094,10 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   return {
     start,
     run,
+    subscribe: listener => {
+      const unsubscribe = eventBus.on('background-task:changed', listener);
+      return typeof unsubscribe === 'function' ? unsubscribe : () => eventBus.removeListener('background-task:changed', listener);
+    },
     create: createHandle,
     cancel,
     pause,

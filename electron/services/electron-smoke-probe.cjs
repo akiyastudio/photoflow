@@ -1,4 +1,4 @@
-const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadRenderer, recoveryResult, processSupervisor }) => {
+const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadRenderer, recoveryResult, processSupervisor, componentServiceManager, componentHostRegistry }) => {
   const rendererLoaded = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Electron smoke renderer load timed out')), 30_000);
     mainWindow.webContents.once('did-finish-load', () => { clearTimeout(timeout); resolve(); });
@@ -11,8 +11,17 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
   await rendererLoaded;
   const setupProjects = process.env.PHOTOFLOW_SMOKE_SETUP_PROJECTS === '1';
   const smokeMediaPath = String(process.env.PHOTOFLOW_SMOKE_MEDIA_PATH || '');
+  const idleComponentId = String(process.env.PHOTOFLOW_SMOKE_IDLE_COMPONENT_ID || '');
+  let idleComponentReady = false;
   let rendererProbe;
   try {
+    if (idleComponentId) {
+      const descriptor = componentHostRegistry.resolve(idleComponentId);
+      if (!descriptor?.service) throw new Error('Idle component smoke service is unavailable');
+      const session = await componentServiceManager.ensureSession(descriptor);
+      await session.ready;
+      idleComponentReady = true;
+    }
     rendererProbe = await mainWindow.webContents.executeJavaScript(`(async () => {
     const config = await window.electronAPI.loadConfig();
     const setupProjects = ${JSON.stringify(setupProjects)};
@@ -28,6 +37,18 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
       }
     }
     const workspace = await window.electronAPI.getWorkspaceProjects(config.workspacePath);
+    if (!workspace.success) throw new Error(workspace.error || 'unable to load workspace catalog');
+    const firstGroup = (workspace.statuses || []).find(group => group.projects?.length);
+    const firstProject = firstGroup?.projects[0];
+    if (!firstProject) throw new Error('smoke project is missing from the workspace catalog');
+    const [contents, files, progress] = await Promise.all([
+      window.electronAPI.getProjectContents(config.workspacePath, firstGroup.status, firstProject.name),
+      window.electronAPI.browseProjectFiles(config.workspacePath, firstGroup.status, firstProject.name, '', config.mediaCache),
+      window.electronAPI.getProgressFoldersSnapshot(config.workspacePath, firstProject.name),
+    ]);
+    for (const [label, response] of [['project contents', contents], ['project files', files], ['version progress', progress]]) {
+      if (!response?.success) throw new Error(label + ': ' + (response?.error || 'read failed'));
+    }
     if (!setupProjects) await new Promise(resolve => setTimeout(resolve, 2500));
     let thumbnail = null;
     if (!setupProjects && smokeMediaPath) {
@@ -43,6 +64,8 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
       readyState: document.readyState,
       preloadApi: typeof window.electronAPI === 'object',
       backgroundTasks,
+      projectFilesReadable: contents.success && files.success,
+      versionProgressReadable: progress.success,
       workspaceProjectCount: (workspace.statuses || []).reduce((count, group) => count + (group.projects || []).length, 0),
       automaticMediaTaskCount: automaticMediaTasks.filter(task => ['queued', 'running', 'pausing', 'paused', 'resuming', 'interrupted'].includes(task.state)).length,
       automaticMediaFailedCount: automaticMediaTasks.filter(task => task.state === 'failed').length,
@@ -62,9 +85,12 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
   }
   const result = {
     type: 'photoflow-electron-smoke',
+    idleComponentReady,
     rendererLoaded: rendererProbe.readyState === 'complete',
     preloadApi: rendererProbe.preloadApi,
     backgroundTaskSnapshot: rendererProbe.backgroundTasks?.success === true && Array.isArray(rendererProbe.backgroundTasks?.tasks),
+    projectFilesReadable: rendererProbe.projectFilesReadable,
+    versionProgressReadable: rendererProbe.versionProgressReadable,
     workspaceProjectCount: rendererProbe.workspaceProjectCount,
     automaticMediaTaskCount: rendererProbe.automaticMediaTaskCount,
     automaticMediaFailedCount: rendererProbe.automaticMediaFailedCount,

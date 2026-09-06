@@ -36,6 +36,7 @@ const BACKGROUND_TASK_POLICIES = Object.freeze({
   'internal-filesystem-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'system-filesystem-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'component-status-refresh': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
+  'component-runtime': { resumePolicy: 'safe-restart', notificationPolicy: 'progress-and-result' },
 });
 
 const configuredPolicy = definition => {

@@ -75,13 +75,14 @@ const componentSurfaceCss = (theme, surface) => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, lifecycleCoordinator = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, partitionSessionProvider = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, lifecycleCoordinator = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, clearComponentViewState = clearComponentCapabilityState, partitionSessionProvider = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
     this.preloadPath = preloadPath;
     this.ipcMain = ipcMain;
     this.clearComponentCapabilityState = clearComponentCapabilityState;
+    this.clearComponentViewState = clearComponentViewState;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
     this.lifecycleCoordinator = lifecycleCoordinator;
@@ -101,27 +102,30 @@ class ComponentViewManager {
     this.activationGeneration = 0;
     this.partitionSessions = new Map();
     this.capabilityClearOperations = new Map();
+    this.viewCapabilityClearOperations = new Map();
     this.failedCapabilityClearIds = new Set();
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
     this.registerComponentSdkIpc();
   }
 
-  requestComponentCapabilityClear(componentId, contents = [], timeoutMs = 2000) {
+  requestComponentCapabilityClear(componentId, contents = [], timeoutMs = 2000, viewOnly = false) {
     const normalizedId = String(componentId || '');
     componentPartition(normalizedId);
-    const pending = this.capabilityClearOperations.get(normalizedId);
+    const pending = this.capabilityClearOperations.get(normalizedId) || (viewOnly && this.viewCapabilityClearOperations.get(normalizedId));
     if (pending) return pending;
+    const operations = viewOnly ? this.viewCapabilityClearOperations : this.capabilityClearOperations;
+    const previousViewClear = !viewOnly ? this.viewCapabilityClearOperations.get(normalizedId)?.catch(() => undefined) : null;
     const destroyed = Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
-    const operation = destroyed.then(() => this.clearComponentCapabilityState?.(normalizedId)).then(result => {
+    const operation = Promise.all([destroyed, previousViewClear]).then(() => (viewOnly ? this.clearComponentViewState : this.clearComponentCapabilityState)?.(normalizedId)).then(result => {
       this.failedCapabilityClearIds.delete(normalizedId);
       return result;
     }, error => {
       this.failedCapabilityClearIds.add(normalizedId);
       throw error;
     }).finally(() => {
-      if (this.capabilityClearOperations.get(normalizedId) === operation) this.capabilityClearOperations.delete(normalizedId);
+      if (operations.get(normalizedId) === operation) operations.delete(normalizedId);
     });
-    this.capabilityClearOperations.set(normalizedId, operation);
+    operations.set(normalizedId, operation);
     void operation.catch(error => this.writeLog('warn', 'Unable to clear component capability state', { componentId: normalizedId, error: error?.message || String(error) }));
     return operation;
   }
@@ -290,7 +294,7 @@ class ComponentViewManager {
     const settingsPage = declaredSettingsPage || (settingsFormCustomPage ? { ...settingsFormCustomPage, id: String(request.pageId) } : null); const contribution = request.contribution || null;
     const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
     if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
-    const pendingCapabilityClear = this.capabilityClearOperations.get(componentId);
+    const pendingCapabilityClear = this.capabilityClearOperations.get(componentId) || this.viewCapabilityClearOperations.get(componentId);
     if (pendingCapabilityClear) await pendingCapabilityClear;
     else if (this.failedCapabilityClearIds.has(componentId)) await this.requestComponentCapabilityClear(componentId);
     this.lifecycleCoordinator?.assertLaunchAllowed?.(componentId, lifecycleLease);
@@ -338,7 +342,7 @@ class ComponentViewManager {
       return this.publicInstance(existing, leaseId);
       } catch (error) { if (surface === 'application.settings') this.releaseSettings(request); throw error; }
     }
-    const replacementCapabilityClear = this.capabilityClearOperations.get(componentId);
+    const replacementCapabilityClear = this.capabilityClearOperations.get(componentId) || this.viewCapabilityClearOperations.get(componentId);
     if (replacementCapabilityClear) await replacementCapabilityClear;
     else if (this.failedCapabilityClearIds.has(componentId)) await this.requestComponentCapabilityClear(componentId);
     this.lifecycleCoordinator?.assertLaunchAllowed?.(componentId, lifecycleLease);
@@ -374,8 +378,14 @@ class ComponentViewManager {
         ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
         eventSender: view.webContents,
         emitComponentEvent: (topic, payload) => {
-          if (descriptor.service?.events?.includes(String(topic || '')) && !view.webContents.isDestroyed()) {
-            view.webContents.send('component-sdk:event', { topic: String(topic), payload });
+          if (!descriptor.service?.events?.includes(String(topic || ''))) return;
+          // A background operation keeps its project binding after its original
+          // panel closes. Deliver updates to a reopened panel with that binding.
+          for (const target of this.instancesById.values()) {
+            const keys = ['componentId', 'workspacePath', 'projectId', 'contentKind', 'scopeRelativePath', 'contributionId'];
+            if (keys.every(key => String(target.context[key] || '') === String(instance.context[key] || '')) && !target.view.webContents.isDestroyed()) {
+              target.view.webContents.send('component-sdk:event', { topic: String(topic), payload });
+            }
           }
         },
       }),
@@ -436,7 +446,7 @@ class ComponentViewManager {
       this.senderBindings.delete(senderId);
       if (this.instances.get(key) === instance) this.instances.delete(key);
       if (this.instancesById.get(instanceId) === instance) this.instancesById.delete(instanceId);
-      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); void this.requestComponentCapabilityClear(descriptor.componentId); }
+      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); void this.requestComponentCapabilityClear(descriptor.componentId, [], 2000, true); }
     });
     this.mainWindow.contentView.addChildView(view);
     this.onViewStackChanged();
@@ -571,7 +581,7 @@ class ComponentViewManager {
     if (!instance) return false;
     const componentId = instance.descriptor.componentId;
     const lastComponentView = ![...this.senderBindings.values()].some(bound => bound !== instance && bound.context.componentId === componentId);
-    if (lastComponentView) void this.requestComponentCapabilityClear(componentId, [instance.view.webContents]);
+    if (lastComponentView) void this.requestComponentCapabilityClear(componentId, [instance.view.webContents], 2000, true);
     clearTimeout(instance.settingsCloseTimer);
     instance.settingsCloseTimer = null;
     if (this.instances.get(instance.key) === instance) this.instances.delete(instance.key);
@@ -630,7 +640,7 @@ class ComponentViewManager {
   async closeAllAndWait(timeoutMs = 2000) {
     const instances = [...this.instances.values()];
     const contents = instances.map(instance => instance.view.webContents);
-    const pendingAtStart = [...this.capabilityClearOperations.values()];
+    const pendingAtStart = [...this.capabilityClearOperations.values(), ...this.viewCapabilityClearOperations.values()];
     const componentIds = [...new Set([...instances.map(instance => instance.descriptor.componentId), ...this.failedCapabilityClearIds])];
     const capabilityClears = componentIds.map(componentId => this.requestComponentCapabilityClear(componentId, instances.filter(instance => instance.descriptor.componentId === componentId).map(instance => instance.view.webContents), timeoutMs));
     for (const instance of instances) this.close(instance.instanceId);

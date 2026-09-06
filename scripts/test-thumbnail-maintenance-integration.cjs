@@ -390,7 +390,7 @@ const run = async () => {
     });
     assert.deepEqual(new Set(persistedRetryPage.orphanPaths.map(value => path.resolve(value).toLocaleLowerCase())), new Set(persistentRetryPaths.map(value => path.resolve(value).toLocaleLowerCase())));
   } finally {
-    pipeline.stop();
+    await pipeline.stop();
     const resolvedRoot = path.resolve(temporaryRoot);
     if (path.dirname(resolvedRoot) === path.resolve(os.tmpdir()) && path.basename(resolvedRoot).startsWith('photoflow-thumbnail-maintenance-')) {
       fs.rmSync(resolvedRoot, { recursive: true, force: true });

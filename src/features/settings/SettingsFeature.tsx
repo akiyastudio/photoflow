@@ -1238,9 +1238,6 @@ const AboutSettings = () => {
       <SettingsRow title="官方网站" description="访问照片流官方网站。"><button type="button" onClick={() => openExternal('https://qingstudio.cn/')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">打开<ExternalLink size={13}/></button></SettingsRow>
       <SettingsRow title="联系作者" description="通过电子邮件发送联系信息。"><button type="button" onClick={() => openExternal('mailto:akiyastudio@qq.com')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">akiyastudio@qq.com<ExternalLink size={13}/></button></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="可选组件的许可说明">
-      <SettingsRow title="组件模型与运行库" description="可选组件专属的模型、权重和依赖清单由组件提供，请在对应组件的设置页查看。主程序及共用运行库列在下方。"><span className="ml-auto text-xs text-slate-500">在组件设置中查看</span></SettingsRow>
-    </SettingsPageGroup>
     <SettingsPageGroup title="第三方软件与运行库">
       {THIRD_PARTY_SOFTWARE_LICENSES.map(item => <SettingsRow key={`${item.group}-${item.name}`} title={item.name} description={`${item.group} · ${item.version} · ${item.purpose}${item.note ? ` · ${item.note}` : ''}`}><div className="ml-auto flex w-fit items-center gap-2"><span className="text-xs font-bold text-slate-500">{item.license}</span><button type="button" onClick={() => openExternal(item.sourceUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">来源<ExternalLink size={13}/></button><button type="button" onClick={() => openExternal(item.licenseUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">许可<ExternalLink size={13}/></button></div></SettingsRow>)}
     </SettingsPageGroup>

@@ -115,13 +115,15 @@
         "component.settings",
         "component.runtime.execute",
         "dialogs",
-        "component.events"
+        "component.events",
+        "project.progress"
       ],
       "permissions": [
         "component.settings",
         "component.runtime.execute",
         "dialogs",
-        "events"
+        "events",
+        "project.progress"
       ],
       "events": [
         "video-tools.operation.progress.v1"

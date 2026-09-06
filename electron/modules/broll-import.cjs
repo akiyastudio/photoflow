@@ -103,12 +103,12 @@ const waitForSpawnExit = child => new Promise(resolve => {
 
 const terminateWorkerTree = async ({ child, managed }, deadlineAt) => {
   if (!child) return;
-  if (process.platform === 'win32' && child.pid) {
+  if (process.platform === 'win32' && child.pid && !child.__photoFlowJobManaged) {
     try {
       const treeKill = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
       await Promise.race([waitForSpawnExit(treeKill), new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(2000, deadlineAt - Date.now()))))]);
     } catch { /* fall back to the managed parent */ }
-  } else if (child.pid) {
+  } else if (process.platform !== 'win32' && child.pid) {
     try { process.kill(-child.pid, 'SIGTERM'); } catch { /* process group may already be gone */ }
   }
   if (managed?.stop) {

@@ -49,7 +49,7 @@ const { createDomainHealthService } = require('./services/domain-health-service.
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
 const { ComponentLifecycleCoordinator } = require('./services/component-lifecycle-coordinator.cjs');
-const { registerMainWindowQuitGuard, runApplicationQuit } = require('./services/application-quit-coordinator.cjs');
+const { registerMainWindowQuitGuard, runApplicationQuit, applicationQuitTaskDetail } = require('./services/application-quit-coordinator.cjs');
 const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
@@ -132,6 +132,7 @@ const componentHostRegistry = createComponentHostRegistry({
 });
 configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastViewManager;
+let componentCapabilityBroker; let abortComponentNetworkRequests;
 let getApplicationQuitState = () => 'idle';
 const destroyToastViewManager = () => { const manager = toastViewManager; toastViewManager = null; manager?.destroy(); };
 const suspendToastViewForNativeDrag = () => toastViewManager?.suspendForNativeDrag();
@@ -258,6 +259,7 @@ const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 const processSupervisor = createProcessSupervisor({
   writeLog: (...args) => writeLog(...args),
+  windowsJobByDefault: true,
   windowsJobOptions: { packaged: app.isPackaged, resourcesPath: process.resourcesPath },
 });
 const componentLifecycleCoordinator = new ComponentLifecycleCoordinator({ blocker: componentId => processSupervisor.hasUnconfirmedOwner(componentId) });
@@ -1012,6 +1014,7 @@ const workspaceService = createWorkspaceService({
 const resolveWorkspaceRoot = workspaceService.resolveRoot;
 const ensureWorkspace = workspaceService.ensureRoot;
 const refreshWorkspaceCatalog = workspaceService.refreshCatalog;
+const getReadyProjectPath = workspaceService.getReadyProjectPath;
 const reconcileWorkspaceCatalogDirect = workspaceService.reconcileCatalog;
 const mutateWorkspaceCatalog = workspaceService.mutateCatalog;
 const getProjectPath = workspaceService.getProjectPath;
@@ -1347,7 +1350,7 @@ app.whenReady().then(async () => {
     path, ensureWorkspace, readSavedConfig, getProjectPath,
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
   });
-  const { componentCapabilityBroker, componentInputGrants, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData, abortComponentNetworkRequests } = createComponentHostCapabilityRuntime({
+  const capabilityRuntime = createComponentHostCapabilityRuntime({
     ensureWorkspace,
     getWorkspaceDataRoot,
     resolveProjectEntry,
@@ -1360,6 +1363,8 @@ app.whenReady().then(async () => {
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
     RAW_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, resolveComponentContentBinding: componentContentBinding.resolve,
   });
+  ({ componentCapabilityBroker, abortComponentNetworkRequests } = capabilityRuntime);
+  const { componentInputGrants, componentNotificationService, clearComponentCapabilityState, clearComponentViewState, clearComponentSecretData } = capabilityRuntime;
   componentServiceManager = new ComponentServiceManager({
     registry: componentHostRegistry,
     processSupervisor,
@@ -1374,7 +1379,7 @@ app.whenReady().then(async () => {
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     partitionSessionProvider: partitionName => session.fromPartition(partitionName),
     ipcMain: electronIpcMain,
-    serviceManager: componentServiceManager, lifecycleCoordinator: componentLifecycleCoordinator, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState, resolveOpenContext: componentContentBinding.resolveOpenRequest,
+    serviceManager: componentServiceManager, lifecycleCoordinator: componentLifecycleCoordinator, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState, clearComponentViewState, resolveOpenContext: componentContentBinding.resolveOpenRequest,
     writeLog,
     onViewStackChanged: () => toastViewManager?.bringToFront(),
   });
@@ -1384,7 +1389,7 @@ app.whenReady().then(async () => {
   const { componentTransactionReady } = registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, filePublicationService, fileSystemService, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   await componentTransactionReady;
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
-  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, extractVideoTimelineFrames, fileSystemService, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  const workspaceIpcController = registerWorkspaceIpc({ getReadyProjectPath, Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, extractVideoTimelineFrames, fileSystemService, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dns, ensureWorkspace, fetch: electronNet.fetch.bind(electronNet), fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber, nativeImage, net: nodeNet, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resolveRemoteHost: async hostname => (await electronNet.resolveHost(hostname)).endpoints, resumeToastViewAfterNativeDrag, samePathIdentity, scheduleMediaTrackingScan, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
@@ -1450,7 +1455,7 @@ app.whenReady().then(async () => {
     : null;
   // A fast renderer can invoke preload APIs immediately on warm starts.
   if (smokeTestEnabled) {
-    await runElectronSmokeProbe({ app, mainWindow, rendererEntryFile, loadRenderer: loadMainWindowRenderer, recoveryResult: smokeRecoveryResult, processSupervisor });
+    await runElectronSmokeProbe({ app, mainWindow, rendererEntryFile, loadRenderer: loadMainWindowRenderer, recoveryResult: smokeRecoveryResult, processSupervisor, componentServiceManager, componentHostRegistry });
   } else loadMainWindowRenderer();
 
   setTimeout(checkForUpdates, 3000);
@@ -1465,9 +1470,9 @@ getApplicationQuitState = registerConfigDrainBeforeQuit({ app, getConfigMutation
   const componentIds = [...new Set(componentHostRegistry.list().map(item => item.componentId))];
   await runApplicationQuit({
     componentIds, processSupervisor, componentServiceManager, componentViewManager, componentLifecycleCoordinator,
-    componentCapabilityBroker, abortComponentNetworkRequests, writeLog,
-    confirmBackgroundProcesses: async background => {
-      const options = { type: 'warning', title: '插件仍在后台运行', message: `仍有 ${new Set(background.map(item => item.owner.componentId)).size} 个插件在后台运行。`, detail: '退出应用需要先关闭这些插件的全部后台进程。', buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true };
+    componentCapabilityBroker, abortComponentNetworkRequests, backgroundTasks, writeLog,
+    confirmPendingTasks: async pendingTasks => {
+      const options = { type: 'warning', title: '确认退出', message: '还有任务未完成，确定要退出吗？', detail: applicationQuitTaskDetail(pendingTasks), buttons: ['仍然退出', '暂不退出'], defaultId: 1, cancelId: 1, noLink: true };
       const response = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
       return response.response === 0;
     },
