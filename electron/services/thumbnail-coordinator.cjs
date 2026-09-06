@@ -255,11 +255,12 @@ class ThumbnailCoordinator {
     return new Promise(resolve => this.idleWaiters.add(resolve));
   }
 
-  stop() {
+  stop({ discardAccessTimes = false } = {}) {
     if (this.stopPromise) return this.stopPromise;
     this.stopped = true;
     if (this.touchTimer) clearTimeout(this.touchTimer);
     this.touchTimer = null;
+    if (discardAccessTimes) this.touches.clear();
     const error = Object.assign(new Error('thumbnail coordinator stopped'), { code: 'THUMBNAIL_STOPPED' });
     for (const run of this.readerQueue.splice(0)) run.cancel?.(error);
     for (const run of [...this.maintenanceQueue]) run.cancel?.(error);

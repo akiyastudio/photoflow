@@ -33,6 +33,9 @@ const normalizeTask = value => {
     ...(HISTORY_POLICIES.has(value.historyPolicy) ? {} : { historyPolicy: undefined }),
   };
   let policy = resolveBackgroundTaskPolicy(explicit);
+  if (value.state === 'failed' && value.error === 'Process supervisor is stopping' && policy.taskCenterPolicy === 'attention-only') {
+    value = { ...value, state: 'cancelled', error: '', message: '因退出停止', retryable: false, retryPending: false };
+  }
   if (ACTIVE_STATES.has(value.state)) {
     if (policy.interruptedPolicy === 'discard') return null;
     if (policy.interruptedPolicy === 'migrate') {

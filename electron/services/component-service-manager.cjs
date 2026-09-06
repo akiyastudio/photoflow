@@ -467,19 +467,19 @@ class ComponentServiceManager {
     child.stdin.write(bytes);
   }
 
-  async stop(componentId, reason = 'component-service-stop') {
+  async stop(componentId, reason = 'component-service-stop', options = {}) {
     const id = String(componentId || '');
     await this.sessionTransitions.get(id)?.catch(() => undefined);
     const session = this.sessions.get(id);
     if (!session) return false;
-    await session.managed.stop(reason);
+    await session.managed.stop(reason, options);
     if (this.sessions.get(id) === session) this.sessions.delete(id);
     return true;
   }
 
-  async stopAll(reason = 'component-services-stop') {
+  async stopAll(reason = 'component-services-stop', options = {}) {
     const ids = [...this.sessions.keys()];
-    await Promise.all(ids.map(componentId => this.stop(componentId, reason)));
+    await Promise.all(ids.map(componentId => this.stop(componentId, reason, options)));
     return ids.length;
   }
 

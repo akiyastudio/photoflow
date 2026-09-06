@@ -31,54 +31,77 @@ const registerMainWindowQuitGuard = ({ window, app, getQuitState, platform = pro
 };
 
 const runApplicationQuit = async ({
-  componentIds,
-  processSupervisor,
-  componentServiceManager,
-  componentViewManager,
-  componentLifecycleCoordinator,
-  componentCapabilityBroker,
-  abortComponentNetworkRequests,
-  backgroundTasks,
-  confirmPendingTasks,
-  teardown = [],
-  writeLog = () => undefined,
+  componentIds, processSupervisor, componentServiceManager, componentViewManager,
+  componentLifecycleCoordinator, componentCapabilityBroker, abortComponentNetworkRequests,
+  backgroundTasks, confirmPendingTasks, confirmationAccepted = false,
+  quiesce = () => undefined, saveState = () => undefined, hideWindow = () => undefined,
+  teardown = [], cleanup = [], writeLog = () => undefined, cleanupBudgetMs = 2000,
+  startedAt = Date.now(),
 }) => {
-  const initialStatuses = processSupervisor.list();
-  const supervisedOwnerIds = initialStatuses.map(status => String(status.owner?.componentId || '').trim()).filter(Boolean);
-  const guardedComponentIds = [...new Set([...componentIds, ...supervisedOwnerIds])];
-  const pendingTasks = selectApplicationQuitTasks(backgroundTasks.list());
-  if (pendingTasks.length && !await confirmPendingTasks(pendingTasks)) {
-    componentLifecycleCoordinator.cancelApplicationQuit();
-    throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
+  const timings = {};
+  const mark = phase => { timings[phase] = Date.now() - startedAt; };
+  if (!confirmationAccepted) {
+    const pendingTasks = selectApplicationQuitTasks(backgroundTasks.list());
+    if (pendingTasks.length && !await confirmPendingTasks(pendingTasks)) {
+      componentLifecycleCoordinator.cancelApplicationQuit();
+      throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
+    }
   }
-  componentLifecycleCoordinator.requestApplicationStop();
-
-  const barriers = guardedComponentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
+  const barriers = [];
+  const bounded = (promise, deadlineAt, label) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Object.assign(new Error(label + '尚未结束，请重试退出。'), { code: 'APP_QUIT_BUSY' })), Math.max(1, deadlineAt - Date.now()));
+    Promise.resolve(promise).then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
   try {
-    await componentServiceManager?.stopAll('application-quit');
-    await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
-    await componentViewManager?.closeAllAndWait();
-    guardedComponentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
-    await Promise.all(barriers.map(barrier => barrier.drain({ timeoutMs: 7500 })));
-    await componentLifecycleCoordinator.waitForAllWork({ timeoutMs: 7500 });
-    await processSupervisor.stopAll('application-quit');
-    const finalStatuses = processSupervisor.list();
-    const remainingOwners = finalStatuses.filter(status => status.owner?.componentId && isActiveManagedProcessStatus(status));
-    const stickyUnconfirmedIds = guardedComponentIds.filter(componentId => processSupervisor.hasUnconfirmedOwner?.(componentId) === true);
-    const unconfirmedIds = [...new Set([...remainingOwners.map(status => String(status.owner.componentId)), ...stickyUnconfirmedIds])];
-    if (unconfirmedIds.length) throw Object.assign(new Error('组件后台进程树终止状态仍未确认'), { code: 'PROCESS_TERMINATION_FAILED', componentIds: unconfirmedIds });
+    backgroundTasks.beginShutdown?.();
+    await quiesce();
+    mark('admissionStoppedMs');
+    await backgroundTasks.waitForShutdown?.({ timeoutMs: 5000 });
+    await saveState();
+    componentLifecycleCoordinator.requestApplicationStop();
+    backgroundTasks.stop?.();
+    mark('stateSavedMs');
+    await hideWindow();
+    mark('windowHiddenMs');
+
+    const initialStatuses = processSupervisor.list();
+    const guardedComponentIds = [...new Set([...componentIds, ...initialStatuses.map(status => status.owner?.componentId).filter(Boolean)])];
+    for (const componentId of guardedComponentIds) {
+      barriers.push(componentCapabilityBroker.blockComponent(componentId));
+      abortComponentNetworkRequests?.(componentId);
+    }
+    const deadlineAt = Date.now() + cleanupBudgetMs;
+    const remaining = () => Math.max(1, deadlineAt - Date.now());
+    const cleanupPending = Promise.allSettled(cleanup.map(operation => Promise.resolve().then(() => operation({ deadlineAt }))));
+    await bounded(Promise.all([
+      processSupervisor.stopAll('application-quit', { deadlineAt }),
+      componentServiceManager?.stopAll('application-quit', { deadlineAt }),
+      componentViewManager?.closeAllAndWait(remaining()),
+    ]), deadlineAt, '后台服务');
+    await bounded(Promise.all([
+      ...barriers.map(barrier => barrier.drain({ timeoutMs: remaining() })),
+      componentLifecycleCoordinator.waitForAllWork({ timeoutMs: remaining() }),
+    ]), deadlineAt, '后台操作');
+    const remainingProcesses = processSupervisor.list().filter(isActiveManagedProcessStatus);
+    const unconfirmedOwners = guardedComponentIds.filter(id => processSupervisor.hasUnconfirmedOwner?.(id));
+    if (remainingProcesses.length || unconfirmedOwners.length) throw Object.assign(new Error('后台服务的退出状态尚未确认'), { code: 'PROCESS_TERMINATION_FAILED', componentIds: unconfirmedOwners });
+    mark('processesStoppedMs');
+    try {
+      const results = await bounded(cleanupPending, deadlineAt, '缓存收尾');
+      for (const result of results) if (result.status === 'rejected') writeLog('warn', 'Application cleanup deferred', { error: result.reason?.message || String(result.reason) });
+    } catch (error) { writeLog('warn', 'Application cleanup deferred', { error: error.message }); }
+    componentLifecycleCoordinator.commitApplicationQuit();
+    const results = await Promise.allSettled(teardown.map(operation => Promise.resolve().then(operation)));
+    for (const result of results) if (result.status === 'rejected') writeLog('warn', 'Post-commit application teardown warning', { error: result.reason?.message || String(result.reason) });
+    mark('completedMs');
+    writeLog('info', 'Application quit timing', { startedAt, ...timings });
+    return { committed: true, timings };
   } catch (error) {
     barriers.forEach(barrier => barrier.release());
     componentLifecycleCoordinator.cancelApplicationQuit();
+    writeLog('warn', 'Application quit paused', { ...timings, elapsedMs: Date.now() - startedAt, error: error.message });
     throw error;
   }
-
-  componentLifecycleCoordinator.commitApplicationQuit();
-  for (const operation of teardown) {
-    try { await operation(); }
-    catch (error) { writeLog('warn', 'Post-commit application teardown warning', { error: error.message || String(error) }); }
-  }
-  return { committed: true };
 };
 
 module.exports = { registerMainWindowQuitGuard, runApplicationQuit, selectApplicationQuitTasks, applicationQuitTaskDetail };

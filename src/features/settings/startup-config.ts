@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { registerApplicationQuitFlush } from '../app/application-quit-client';
 import { LEGACY_VIDEO_PLAYBACK_SETTINGS_ID } from '../../compatibility/legacy-video-playback-settings';
 import { normalizeVideoShortcutBindings } from '../../contracts/video-shortcuts';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths, type AppConfig } from '../../types';
@@ -117,6 +118,11 @@ export const useStartupConfig = () => {
   const [startupBirthdays, setStartupBirthdays] = useState<Record<string, string> | null>(null);
   const [configLoaded, setConfigLoaded] = useState(false);
   const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
+  useEffect(() => registerApplicationQuitFlush(async () => {
+    if (!configLoaded || !config) return;
+    const result = await window.electronAPI.saveConfig(config);
+    if (!result.success) throw new Error(result.error || '设置未能保存');
+  }), [configLoaded, config]);
 
   useEffect(() => {
     const loadConfig = async () => {

@@ -154,6 +154,8 @@ class ManagedProcess extends EventEmitter {
 
   stop(reason = 'shutdown', options = {}) {
     if (this.stopPromise) return this.stopPromise;
+    if (this.released && this.lifecycle?.settled && !this.lifecycle?.terminationFailed) return Promise.resolve({ stopped: true });
+    if (Number.isFinite(options.deadlineAt)) options = { ...options, timeoutMs: Math.max(1, options.deadlineAt - Date.now()) };
     const operation = this._stopOnce(reason, options);
     this.stopPromise = operation.finally(() => { if (this.stopPromise === tracked) this.stopPromise = null; });
     const tracked = this.stopPromise;
@@ -517,10 +519,10 @@ class ProcessSupervisor {
     return matches.length;
   }
 
-  async stopAll(reason = 'application-shutdown') {
+  async stopAll(reason = 'application-shutdown', options = {}) {
     this.stopping = true;
     const processes = [...this.processes.values()];
-    const results = await Promise.allSettled(processes.map(process => process.stop(reason)));
+    const results = await Promise.allSettled(processes.map(process => process.stop(reason, options)));
     results.forEach((result, index) => {
       if (result.status !== 'rejected') return;
       try {

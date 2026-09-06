@@ -702,20 +702,12 @@ const publishWorkingImage = (parentId, storage, sourcePath, baseRelativePath, do
   () => publishWorkingImageUnlocked(parentId, storage, sourcePath, baseRelativePath, domainPlan),
 );
 
-const ensureSchema = databasePath => {
-  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-  const schemaSignature = () => ['', '-wal'].map(suffix => { const stat = fs.statSync(`${databasePath}${suffix}`, { throwIfNoEntry: false }); return stat ? `${stat.size}:${stat.mtimeMs}` : '-'; }).join('|');
-  const beforeSignature = schemaSignature();
-  const db = new DatabaseSync(databasePath);
-  db.function('team_request_id', () => String(revisionRequestContext.getStore()?.requestId || ''));
-  db.function('team_now_ms', () => Date.now());
-  db.exec(`PRAGMA busy_timeout=${DB_BUSY_TIMEOUT_MS}; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
-  if (schemaReadyPaths.get(databasePath) === beforeSignature) return db;
+const initializeSchema = db => {
   db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   const storedVersion = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value;
   const userTables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'meta'").all();
-  if (storedVersion !== undefined && String(storedVersion) !== '10') { db.close(); throw new Error(`团片数据库版本 ${storedVersion} 不是当前首发 schema 10；已拒绝迁移打开`); }
-  if (storedVersion === undefined && userTables.length) { db.close(); throw new Error('团片数据库缺少当前 schema_version=10 标记；已拒绝兼容推断'); }
+  if (storedVersion !== undefined && String(storedVersion) !== '10') throw new Error(`团片数据库版本 ${storedVersion} 不是当前首发 schema 10；已拒绝迁移打开`);
+  if (storedVersion === undefined && userTables.length) throw new Error('团片数据库缺少当前 schema_version=10 标记；已拒绝兼容推断');
   const requiredColumns = {
     team_project_revisions: ['project_id','revision'], team_revision_guards: ['request_id','project_id','expected_revision','bumped','created_at'], team_project_revision_leases: ['project_id','request_id','expires_at'],
     team_patch_tasks: ['project_id','id','photo_id','base_version_id','person_index','person_name','assignee','detector','bbox_json','crop_json','patch_path','mask_path','mask_json','members_json','needs_review','review_reason','edited_patch_path','status','merge_metrics_json','merged_version_id','generation_json','created_at','updated_at','is_deleted'],
@@ -739,10 +731,27 @@ const ensureSchema = databasePath => {
     'team_workflow_reconcile_pending.error': "''",'team_workflow_reconcile_pending.attempt_count': '0','team_workflow_reconcile_pending.next_attempt_at': '0','team_workflow_reconcile_pending.last_error': "''",'team_workflow_reconcile_pending.history_json': "'[]'",'team_durable_operations.phase': "'accepted'",'team_durable_operations.progress': '0','team_durable_operations.request_json': "'{}'",'team_durable_operations.checkpoint_json': "'{}'",'team_durable_operations.result_json': "'{}'",'team_durable_operations.error': "''",'team_durable_operations.cancel_requested': '0','team_durable_operations.base_revision': '0','team_workflow_settings.settings_json': "'{}'",'team_workflow_state.fingerprint': "''",
     'team_output_outbox.stage_id': "''",'team_output_outbox.source_json': "'[]'",'team_output_outbox.target_json': "'[]'",'team_output_outbox.receipt_json': "'{}'",'team_output_outbox.result_json': "'{}'",'team_output_outbox.last_error': "''",'team_cleanup_outbox.state': "'pending'",'team_cleanup_outbox.attempt_count': '0','team_cleanup_outbox.last_error': "''",
   };
+  // The pre-lease v9/v10 migration used CREATE TABLE AS SELECT for these
+  // tables, which preserved rows but discarded their declared constraints.
+  // Recognize that complete, known shape; do not infer arbitrary broken tables.
+  const legacySnapshotTables = ['team_retouch_photos','team_person_identities','team_patch_tasks','team_person_assignments','team_person_exclusions','team_task_stages','team_task_artifacts','team_workflow_review_confirmations','team_durable_operations'];
+  const columnType = name => realColumns.has(name) ? 'REAL' : integerColumns.has(name) ? 'INTEGER' : 'TEXT';
+  const hasLegacySnapshots = storedVersion === '10'
+    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='team_project_revision_leases'").get()
+    && legacySnapshotTables.every(table => {
+      const required = new Set([...requiredColumns[table], ...(table === 'team_retouch_photos' ? ['calibrated_at'] : [])]);
+      const actual = db.prepare(`PRAGMA table_xinfo(${table})`).all();
+      return actual.length === required.size && actual.every(column => required.has(column.name)
+        && column.type === (column.name === 'calibrated_at' || columnType(column.name) === 'INTEGER' ? 'INT' : columnType(column.name))
+        && Number(column.hidden) === 0 && Number(column.pk) === 0 && Number(column.notnull) === 0 && column.dflt_value === null)
+        && !db.prepare(`PRAGMA foreign_key_list(${table})`).all().length;
+    });
   const validateCurrentTables = ({ allowMissingInfrastructure = false } = {}) => {
     for (const [table, required] of Object.entries(requiredColumns)) {
       const actual = db.prepare(`PRAGMA table_xinfo(${table})`).all();
-      if (!actual.length && allowMissingInfrastructure && ['team_output_outbox','team_cleanup_outbox'].includes(table)) continue;
+      if (allowMissingInfrastructure && hasLegacySnapshots && legacySnapshotTables.includes(table)) continue;
+      if (!actual.length && allowMissingInfrastructure && ['team_project_revision_leases','team_output_outbox','team_cleanup_outbox'].includes(table)
+        && !db.prepare('SELECT 1 FROM sqlite_master WHERE name=?').get(table)) continue;
       if (actual.length !== required.length || actual.some((column, index) => column.name !== required[index] || Number(column.hidden) !== 0)) throw new Error(`团片 schema 10 表结构无效（列集合）：${table}`);
       const pk = primaryKeys[table] || [];
       for (const column of actual) {
@@ -755,11 +764,30 @@ const ensureSchema = databasePath => {
       if (db.prepare(`PRAGMA foreign_key_list(${table})`).all().length) throw new Error(`团片 schema 10 包含未声明外键：${table}`);
     }
   };
-  if (storedVersion !== undefined) {
-    try { validateCurrentTables({ allowMissingInfrastructure: true }); }
-    catch (error) { db.close(); throw error; }
+  if (storedVersion !== undefined) validateCurrentTables({ allowMissingInfrastructure: true });
+  if (hasLegacySnapshots) {
+    // Retain retired metadata and a record of old NULLs filled from declared
+    // defaults. Required values without a default still abort the transaction.
+    const calibration = db.prepare('SELECT project_id,photo_id,base_version_id,calibrated_at FROM team_retouch_photos ORDER BY project_id,photo_id').all();
+    db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run('schema10_recovery:photo_calibration', JSON.stringify(calibration));
+    for (const table of legacySnapshotTables) {
+      const temporary = `${table}_schema10_recovery`;
+      const columns = requiredColumns[table];
+      const definitions = columns.map(name => `${name} ${columnType(name)}${nullableColumns.has(`${table}.${name}`) ? '' : ' NOT NULL'}${defaults[`${table}.${name}`] === undefined ? '' : ` DEFAULT ${defaults[`${table}.${name}`]}`}`);
+      const defaultedColumns = columns.filter(name => defaults[`${table}.${name}`] !== undefined && !nullableColumns.has(`${table}.${name}`));
+      if (defaultedColumns.length) {
+        const affected = db.prepare(`SELECT ${[...primaryKeys[table], ...defaultedColumns].join(',')} FROM ${table} WHERE ${defaultedColumns.map(name => `${name} IS NULL`).join(' OR ')} ORDER BY ${primaryKeys[table].join(',')}`).all();
+        if (affected.length) db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(`schema10_recovery:defaulted:${table}`, JSON.stringify(affected.map(row => ({ key: Object.fromEntries(primaryKeys[table].map(name => [name, row[name]])), columns: defaultedColumns.filter(name => row[name] === null) }))));
+      }
+      const selection = columns.map(name => defaultedColumns.includes(name) ? `COALESCE(${name},${defaults[`${table}.${name}`]})` : name);
+      const schemaObjects = db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name").all(table);
+      db.exec(`CREATE TABLE ${temporary} (${definitions.join(',')},PRIMARY KEY(${primaryKeys[table].join(',')}));
+        INSERT INTO ${temporary}(${columns.join(',')}) SELECT ${selection.join(',')} FROM ${table};
+        DROP TABLE ${table}; ALTER TABLE ${temporary} RENAME TO ${table};`);
+      for (const object of schemaObjects) db.exec(object.sql);
+    }
   }
-  db.exec(`BEGIN IMMEDIATE;
+  db.exec(`
     CREATE TABLE IF NOT EXISTS team_project_revisions (project_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS team_revision_guards (request_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, bumped INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS team_project_revision_leases (project_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL);
@@ -866,10 +894,9 @@ const ensureSchema = databasePath => {
     CREATE UNIQUE INDEX IF NOT EXISTS team_output_outbox_idempotency ON team_output_outbox(project_id,idempotency_key);
     CREATE INDEX IF NOT EXISTS team_cleanup_outbox_state ON team_cleanup_outbox(project_id,state,updated_at);
     INSERT INTO meta(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO NOTHING;
-    COMMIT;
   `);
   validateCurrentTables();
-  if (db.prepare('PRAGMA foreign_key_check').all().length) { db.close(); throw new Error('团片 schema 10 外键校验失败'); }
+  if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('团片 schema 10 外键校验失败');
   const guardedTables = ['team_retouch_photos','team_person_identities','team_person_assignments','team_person_exclusions','team_patch_tasks','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations','team_workflow_settings','team_workflow_state','team_review_state'];
   for (const table of guardedTables) for (const action of ['INSERT','UPDATE','DELETE']) db.exec(`
     CREATE TRIGGER IF NOT EXISTS ${table}_lease_owner_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN
@@ -891,24 +918,43 @@ const ensureSchema = databasePath => {
   };
   for (const [name, [unique, names]] of Object.entries(expectedIndexes)) {
     const row = db.prepare("SELECT tbl_name FROM sqlite_master WHERE type='index' AND name=?").get(name);
-    if (!row) { db.close(); throw new Error(`团片 schema 10 缺少索引：${name}`); }
+    if (!row) throw new Error(`团片 schema 10 缺少索引：${name}`);
     const listed = db.prepare(`PRAGMA index_list(${row.tbl_name})`).all().find(item => item.name === name);
     const actualNames = db.prepare(`PRAGMA index_info(${name})`).all().map(item => item.name);
-    if (Number(listed?.unique) !== unique || JSON.stringify(actualNames) !== JSON.stringify(names)) { db.close(); throw new Error(`团片 schema 10 索引语义无效：${name}`); }
+    if (Number(listed?.unique) !== unique || JSON.stringify(actualNames) !== JSON.stringify(names)) throw new Error(`团片 schema 10 索引语义无效：${name}`);
   }
   const expectedTriggers = new Set();
   for (const table of guardedTables) for (const action of ['insert','update','delete']) for (const family of ['lease_owner','revision_guard','revision']) expectedTriggers.add(`${table}_${family}_${action}`);
   const triggers = db.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'team_%'").all();
-  if (triggers.length !== expectedTriggers.size || triggers.some(item => !expectedTriggers.has(item.name))) { db.close(); throw new Error('团片 schema 10 trigger 集合无效'); }
+  if (triggers.length !== expectedTriggers.size || triggers.some(item => !expectedTriggers.has(item.name))) throw new Error('团片 schema 10 trigger 集合无效');
   for (const trigger of triggers) {
     const sql = String(trigger.sql || '').toLowerCase().replace(/\s+/g, ' ');
     const valid = trigger.name.includes('_lease_owner_') ? sql.includes('team_project_revision_leases') && sql.includes("raise(abort,'team_revision_lease_lost')") && sql.includes('team_request_id()')
       : trigger.name.includes('_revision_guard_') ? sql.includes("raise(abort,'team_revision_conflict')") && sql.includes('expected_revision') && sql.includes('team_request_id()')
         : sql.includes('team_project_revisions') && sql.includes('revision=revision+1') && sql.includes('bumped=1') && sql.includes('team_request_id()');
-    if (!valid) { db.close(); throw new Error(`团片 schema 10 trigger 语义无效：${trigger.name}`); }
+    if (!valid) throw new Error(`团片 schema 10 trigger 语义无效：${trigger.name}`);
   }
-  schemaReadyPaths.set(databasePath, schemaSignature());
-  return db;
+};
+const ensureSchema = databasePath => {
+  fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const schemaSignature = () => ['', '-wal'].map(suffix => { const stat = fs.statSync(`${databasePath}${suffix}`, { throwIfNoEntry: false }); return stat ? `${stat.size}:${stat.mtimeMs}` : '-'; }).join('|');
+  const beforeSignature = schemaSignature();
+  const db = new DatabaseSync(databasePath);
+  db.function('team_request_id', () => String(revisionRequestContext.getStore()?.requestId || ''));
+  db.function('team_now_ms', () => Date.now());
+  try {
+    db.exec(`PRAGMA busy_timeout=${DB_BUSY_TIMEOUT_MS}; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
+    if (schemaReadyPaths.get(databasePath) === beforeSignature) return db;
+    db.exec('BEGIN IMMEDIATE');
+    initializeSchema(db);
+    db.exec('COMMIT');
+    schemaReadyPaths.set(databasePath, schemaSignature());
+    return db;
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* the transaction may not have started */ }
+    db.close();
+    throw error;
+  }
 };
 const fileSha256 = filePath => new Promise((resolve, reject) => {
   const digest = crypto.createHash('sha256');

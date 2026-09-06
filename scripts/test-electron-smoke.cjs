@@ -6,7 +6,7 @@ const { spawn, execFileSync } = require('child_process');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const electronExecutable = require('electron');
-const forbidden = /database is locked|Thumbnail database request timed out|Thumbnail generation failed|is not defined|Application quit coordination failed|Domain health changed[^\r\n]*"state":"(?:degraded|unavailable)"|uncaught main-process exception|unhandled main-process promise rejection|-1073741515|GPU process (?:exited|crashed)/i;
+const forbidden = /database is locked|Thumbnail database request timed out|Thumbnail generation failed|is not defined|Application quit coordination failed|No handler registered for .toast-view:update.|Process supervisor is stopping|Domain health changed[^\r\n]*"state":"(?:degraded|unavailable)"|uncaught main-process exception|unhandled main-process promise rejection|-1073741515|GPU process (?:exited|crashed)/i;
 
 const readApplicationLogs = async userData => {
   const entries = await fs.promises.readdir(path.join(userData, 'logs'), { withFileTypes: true }).catch(() => []);
@@ -26,7 +26,7 @@ const launchElectron = ({ userData, sessionData, mediaPath }) => new Promise((re
   const child = spawn(electronExecutable, ['--disable-gpu', repositoryRoot], {
     cwd: repositoryRoot, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NODE_ENV: 'production', PHOTOFLOW_SMOKE_TEST: '1', PHOTOFLOW_USER_DATA_DIR: userData,
-      PHOTOFLOW_SMOKE_IDLE_COMPONENT_ID: 'video-tools',
+      PHOTOFLOW_SMOKE_IDLE_COMPONENT_ID: 'video-tools', PHOTOFLOW_SMOKE_QUIT_UI: '1', PHOTOFLOW_SMOKE_QUIT_QUEUED_SCANS: '30',
       PHOTOFLOW_SMOKE_SESSION_DATA_DIR: sessionData, PHOTOFLOW_SMOKE_SETUP_PROJECTS: '0', PHOTOFLOW_SMOKE_MEDIA_PATH: mediaPath,
       PYTHONDONTWRITEBYTECODE: '1' },
   });
@@ -44,7 +44,7 @@ const launchElectron = ({ userData, sessionData, mediaPath }) => new Promise((re
     if (code !== 0) { reject(new Error(`Electron exited ${code}\n${output}`)); return; }
     const line = stdout.split(/\r?\n/).find(value => value.startsWith('PHOTOFLOW_SMOKE_RESULT='));
     if (!line) { reject(new Error(`Electron did not report smoke evidence\n${output}`)); return; }
-    try { resolve({ evidence: JSON.parse(line.slice('PHOTOFLOW_SMOKE_RESULT='.length)), output }); }
+    try { resolve({ evidence: JSON.parse(line.slice('PHOTOFLOW_SMOKE_RESULT='.length)), output, exitedAt: Date.now() }); }
     catch (error) { reject(new Error(`Invalid Electron smoke evidence\n${output}`, { cause: error })); }
   });
 });
@@ -53,6 +53,7 @@ const assertLifecycle = (label, lifecycle, { userData, sessionData }) => {
   assert.equal(lifecycle.evidence.rendererLoaded, true, `${label} renderer`);
   assert.equal(lifecycle.evidence.preloadApi, true, `${label} preload`);
   assert.equal(lifecycle.evidence.backgroundTaskSnapshot, true, `${label} task snapshot`);
+  assert.equal(lifecycle.evidence.quitUiVerified, true, `${label} styled quit dialog`);
   assert.equal(lifecycle.evidence.idleComponentReady, true, `${label} idle plugin service is running without a task`);
   assert(lifecycle.evidence.managedProcesses.some(process => process.owner?.componentId === 'video-tools' && process.pid), `${label} idle plugin must still be live when quit begins`);
   assert.equal(lifecycle.evidence.projectFilesReadable, true, `${label} project contents and files`);
@@ -103,6 +104,14 @@ const run = async () => {
     assertLifecycle('first', first, { userData, sessionData: sessionDataOne });
     assertLifecycle('second', second, { userData, sessionData: sessionDataTwo });
     const applicationLogs = await readApplicationLogs(userData);
+    const timingRows = applicationLogs.split(/\r?\n/).filter(line => line.includes('Application quit timing')).map(line => JSON.parse(line.slice(line.indexOf('{'))));
+    assert.equal(timingRows.length, 2);
+    for (const timing of timingRows) { assert(timing.windowHiddenMs < 200, JSON.stringify(timing)); assert(timing.completedMs < 1500, JSON.stringify(timing)); }
+    const processExitMs = [first, second].map((lifecycle, index) => lifecycle.exitedAt - timingRows[index].startedAt);
+    assert(processExitMs.every(duration => duration < 1500), JSON.stringify(processExitMs));
+    const tasksAfterQuit = JSON.parse(await fs.promises.readFile(path.join(userData, 'background-tasks.json'), 'utf8')).tasks;
+    assert.equal(tasksAfterQuit.filter(task => task.type === 'version-media-rescan' && task.state === 'failed').length, 0);
+    console.log('Quit timing evidence: ' + JSON.stringify({ stages: timingRows, processExitMs }));
     assert.equal(forbidden.test(`${first.output}\n${second.output}\n${applicationLogs}`), false, 'both lifecycles must have no forbidden logs');
     const childPids = [...new Set([...first.evidence.managedProcesses, ...second.evidence.managedProcesses].flatMap(process => [process.pid, process.targetPid]).filter(Boolean))];
     assert.equal(childPids.some(isProcessAlive), false, 'all supervised Python children must exit with Electron');

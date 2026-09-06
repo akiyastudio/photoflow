@@ -72,7 +72,7 @@
     "test:renderer-error-notice": "node scripts/test-renderer-error-notice-model.cjs",
     "test:user-facing-notices": "node scripts/test-user-facing-notice-model.cjs",
     "test:electron-security": "node scripts/test-electron-security.cjs && node scripts/test-project-file-query-ipc.cjs",
-    "test:electron-dev-contract": "node scripts/test-development-startup.cjs && node scripts/test-application-quit-coordinator.cjs && node scripts/test-electron-dev-contract.cjs",
+    "test:electron-dev-contract": "node scripts/test-fast-application-quit.cjs && node scripts/test-development-startup.cjs && node scripts/test-application-quit-coordinator.cjs && node scripts/test-electron-dev-contract.cjs",
     "test:electron-smoke": "node scripts/test-electron-smoke.cjs",
     "test:component-electron-smoke": "node scripts/test-component-electron-smoke.cjs",
     "test:global-search": "node scripts/test-global-search.cjs && node scripts/test-global-search-stress.mjs",

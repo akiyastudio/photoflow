@@ -1102,6 +1102,9 @@ export interface IElectronAPI {
   minimizeWindow: () => void;
   toggleMaximizeWindow: () => Promise<boolean>;
   closeWindow: () => void;
+  getApplicationQuitState: () => Promise<ApplicationQuitState>;
+  respondToApplicationQuit: (requestId: string, confirmed: boolean, error?: string) => Promise<{ accepted: boolean }>;
+  onApplicationQuitState: (callback: (state: ApplicationQuitState) => void) => () => void;
   isWindowMaximized: () => Promise<boolean>;
   setWindowFullscreen: (enabled: boolean) => Promise<boolean>;
   onWindowMaximizedChange: (callback: (maximized: boolean) => void) => () => void;
@@ -1342,3 +1345,5 @@ declare global {
   }
 }
 import type { PlaybackAttempt, PlaybackErrorCode } from './contracts/playback-errors';
+
+export type ApplicationQuitState = { revision?: number; phase: "idle" | "confirming" | "saving" | "closing" | "failed"; requestId?: string; message?: string; tasks?: Array<{ id: string; title: string; state: string; progress: number }> };

@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
 import { AppDialogProvider } from './components/AppDialogProvider.tsx'
 import { LayerProvider } from './components/LayerProvider.tsx'
+import { ApplicationQuitController } from './features/app/ApplicationQuitController.tsx'
 import { TaskCenterProvider } from './features/background-tasks/TaskCenter.tsx'
 import { TopToastProvider, TopToastViewport } from './features/app/useTopToastStack.tsx'
 import './index.css'
@@ -11,6 +12,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <LayerProvider>
       <AppDialogProvider>
+        <ApplicationQuitController />
         <TaskCenterProvider>
           <TopToastProvider>
             <TopToastViewport />

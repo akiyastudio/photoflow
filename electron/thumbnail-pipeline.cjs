@@ -2140,7 +2140,7 @@ class ThumbnailPipeline {
     return this.evictCache({ pruneMissing: true });
   }
 
-  stop() {
+  stop(options = {}) {
     if (this.stopPromise) return this.stopPromise;
     let resolveStop;
     let rejectStop;
@@ -2170,7 +2170,7 @@ class ThumbnailPipeline {
     this.projectScans.clear();
     const coordinatorCanStopDatabaseImmediately = this.coordinator.isIdle()
       && this.coordinator.status().pendingTouches === 0;
-    const coordinatorStop = this.coordinator.stop();
+    const coordinatorStop = this.coordinator.stop(options);
     const coordinatorStopSettled = coordinatorStop.then(
       value => ({ status: 'fulfilled', value }),
       reason => ({ status: 'rejected', reason }),

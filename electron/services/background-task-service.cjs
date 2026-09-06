@@ -64,6 +64,13 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   let resourceLeaseSequence = 0;
   let persistenceReadOnlyReason = '';
   let stopping = false;
+  let quiescing = false;
+  const shutdownWaiters = new Set();
+  const isShutdownRelevant = task => {
+    if (!['queued', 'running', 'pausing', 'paused', 'resuming'].includes(task.state)) return false;
+    const policy = resolveBackgroundTaskPolicy(task);
+    return policy.taskCenterPolicy === 'always' && !policy.foregroundNonBlocking && policy.notificationPolicy !== 'silent';
+  };
 
   const safeLog = (level, message, details) => {
     try { writeLog(level, message, details); } catch (_) { /* logging is best effort */ }
@@ -302,6 +309,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     return true;
   };
   const emitDelta = (upserts = [], removeIds = []) => {
+    if (quiescing) return;
     revision += 1;
     try {
       safeEmit('background-task:changed', {
@@ -314,6 +322,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     } finally { schedulePersistence(); }
   };
   const publish = task => {
+    if (quiescing) { for (const check of shutdownWaiters) check(); return; }
     const upserts = [];
     const removeIds = [];
     if (task.retryOfTaskId && HISTORY_STATES.has(task.state)) {
@@ -374,6 +383,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   };
 
   const createHandle = (definition, retryFactory = null, { deferPublish = false } = {}) => {
+    if (quiescing) throw Object.assign(new Error('应用正在退出'), { code: 'APP_SHUTTING_DOWN' });
     if (stopping) throw Object.assign(new Error('background task service is stopping'), { code: 'BACKGROUND_TASK_SERVICE_STOPPED' });
     definition = snapshotDefinition(definition);
     const replacementContext = retryContext.getStore();
@@ -502,7 +512,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       id: task.id,
       signal: task.controller.signal,
       report: (progress, message = task.message, metadata) => {
-        if (task.controller.signal.aborted) return;
+        if (task.controller.signal.aborted || quiescing) return;
         update(task, {
           progress: Math.max(task.progress, Math.max(0, Math.min(100, Number(progress) || 0))),
           message,
@@ -603,7 +613,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         startLifecycle();
       },
       complete: (message = task.message || '已完成') => finish({ state: 'completed', progress: 100, message, checkpoint: undefined }),
-      fail: error => finish({ state: 'failed', error: error?.message || String(error), message: error?.message || String(error) }),
+      fail: error => finish(quiescing && task.controller.signal.aborted ? { state: 'cancelled', error: '', message: '因退出停止' } : { state: 'failed', error: error?.message || String(error), message: error?.message || String(error) }),
       cancelled: () => finish({ state: 'cancelled', error: '', message: '已取消' }),
       isFinished: () => finished,
       snapshot: () => publicTask(task),
@@ -939,7 +949,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   };
 
   const upsertExternal = definition => {
-    if (stopping) return null;
+    if (stopping || quiescing) return null;
     const id = String(definition?.id || '');
     if (!id || !definition?.type) return null;
     const externalMetadata = controlledClone(definition.metadata || {});
@@ -1092,6 +1102,34 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   restorePersistedTasks();
 
   return {
+    beginShutdown: () => {
+      if (quiescing) return;
+      quiescing = true;
+      if (persistenceTimer) clearTimeout(persistenceTimer);
+      persistenceTimer = null;
+      for (const timers of autoRestartTimers.values()) for (const timer of timers) clearTimeout(timer);
+      autoRestartTimers.clear();
+      for (const task of tasks.values()) {
+        if (TERMINAL_STATES.has(task.state) || task.state === 'interrupted') continue;
+        if (task.cancellable || !isShutdownRelevant(task)) {
+          task.controller.abort();
+          task.pauseRequested = false;
+          for (const resolve of task.pauseWaiters) resolve();
+          task.pauseWaiters.clear();
+        }
+      }
+    },
+    waitForShutdown: ({ timeoutMs = 5000 } = {}) => new Promise((resolve, reject) => {
+      let timer;
+      const check = () => {
+        if ([...tasks.values()].some(isShutdownRelevant)) return;
+        clearTimeout(timer); shutdownWaiters.delete(check); resolve();
+      };
+      shutdownWaiters.add(check);
+      timer = setTimeout(() => { shutdownWaiters.delete(check); reject(Object.assign(new Error('仍有文件操作正在结束，请稍后重试退出。'), { code: 'APP_QUIT_BUSY' })); }, timeoutMs);
+      check();
+    }),
+    isShuttingDown: () => quiescing || stopping,
     start,
     run,
     subscribe: listener => {

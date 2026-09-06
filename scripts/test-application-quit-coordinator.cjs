@@ -41,7 +41,10 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true, task
 
 (async () => {
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
-  assert.match(mainSource, /buttons:\s*\['仍然退出',\s*'暂不退出'\],\s*defaultId:\s*1,\s*cancelId:\s*1/);
+  const quitUiSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'app', 'ApplicationQuitController.tsx'), 'utf8');
+  assert.match(quitUiSource, /confirmLabel: '仍然退出', cancelLabel: '暂不退出', tone: 'danger'/);
+  const quitWiring = mainSource.slice(mainSource.indexOf('const applicationQuitUi'), mainSource.indexOf("app.on('window-all-closed'"));
+  assert(!quitWiring.includes('dialog.showMessageBox'), 'quit confirmation and failures use application visuals');
   const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续退出'[\s\S]*?buttons:\s*\[presentation\.continueLabel,\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/, '卸载确认锁定真实退出文案与安全默认项');
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
@@ -99,7 +102,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true, task
 
   const continued = fixture({ confirm: true });
   await runApplicationQuit(continued.options);
-  assert(continued.events.indexOf('services-stopped') < continued.events.indexOf('component-processes-stopped'), 'owned services stop before generic owner processes');
+  assert(continued.events.indexOf('services-stopped') < continued.events.indexOf('commit'), 'owned services stop before the quit commit');
   assert(continued.events.indexOf('all-processes-stopped') < continued.events.indexOf('commit'));
   assert(continued.events.indexOf('commit') < continued.events.indexOf('video-disposed'));
 

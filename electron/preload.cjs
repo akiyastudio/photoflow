@@ -1,4 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+let applicationClosing = false;
+ipcRenderer.on('application-quit:state', (_event, state) => { applicationClosing = ['saving', 'closing', 'failed'].includes(state?.phase); });
 // Sandboxed preloads only expose Electron's limited preload `require`; local
 // CommonJS modules are unavailable here even when the file exists on disk.
 const COMPONENT_NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
@@ -111,7 +113,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: request => ipcRenderer.invoke('component-host-activate', request),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
-  updateToastView: snapshot => ipcRenderer.invoke('toast-view:update', snapshot),
+  updateToastView: snapshot => applicationClosing ? Promise.resolve({ success: true }) : ipcRenderer.invoke('toast-view:update', snapshot),
   onToastViewAction: callback => {
     if (typeof callback !== 'function') throw new TypeError('Toast view action callback must be a function');
     const listener = (_event, action) => callback(action);
@@ -367,7 +369,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   resumeBackgroundTask: (id) => ipcRenderer.invoke('background-task-resume', id),
   restartBackgroundTask: (id) => ipcRenderer.invoke('background-task-restart', id),
   retryBackgroundTask: (id) => ipcRenderer.invoke('background-task-retry', id),
-  onBackgroundTaskChanged: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('background-task-changed', subscription); return () => ipcRenderer.removeListener('background-task-changed', subscription); },
+  onBackgroundTaskChanged: (callback) => { const subscription = (_event, value) => { if (!applicationClosing) callback(value); }; ipcRenderer.on('background-task-changed', subscription); return () => ipcRenderer.removeListener('background-task-changed', subscription); },
   chooseBackupTarget: (currentPath) => ipcRenderer.invoke('backup-choose-target', currentPath),
   getBackupStatus: (workspacePath) => ipcRenderer.invoke('backup-status', workspacePath),
   setNasBackupTarget: (targetPath) => ipcRenderer.invoke('backup-set-nas-target', targetPath),
@@ -405,6 +407,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window-toggle-maximize'),
   closeWindow: () => ipcRenderer.send('window-close'),
+  getApplicationQuitState: () => ipcRenderer.invoke('application-quit:state'),
+  respondToApplicationQuit: (id, confirmed, error = '') => ipcRenderer.invoke('application-quit:respond', id, confirmed, error),
+  onApplicationQuitState: callback => { const listener = (_event, state) => callback(state); ipcRenderer.on('application-quit:state', listener); return () => ipcRenderer.removeListener('application-quit:state', listener); },
   isWindowMaximized: () => ipcRenderer.invoke('window-is-maximized'),
   setWindowFullscreen: (enabled) => ipcRenderer.invoke('window-set-fullscreen', enabled),
   onWindowMaximizedChange: (callback) => { const subscription = (_event, maximized) => callback(maximized); ipcRenderer.on('window-maximized-change', subscription); return () => ipcRenderer.removeListener('window-maximized-change', subscription); },

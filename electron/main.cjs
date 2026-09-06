@@ -46,10 +46,11 @@ const { createMediaRepository } = require('./domains/media/public.cjs');
 const { createEventBus } = require('./services/event-bus.cjs');
 const { createDomainCommandJournal } = require('./services/domain-command-journal.cjs');
 const { createDomainHealthService } = require('./services/domain-health-service.cjs');
+const { createApplicationQuitUi } = require('./services/application-quit-ui.cjs');
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
 const { ComponentLifecycleCoordinator } = require('./services/component-lifecycle-coordinator.cjs');
-const { registerMainWindowQuitGuard, runApplicationQuit, applicationQuitTaskDetail } = require('./services/application-quit-coordinator.cjs');
+const { registerMainWindowQuitGuard, runApplicationQuit, selectApplicationQuitTasks } = require('./services/application-quit-coordinator.cjs');
 const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
@@ -1455,7 +1456,7 @@ app.whenReady().then(async () => {
     : null;
   // A fast renderer can invoke preload APIs immediately on warm starts.
   if (smokeTestEnabled) {
-    await runElectronSmokeProbe({ app, mainWindow, rendererEntryFile, loadRenderer: loadMainWindowRenderer, recoveryResult: smokeRecoveryResult, processSupervisor, componentServiceManager, componentHostRegistry });
+    await runElectronSmokeProbe({ app, mainWindow, rendererEntryFile, loadRenderer: loadMainWindowRenderer, recoveryResult: smokeRecoveryResult, processSupervisor, componentServiceManager, componentHostRegistry, applicationQuitUi, backgroundTasks });
   } else loadMainWindowRenderer();
 
   setTimeout(checkForUpdates, 3000);
@@ -1464,36 +1465,71 @@ app.whenReady().then(async () => {
   });
 });
 
-getApplicationQuitState = registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, beforeDrain: () => {
-  if (!componentLifecycleCoordinator.beginApplicationQuit()) throw Object.assign(new Error('组件变更仍在进行，请稍后重试退出'), { code: 'APP_QUIT_BUSY' });
-}, onQuit: async () => {
-  const componentIds = [...new Set(componentHostRegistry.list().map(item => item.componentId))];
-  await runApplicationQuit({
-    componentIds, processSupervisor, componentServiceManager, componentViewManager, componentLifecycleCoordinator,
-    componentCapabilityBroker, abortComponentNetworkRequests, backgroundTasks, writeLog,
-    confirmPendingTasks: async pendingTasks => {
-      const options = { type: 'warning', title: '确认退出', message: '还有任务未完成，确定要退出吗？', detail: applicationQuitTaskDetail(pendingTasks), buttons: ['仍然退出', '暂不退出'], defaultId: 1, cancelId: 1, noLink: true };
-      const response = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
-      return response.response === 0;
-    },
-    teardown: [
-      () => videoPlaybackService?.dispose(), () => componentServiceManager?.destroy(), () => componentViewManager?.destroy(), () => exiftool.end(),
-      () => destroyToastViewManager(), () => telemetryService?.stop(), () => pluginService?.stop?.(), () => stopWorkspaceWatcher(true),
-      () => stopFileRootWatchers(), () => stopShellThumbnailProcess(), () => imageThumbnailRuntime.stop(), () => thumbnailService?.stop(),
-      () => backgroundTasks.stop(), () => domainCommandJournal.stop(), () => eventBus.clear(), () => workspaceDatabase.stop(),
-      () => operationsDatabase.stop(), () => workspaceMaintenanceDatabase.stop(), () => mediaDatabase.stop(), () => mediaInteractionDatabase.stop(),
-      () => versionReadDatabase.stop(), () => versionLocationDatabase.stop(), () => mediaScanDatabase.stop(), () => trackingScanDatabase.stop(),
-    ],
-  });
-}, onQuitFailed: async error => {
-  componentLifecycleCoordinator.cancelApplicationQuit();
-  if (BrowserWindow.getAllWindows().length === 0) { createWindow(); loadMainWindowRenderer(); }
-  if (error?.code !== 'APP_QUIT_CANCELLED') {
-    const busy = error?.code === 'APP_QUIT_BUSY';
-    const options = { type: 'error', title: '无法安全退出', message: busy ? '组件安装、卸载或生命周期操作仍在进行。' : '后台进程未能确认退出，应用将继续运行。', detail: `${error?.message || String(error)}\n请稍后重试。`, buttons: ['确定'], defaultId: 0, noLink: true };
-    if (mainWindow && !mainWindow.isDestroyed()) await dialog.showMessageBox(mainWindow, options); else await dialog.showMessageBox(options);
-  }
+let applicationQuitToastSuspended = false;
+const applicationQuitUi = createApplicationQuitUi({ ipcMain, getMainWindow: () => mainWindow, onStateChange: state => {
+  const suspended = state.phase !== 'idle';
+  if (suspended === applicationQuitToastSuspended) return;
+  applicationQuitToastSuspended = suspended;
+  if (suspended) toastViewManager?.suspendForNativeDrag(); else toastViewManager?.resumeAfterNativeDrag();
 } });
+let applicationQuitAccepted = false;
+let applicationQuitStartedAt = 0;
+getApplicationQuitState = registerConfigDrainBeforeQuit({
+  app, getConfigMutationService: () => configMutationService, writeLog,
+  beforeDrain: async () => {
+    applicationQuitStartedAt = Date.now();
+    if (!applicationQuitAccepted) {
+      const pendingTasks = selectApplicationQuitTasks(backgroundTasks.list());
+      const confirmed = await applicationQuitUi.confirmAndPrepare(pendingTasks);
+      if (!confirmed) throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
+      if (pendingTasks.length) applicationQuitStartedAt = Date.now();
+      applicationQuitAccepted = true;
+    }
+    if (!componentLifecycleCoordinator.beginApplicationQuit()) throw Object.assign(new Error('组件变更仍在进行，请稍后重试退出'), { code: 'APP_QUIT_BUSY' });
+  },
+  onQuit: async () => {
+    const componentIds = [...new Set(componentHostRegistry.list().map(item => item.componentId))];
+    await runApplicationQuit({
+      componentIds, processSupervisor, componentServiceManager, componentViewManager, componentLifecycleCoordinator,
+      componentCapabilityBroker, abortComponentNetworkRequests, backgroundTasks, writeLog, confirmationAccepted: true,
+      startedAt: applicationQuitStartedAt,
+      quiesce: () => {
+        applicationQuitUi.setPhase('saving');
+        mediaTrackingScanScheduler?.stop();
+        versionStaleDetectionService.stop();
+        stopWorkspaceWatcher(true);
+        stopFileRootWatchers();
+        telemetryService?.stop();
+      },
+      saveState: () => configMutationService?.drain({ timeoutMs: 5000 }),
+      hideWindow: () => {
+        applicationQuitUi.setPhase('closing');
+        mainWindow?.hide();
+        domainCommandJournal.stop();
+      },
+      cleanup: [
+        () => imageThumbnailRuntime.stop(),
+        () => thumbnailService?.stop({ discardAccessTimes: true }),
+        () => videoPlaybackService?.dispose(),
+        () => exiftool.end(false),
+      ],
+      teardown: [() => componentServiceManager?.destroy(), () => componentViewManager?.destroy(), () => eventBus.clear()],
+    });
+  },
+  onQuitFailed: async error => {
+    componentLifecycleCoordinator.cancelApplicationQuit();
+    if (error?.code === 'APP_QUIT_CANCELLED') {
+      applicationQuitAccepted = false;
+      applicationQuitUi.setPhase('idle');
+      return;
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); loadMainWindowRenderer(); }
+    mainWindow.show();
+    applicationQuitUi.setPhase('failed', { message: error?.code === 'APP_QUIT_BUSY' || error?.code === 'APP_QUIT_SAVE_FAILED'
+      ? error.message : '后台服务尚未确认结束，请重试退出。' });
+  },
+});
+app.on('will-quit', destroyToastViewManager);
 
 app.on('window-all-closed', () => {
   writeLog('info', 'All application windows closed');

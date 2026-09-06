@@ -313,14 +313,14 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
     cleanupOrphanCache: (...args) => pipeline.cleanupOrphanCache(...args),
     invalidateSources: (...args) => pipeline.invalidateSources(...args),
     pruneMissingSources: () => pipeline.pruneMissingSources(),
-    stop: () => {
+    stop: (options = {}) => {
       if (stopPromise) return stopPromise;
       stopped = true;
       unregisterRecoveryRestart?.();
       unregisterRecoveryRestart = null;
       unregisterGenerateRestart?.();
       unregisterGenerateRestart = null;
-      const pipelineStop = Promise.resolve().then(() => pipeline.stop());
+      const pipelineStop = Promise.resolve().then(() => pipeline.stop(options));
       stopPromise = (async () => {
         const results = await Promise.allSettled([
           ...[...recoveryRuns.values()].map(run => run.completion).filter(Boolean),
