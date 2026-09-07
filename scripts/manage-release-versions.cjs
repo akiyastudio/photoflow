@@ -35,7 +35,7 @@ const discoverComponentModules = () => fs.readdirSync(path.join(root, 'extension
       label: String(manifest.displayName || manifest.name || manifest.id || entry.name),
       versionSource: `${relativeRoot}/${manifestName}`,
       files,
-      build: { type: 'component' },
+      build: { type: 'component', variant: packageJson.scripts?.['package:host:base'] ? 'base' : '' },
     }];
   });
 
@@ -130,9 +130,13 @@ const runNpm = (args, cwd, label) => {
   } else runCommand('npm', args, cwd, label);
 };
 
-const packageModule = module => {
-  if (module.build.type === 'npm') return runNpm(module.build.args, module.build.cwd, module.label);
-  if (module.build.type === 'component') return runNpm(['run', 'build:components', '--', '--only', module.id], root, module.label);
+const packageModule = (module, npmRunner = runNpm) => {
+  if (module.build.type === 'npm') return npmRunner(module.build.args, module.build.cwd, module.label);
+  if (module.build.type === 'component') {
+    const args = ['run', 'build:components', '--', '--only', module.id];
+    if (module.build.variant) args.push('--variant', module.build.variant);
+    return npmRunner(args, root, module.label);
+  }
   throw new Error(`没有配置打包方式：${module.id}`);
 };
 
@@ -193,7 +197,11 @@ const run = async () => {
   console.log(`\n版本 ${latest} 的所有选中模块均已重新打包。`);
 };
 
-run().catch(error => {
-  console.error(`\n版本管理失败：${error.message || error}`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  run().catch(error => {
+    console.error(`\n版本管理失败：${error.message || error}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { discoverComponentModules, packageModule, replaceVersionFields, appModule };

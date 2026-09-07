@@ -2,13 +2,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { hashFile, validateReleaseLock: validateStrictReleaseLock } = require('./advanced-release-validator.cjs');
-const { advancedOutputRoot, advancedPackagePath, advancedPackageRelativePath } = require('./package-output-paths.cjs');
+const { advancedOutputRoot, advancedPackagePath, advancedPackageRelativePath, advancedPackageVersion, advancedReleaseLockPath } = require('./package-output-paths.cjs');
 
 const root = path.resolve(__dirname, '..');
 const template = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
-const packageName = `PhotoFlow-team-retouch-advanced-${template.version}-win32-x64.zip`;
+const runtimeVersion = advancedPackageVersion(template);
+const packageName = `PhotoFlow-team-retouch-advanced-${runtimeVersion}-win32-x64.zip`;
 const packagePath = advancedPackagePath(packageName);
-const lockPath = path.join(root, 'advanced', 'release-lock.json');
+const lockPath = advancedReleaseLockPath(runtimeVersion);
 
 function run(command, args) {
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit' });
@@ -16,8 +17,8 @@ function run(command, args) {
   if ((result.status ?? 1) !== 0) throw new Error(`${command} failed with code ${result.status}`);
 }
 function validateReleaseLock() {
-  if (!fs.existsSync(lockPath)) throw new Error('Reviewed advanced dependency/checkpoint lock is missing; Host packaging is fail-closed.');
-  return validateStrictReleaseLock(root, lockPath, { componentVersion: template.version, advancedRuntimeApiVersion: Number(template.advancedRuntime.apiVersion) }, packagePath, advancedPackageRelativePath(packageName));
+  if (!fs.existsSync(lockPath)) throw new Error(`Advanced runtime release manifest is missing: ${lockPath}. Restore the verified runtime package and its release manifest before packaging.`);
+  return validateStrictReleaseLock(root, lockPath, { componentVersion: runtimeVersion, advancedRuntimeApiVersion: Number(template.advancedRuntime.apiVersion) }, packagePath, advancedPackageRelativePath(packageName));
 }
 function validateReleaseInputs(lock = validateReleaseLock()) {
   if (!fs.existsSync(packagePath)) throw new Error(`Trusted advanced package is missing: ${packagePath}`);

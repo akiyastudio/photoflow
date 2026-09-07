@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 const { validateInputLock } = require('./advanced-release-validator.cjs');
-const { advancedRuntimeRoot } = require('./package-output-paths.cjs');
+const { advancedRuntimeRoot, advancedPackageVersion } = require('./package-output-paths.cjs');
 
 const root = path.resolve(__dirname, '..');
 function parseArguments(values) {
@@ -22,7 +22,7 @@ if (process.platform !== 'win32') throw new Error('The prepared advanced engine 
 const options = parseArguments(values);
 const inputLock = path.join(root, 'advanced', 'build-input-lock.json');
 const componentManifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
-const version = componentManifest.version;
+const version = advancedPackageVersion(componentManifest);
 const advancedRuntimeApiVersion = Number(componentManifest.advancedRuntime?.apiVersion);
 if (!Number.isInteger(advancedRuntimeApiVersion) || advancedRuntimeApiVersion < 1) throw new Error('Team-retouch advanced runtime API version is missing');
 if (!fs.existsSync(inputLock)) throw new Error('Reviewed advanced build-input lock is missing; refusing to export an advanced candidate.');

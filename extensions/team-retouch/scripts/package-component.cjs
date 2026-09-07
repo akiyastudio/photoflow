@@ -5,7 +5,7 @@ const { spawnSync } = require('node:child_process');
 const { copyServiceRuntime } = require('./package-layout.cjs');
 const { copyNotices, writePackageInventory } = require('./package-notices.cjs');
 const { npmInvocation } = require('./npm-invocation.cjs');
-const { baseOutputRoot, advancedPackagePath } = require('./package-output-paths.cjs');
+const { baseOutputRoot, advancedPackagePath, advancedPackageVersion } = require('./package-output-paths.cjs');
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
 const dist = path.join(root, 'dist'); const packageRoot = path.join(dist, 'component');
@@ -55,7 +55,7 @@ if (path.resolve(generatedExecutable) !== path.resolve(declaredExecutable)) fs.r
 fs.cpSync(path.join(root,'dist','ui'),path.join(packageRoot,'ui'),{recursive:true}); fs.copyFileSync(path.join(root,'renderer','team-retouch.svg'),path.join(packageRoot,'ui','team-retouch.svg'));
 copyServiceRuntime(root,packageRoot);
 manifest.requiredFiles.push(...copyNotices(root, packageRoot, python, developmentPackage), 'package-files.json');
-const advancedPackageName=`PhotoFlow-team-retouch-advanced-${manifest.version}-win32-x64.zip`;
+const advancedPackageName=`PhotoFlow-team-retouch-advanced-${advancedPackageVersion(manifest)}-win32-x64.zip`;
 const advancedPackageSource=advancedPackagePath(advancedPackageName);
 delete manifest.advancedRuntime.offlinePackage;
 manifest.requiredFiles = manifest.requiredFiles.filter(file => file !== advancedPackageName);

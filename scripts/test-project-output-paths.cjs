@@ -52,7 +52,8 @@ try {
 
   const componentPaths = require('../extensions/team-retouch/scripts/package-output-paths.cjs');
   const projectInstallers = installersRootFor(path.resolve(__dirname, '..'));
-  for (const value of [componentPaths.baseOutputRoot, componentPaths.advancedOutputRoot, componentPaths.candidateRoot, componentPaths.advancedPackagePath('runtime.zip')]) {
+  assert.equal(componentPaths.baseOutputRoot, projectInstallers);
+  for (const value of [componentPaths.advancedOutputRoot, componentPaths.candidateRoot, componentPaths.advancedPackagePath('runtime.zip')]) {
     assert(path.relative(projectInstallers, value) && !path.relative(projectInstallers, value).startsWith('..'));
   }
   const host = require('../extensions/team-retouch/scripts/package-host.cjs');

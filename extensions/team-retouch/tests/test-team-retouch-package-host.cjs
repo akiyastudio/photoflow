@@ -4,6 +4,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { INPUT_ARTIFACTS, PAIR_COMMIT, SAM_COMMIT, hashFile, validateInputLock, validateReleaseLock } = require('../scripts/advanced-release-validator.cjs');
 const host = require('../scripts/package-host.cjs');
+const { advancedPackageVersion } = require('../scripts/package-output-paths.cjs');
+assert.equal(advancedPackageVersion({ version: '26.9.7', advancedRuntime: { packageVersion: '26.9.4' } }), '26.9.4');
+assert.equal(advancedPackageVersion({ version: '26.9.8', advancedRuntime: { packageVersion: '26.9.4' } }), '26.9.4', 'a plugin update reuses the pinned runtime without relabeling its archive');
+assert.equal(advancedPackageVersion({ version: '26.9.7', advancedRuntime: {} }), '26.9.7');
+assert.throws(() => advancedPackageVersion({ version: '26.9.7', advancedRuntime: { packageVersion: '../runtime' } }), /Invalid/);
 
 const sourceRoot = path.resolve(__dirname, '..');
 const componentSource = fs.readFileSync(path.join(sourceRoot, 'scripts', 'package-component.cjs'), 'utf8');

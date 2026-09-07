@@ -8,7 +8,7 @@ const variantIndex = process.argv.indexOf('--variant');
 const variant = variantIndex >= 0 ? String(process.argv[variantIndex + 1] || '') : '';
 if (variantIndex >= 0 && !['base', 'advanced'].includes(variant)) throw new Error('Component variant must be base or advanced');
 const packageScript = variant === 'base' ? 'package:host:base' : 'package:host';
-const outputRoot = path.join(root, 'artifacts', 'installers', variant);
+const outputRoot = path.join(root, 'artifacts', 'installers', variant === 'advanced' ? 'advanced' : '');
 const onlyIndex = process.argv.indexOf('--only');
 const only = onlyIndex >= 0 ? String(process.argv[onlyIndex + 1] || '') : '';
 const commitResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', windowsHide: true });

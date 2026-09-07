@@ -15,6 +15,11 @@ function Resolve-AdvancedLinuxUser([object]$Manifest, [string]$RequestedUser, [b
     if ($value -notmatch '^[a-z_][a-z0-9_-]*$' -or ($ExplicitUser -and $RequestedUser -cne $value)) { throw 'Advanced package Linux user is invalid or does not match the explicit request.' }
     return $value
 }
+function Resolve-AdvancedPackageVersion([object]$ComponentManifest) {
+    $value = if ($null -ne $ComponentManifest.advancedRuntime.packageVersion) { [string]$ComponentManifest.advancedRuntime.packageVersion } else { [string]$ComponentManifest.version }
+    if ($value -notmatch '^\d+(\.\d+)+$') { throw 'Invalid pinned advanced runtime package version.' }
+    return $value
+}
 function Get-AdvancedWslText([string]$Name, [string]$User, [string[]]$CommandArguments) {
     $lines = @(& wsl.exe -d $Name -u $User --exec @CommandArguments)
     if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or -not ([string]$lines[0]).Trim()) { throw 'Unable to resolve an advanced runtime path in WSL.' }
@@ -376,7 +381,8 @@ if ($ExpectedPackageSha256.Trim() -and $packageHash -ne $ExpectedPackageSha256.T
 if ($packageHash -ne $declaredPackageSha256.ToLowerInvariant()) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced package does not match the installed component manifest.' }
 $manifest = $validatedPackage.Manifest
 if ([int]$manifest.formatVersion -ne 1 -or [string]$manifest.componentId -ne 'team-retouch' -or [string]$manifest.architecture -ne 'x64') { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Unsupported advanced package manifest.' }
-if (-not $ExpectedComponentVersion -or [string]$manifest.componentVersion -ne $ExpectedComponentVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced package component version does not match exactly.' }
+$expectedRuntimePackageVersion = Resolve-AdvancedPackageVersion $componentManifest
+if ([string]$manifest.componentVersion -ne $expectedRuntimePackageVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced runtime package version does not match its pinned version.' }
 if ($ExpectedAdvancedRuntimeApiVersion -le 0 -or [int]$manifest.advancedRuntimeApiVersion -ne $ExpectedAdvancedRuntimeApiVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced runtime API version does not match exactly.' }
 try { $LinuxUser = Resolve-AdvancedLinuxUser $manifest $LinuxUser ($PSBoundParameters.ContainsKey('LinuxUser')) }
 catch { Close-ValidatedAdvancedArchive $validatedPackage; throw }
@@ -489,7 +495,7 @@ try {
     Assert-StagingEntities $InstallRoot @('ext4.vhdx','.photoflow-extraction.lock','.photoflow-team-retouch-owner.json')
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
     Invoke-TestFault 'state-write'
-    Write-JsonAtomic $statePath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; installedAt=[DateTime]::UtcNow.ToString('o'); version=3; componentVersion=[string]$manifest.componentVersion; advancedRuntimeApiVersion=[int]$manifest.advancedRuntimeApiVersion; packageSha256=$packageHash; vhdSha256=$vhdHash; offline=$true }
+    Write-JsonAtomic $statePath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; installedAt=[DateTime]::UtcNow.ToString('o'); version=3; componentVersion=$manifestComponentVersion; advancedRuntimeApiVersion=[int]$manifest.advancedRuntimeApiVersion; packageSha256=$packageHash; vhdSha256=$vhdHash; offline=$true }
     $installCompleted = $true
     Write-Host "PhotoFlow advanced offline environment is ready in $InstallRoot"
 } catch {

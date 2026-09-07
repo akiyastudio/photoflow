@@ -1,6 +1,8 @@
 $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'advanced-installer\setup-team-retouch-advanced.ps1'
 . $setup -TestHelpersOnly
+if ((Resolve-AdvancedPackageVersion @{version='26.9.7'; advancedRuntime=@{packageVersion='26.9.4'}}) -cne '26.9.4') { throw 'Plugin update must preserve the pinned runtime version' }
+if ((Resolve-AdvancedPackageVersion @{version='26.9.7'; advancedRuntime=@{}}) -cne '26.9.7') { throw 'Unpinned package version must remain exact' }
 if ((Resolve-AdvancedLinuxUser @{linuxUser='photoflowlab'} 'photoflow' $false) -cne 'photoflowlab') { throw 'Trusted package user was not selected' }
 foreach ($case in @(@{linuxUser=''}, @{linuxUser='../root'}, @{linuxUser='user;id'})) {
     $rejected = $false
