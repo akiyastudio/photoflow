@@ -70,7 +70,7 @@ for (const request of requests) {
   try {
     const result = request.kind === 'original' ? await legacyApi.getMediaOriginal({ reference }) : await legacyApi.getMediaThumbnail({ reference });
     results.push({ success: Boolean(result.mediaUrl || result.previewUrl), error: result.error });
-  } catch (error) { results.push({ success: false, error: readableLegacyMediaError(error, request.kind) }); }
+  } catch (error) { results.push({ success: false, error: readableLegacyMediaError(error) }); }
 }
 const summary = summarizeLegacyPreviewResults(requests, results);
 assert.deepEqual({ total: summary.total, succeeded: summary.succeeded, failed: summary.failed }, { total: 106, succeeded: 105, failed: 1 }, '27 original and 79 patch authorizations execute independently');

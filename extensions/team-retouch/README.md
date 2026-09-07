@@ -18,11 +18,11 @@ The manifest keeps its package `apiVersion`, Component Host manifest `contractVe
 
 ## Current storage and recovery
 
-New databases are created directly as `schema_version=10`. Existing schema-10 development data is validated and opened; any other database version is rejected rather than migrated. Current `component-storage-v1` workspace/project backup and restore remains supported, including digests, receipts, quiescing, rollback, and project-ID hash path rewriting. The project revision lease/fence tables and triggers remain part of the current schema.
+New databases are created directly as `schema_version=10`. Existing databases must have the complete current schema, including revision lease/fence tables and outboxes. Initialization and validation share one transaction; unsupported versions and incomplete structures are rejected without migration. Tasks require generation metadata version 2, workflow settings come from the component database, and workflow participants are bound by photo, version, and person together.
 
-Opening an existing schema-10 database adds missing lease/outbox infrastructure. The known pre-lease schema-10 shape produced by the earlier `CREATE TABLE AS SELECT` migration is rebuilt with current constraints, preserving business rows, indexes, triggers, and project revisions. Retired photo calibration values and the locations of old NULL values filled from declared defaults are retained under `schema10_recovery:*` keys in `meta`. Initialization, recovery, and final validation share one transaction: an unknown shape, conflicting key, missing required value without a default, or invalid index/trigger rolls everything back.
+Existing local development data is converted once outside the plugin. No previous-component storage adoption, schema repair, empty-generation compatibility, old settings-file fallback, project-output adoption, or name/status workflow lookup is shipped. One-time conversion programs, backups, and verification records stay in the configured private output root and are never copied into a component package.
 
-No previous-component storage adoption, project-output adoption, name/status workflow lookup, or old Host-field fallback is shipped. `migration-backups/` contains user/developer archives only and is never listed in the manifest or copied into a package.
+Current `component-storage-v1` workspace/project backup and restore remains supported, including digests, receipts, quiescing, rollback, and project-ID hash path rewriting.
 
 The advanced backend uses only the `PhotoFlowNative` WSL distribution. Its failure still falls back to the basic RTMDet path. End-user lifecycle scripts consume only the Host-verified offline archive inside the component and never perform a network build.
 

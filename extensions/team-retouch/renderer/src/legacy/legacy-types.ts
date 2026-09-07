@@ -23,7 +23,7 @@ export type TeamProjectPhoto = LegacyJson & {
   noRetouchOutputSupported?: boolean;
   noRetouchOutputError?: string;
 };
-export type TeamIdentityWorkspace = LegacyJson & { success?: boolean; error?: string; authoritativeGeneration?: unknown; photos: TeamProjectPhoto[]; identities: TeamIdentity[]; assignments: TeamPersonAssignment[]; similarities?: TeamIdentitySimilarity[]; workflowSettings?: { preferredIdentityOrder?: string[]; preferredIdentityId?: string; sameWeekIdentityIds?: string[] }; workflowAvailableKeys?: string[]; workflowAvailableSubjectKeys?: string[]; workflowNode?: { id: string } };
+export type TeamIdentityWorkspace = LegacyJson & { success?: boolean; error?: string; authoritativeGeneration?: unknown; photos: TeamProjectPhoto[]; identities: TeamIdentity[]; assignments: TeamPersonAssignment[]; similarities?: TeamIdentitySimilarity[]; workflowSettings?: { preferredIdentityOrder?: string[]; preferredIdentityId?: string; sameWeekIdentityIds?: string[] }; workflowAvailableKeys?: string[]; workflowNode?: { id: string } };
 export type TeamPatchBundle = LegacyJson & { success?: boolean; error?: string; photo?: LegacyJson; versions: MediaVersion[]; tasks: TeamPatchTask[] };
 export type TeamPatchReturnMatch = LegacyJson & { returnId: string; accepted?: boolean; alternatives?: TeamPatchReturnMatch[]; score: number; evidence?: string };
 export type TeamPatchReturnBatchResult = LegacyJson & { success?: boolean; error?: string; reviewSessionId?: string; matches: TeamPatchReturnMatch[] };

@@ -265,9 +265,10 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
   };
   const requestThumbnail = async (request, restartTask = null) => {
     if (stopped) return { success: false, state: 'NOT_READY', error: '缩略图服务已停止' };
+    const { awaitReady = false, ...input } = request;
     const normalizedFilePath = path.resolve(request.filePath);
     const normalizedSize = Math.max(1, Number(request.requestedSize) || 640);
-    const normalizedRequest = { ...request, filePath: normalizedFilePath, requestedSize: normalizedSize };
+    const normalizedRequest = { ...input, filePath: normalizedFilePath, requestedSize: normalizedSize };
     const pipelineResult = await pipeline.request(normalizedRequest);
     const { completion: generationCompletion, ...immediateResult } = pipelineResult;
     if (!generationCompletion) return immediateResult;
@@ -292,6 +293,15 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
       return execution;
     };
     const execution = run();
+    if (awaitReady) {
+      // Capability callers need a finished derivative URL; unlike viewport
+      // callers, they cannot consume the later thumbnail-ready event.
+      const outcome = await generationCompletion;
+      if (stopped) return { success: false, state: 'NOT_READY', error: '缩略图服务已停止' };
+      if (outcome?.state !== 'READY') return { ...outcome, success: false, taskId: execution.task.id };
+      const { completion: _completion, ...ready } = await pipeline.request({ ...normalizedRequest, forceRegenerate: false });
+      return { ...ready, taskId: execution.task.id };
+    }
     return { ...immediateResult, taskId: execution.task.id };
   };
   const service = {

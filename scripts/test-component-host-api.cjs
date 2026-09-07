@@ -354,7 +354,9 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal(metadataOnly.input, undefined, 'metadata-only media descriptions do not mint input grants');
   assert.equal(mediaGrants.length, grantsBeforeMetadata, 'metadata-only media descriptions do not mint media URL grants');
   assert.equal(thumbnailRequests.length, thumbnailsBeforeMetadata, 'metadata-only media descriptions do not request thumbnails');
+  const issuedMediaUrls = []; context.grantMediaUrl = url => issuedMediaUrls.push(url);
   const variants = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-1', versionId: 'version-1', variants: ['thumbnail', 'preview', 'original'] }, context);
+  assert.deepEqual(issuedMediaUrls, Object.values(variants.variants).map(value => value.url), 'only Host-authorized variants are granted to the bound component view');
   const reservationVariant = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-1', versionId: 'version-1', variants: ['original'] }, context);
   const realNow = Date.now; const issuedAt = realNow();
   try {
@@ -370,8 +372,10 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const freshInputVariant = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-1', versionId: 'version-1', variants: ['original'] }, context);
   assert.notEqual(variants.variants.thumbnail.url, variants.variants.original.url, 'a JPEG thumbnail must be a generated derivative rather than its original URL');
   assert.deepEqual(thumbnailRequests.map(item => item.requestedSize), [320, 1600]);
+  assert(thumbnailRequests.every(item => item.awaitReady === true), 'media capability variants wait for a completed derivative');
   returnOriginalAsThumbnail = true;
   await assert.rejects(broker.invoke(descriptor, 'project.media.variants', { relativePath: 'images/one.jpg', variants: ['thumbnail'] }, context), error => error.code === 'COMPONENT_HOST_VARIANT_UNAVAILABLE');
+  await assert.rejects(broker.invoke(descriptor, 'project.media.variants', { relativePath: 'images/one.jpg', variants: ['preview'] }, context), error => error.code === 'COMPONENT_HOST_VARIANT_UNAVAILABLE');
   returnOriginalAsThumbnail = false;
   const externalVariants = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-external', versionId: 'version-external', variants: ['original'] }, context);
   assert.equal(externalVariants.mediaRef.relativePath, 'External/outside.jpg', 'managed external photo versions retain their virtual project path');

@@ -1308,7 +1308,7 @@ registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: 
 app.whenReady().then(async () => {
   configMutationService = createConfigMutationService({ fs, crypto, getConfigPath, readSavedConfig, legacySettingsAdoptionsProvider: componentHostRegistry.list }); await configMutationService.ready; await configMutationService.adoptLegacySettings();
   registerComponentIconProtocol({ protocol, registry: componentHostRegistry, fs, writeLog });
-  protocol.handle('photoflow-media', async request => {
+  const mediaProtocolHandler = async request => {
     try {
       const token = new URL(request.url).pathname.replace(/^\//, '');
       const filePath = mediaAccessService.resolveToken(token);
@@ -1318,7 +1318,8 @@ app.whenReady().then(async () => {
       writeLog('warn', 'Media protocol request failed', { url: request.url, error: error.message || String(error) });
       return new Response('Bad request', { status: 400 });
     }
-  });
+  };
+  protocol.handle('photoflow-media', mediaProtocolHandler);
   const deletedLogFiles = await cleanupExpiredLogs();
   const deletedCaptureTimeCacheFiles = await cleanupRetiredCaptureTimeCache({ app, fs, path, onError: nativeConsoleError });
   writeLog('info', 'Application started', { version: app.getVersion(), packaged: app.isPackaged, platform: process.platform, deletedExpiredLogFiles: deletedLogFiles, deletedCaptureTimeCacheFiles });
@@ -1379,6 +1380,7 @@ app.whenReady().then(async () => {
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     partitionSessionProvider: partitionName => session.fromPartition(partitionName),
+    mediaProtocolHandler,
     ipcMain: electronIpcMain,
     serviceManager: componentServiceManager, lifecycleCoordinator: componentLifecycleCoordinator, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState, clearComponentViewState, resolveOpenContext: componentContentBinding.resolveOpenRequest,
     writeLog,

@@ -377,7 +377,7 @@ const preparePortable = (sourcePath, ensureSchema) => {
   fs.copyFileSync(sourcePath, portablePath, fs.constants.COPYFILE_EXCL);
   // Backup staging is quiesced by the Host, but a SQLite snapshot may still
   // legitimately carry committed WAL pages. Keep its sidecars paired with the
-  // main file before opening the private compatibility copy.
+  // main file before validating the private snapshot copy.
   for (const suffix of ['-wal', '-shm']) {
     const sidecar = `${sourcePath}${suffix}`;
     if (fs.statSync(sidecar, { throwIfNoEntry: false })?.isFile()) fs.copyFileSync(sidecar, `${portablePath}${suffix}`, fs.constants.COPYFILE_EXCL);

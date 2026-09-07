@@ -31,6 +31,17 @@ try {
   assert.equal(db.prepare("SELECT revision FROM team_project_revisions WHERE project_id='project'").get().revision, 1);
   db.close();
 
+  for (const table of ['team_project_revision_leases', 'team_output_outbox', 'team_cleanup_outbox']) {
+    const incompletePath = path.join(root, `missing-${table}.sqlite3`);
+    db = ensureSchema(incompletePath);
+    db.exec(`DROP TABLE ${table}`);
+    db.close();
+    assert.throws(() => ensureSchema(incompletePath), /表结构无效/, 'an existing database must already contain every current table');
+    db = new DatabaseSync(incompletePath, { readOnly: true });
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name=?").get(table).n, 0, 'rejected databases are not silently repaired');
+    db.close();
+  }
+
   for (const version of ['1', '9', '99']) {
     const rejectedPath = path.join(root, `schema-${version}.sqlite3`);
     const rejected = new DatabaseSync(rejectedPath);

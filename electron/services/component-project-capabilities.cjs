@@ -412,14 +412,15 @@ const registerComponentProjectCapabilities = ({
     if (requested.size) { mediaService.grantPath(media.filePath); originalUrl = mediaService.toUrl(media.filePath, true); }
     const result = {};
     const requestVariant = async (name, requestedSize) => {
-      const generated = await mediaService.requestThumbnail({ filePath: media.filePath, kind: kindFor(media.filePath), cacheConfig: (readSavedConfig() || {}).mediaCache || {}, requestedSize, priority: 0, queueOrder: 0 });
+      const generated = await mediaService.requestThumbnail({ filePath: media.filePath, kind: kindFor(media.filePath), cacheConfig: (readSavedConfig() || {}).mediaCache || {}, requestedSize, priority: 0, queueOrder: 0, awaitReady: true });
       const url = generated?.previewUrl || generated?.mediaUrl;
-      if (!url || (name === 'thumbnail' && url === originalUrl)) throw hostError(CODES.VARIANT_UNAVAILABLE, `${name} variant could not be generated`);
+      if (!url || url === originalUrl) throw hostError(CODES.VARIANT_UNAVAILABLE, `${name} variant could not be generated`);
       result[name] = { url, maxEdge: requestedSize, derived: true };
     };
     if (requested.has('thumbnail')) await requestVariant('thumbnail', 320);
     if (requested.has('preview')) await requestVariant('preview', 1600);
     if (requested.has('original')) result.original = { url: originalUrl, byteLength: stat.size, derived: false };
+    for (const variant of Object.values(result)) context.grantMediaUrl?.(variant.url);
     const input = requested.has('original') ? grantInput(media.filePath, descriptor, context) : null;
     return {
 
@@ -951,12 +952,13 @@ const registerComponentProjectCapabilities = ({
     if ([...requested].some(value => !['thumbnail', 'preview', 'original'].includes(value))) throw hostError(CODES.INVALID_REQUEST, 'Unknown component media variant');
     const variants = {};
     for (const [name, requestedSize] of [['thumbnail', 320], ['preview', 1600]]) if (requested.has(name)) {
-      const generated = await mediaService.requestThumbnail({ filePath, kind: kindFor(filePath), cacheConfig: (readSavedConfig() || {}).mediaCache || {}, requestedSize, priority: 0, queueOrder: 0 });
+      const generated = await mediaService.requestThumbnail({ filePath, kind: kindFor(filePath), cacheConfig: (readSavedConfig() || {}).mediaCache || {}, requestedSize, priority: 0, queueOrder: 0, awaitReady: true });
       const url = generated?.previewUrl || generated?.mediaUrl;
-      if (!url || (name === 'thumbnail' && url === originalUrl)) throw hostError(CODES.VARIANT_UNAVAILABLE, `${name} variant could not be generated`);
+      if (!url || url === originalUrl) throw hostError(CODES.VARIANT_UNAVAILABLE, `${name} variant could not be generated`);
       variants[name] = { url, maxEdge: requestedSize, derived: true };
     }
     if (requested.has('original')) variants.original = { url: originalUrl, byteLength: stat.size, derived: false };
+    for (const variant of Object.values(variants)) context.grantMediaUrl?.(variant.url);
     return { opaqueRef, variants };
   });
 

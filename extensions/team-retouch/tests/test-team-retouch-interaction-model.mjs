@@ -180,6 +180,9 @@ assert.equal(metrics.width, 4000); assert.equal(metrics.height, 3000); assert.eq
 assert.equal(metrics.areaRatio, .25); assert.equal(metrics.fullFrame, false); assert.equal(metrics.requiresManualCrop, true); assert.equal(metrics.exceedsWorkTileEdge, false); assert.equal(metrics.backend, '增强'); assert.equal(metrics.detector, 'rtmdet-pairdetr-sam2'); assert.equal(metrics.fallbackReason, '显存不足，已回退基础检测'); assert.equal(metrics.reason, '多人靠近画面边缘');
 const rejectedTopLevelMetrics = workingImageMetrics({ workWidth: 5000, fullFrame: true, sourceCoverage: .5, detector: 'rtmdet-ins-m' });
 assert.equal(rejectedTopLevelMetrics.width, 0); assert.equal(rejectedTopLevelMetrics.fullFrame, undefined); assert.equal(rejectedTopLevelMetrics.backend, '基础');
+const rejectedCropFallback = workingImageMetrics({ crop: { width: 600, height: 900 }, generation: { version: 2 } });
+assert.equal(rejectedCropFallback.width, 0, 'current work dimensions are never inferred from old crop fields');
+assert.equal(rejectedCropFallback.areaRatio, undefined);
 
 const audit = mergeAudit({ ...generatedWorkspace, assignments: [{ ...confirmedWorkspace.assignments[0], completed: false }] });
 assert.equal(audit.ready, false);

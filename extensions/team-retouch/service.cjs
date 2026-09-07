@@ -731,27 +731,9 @@ const initializeSchema = db => {
     'team_workflow_reconcile_pending.error': "''",'team_workflow_reconcile_pending.attempt_count': '0','team_workflow_reconcile_pending.next_attempt_at': '0','team_workflow_reconcile_pending.last_error': "''",'team_workflow_reconcile_pending.history_json': "'[]'",'team_durable_operations.phase': "'accepted'",'team_durable_operations.progress': '0','team_durable_operations.request_json': "'{}'",'team_durable_operations.checkpoint_json': "'{}'",'team_durable_operations.result_json': "'{}'",'team_durable_operations.error': "''",'team_durable_operations.cancel_requested': '0','team_durable_operations.base_revision': '0','team_workflow_settings.settings_json': "'{}'",'team_workflow_state.fingerprint': "''",
     'team_output_outbox.stage_id': "''",'team_output_outbox.source_json': "'[]'",'team_output_outbox.target_json': "'[]'",'team_output_outbox.receipt_json': "'{}'",'team_output_outbox.result_json': "'{}'",'team_output_outbox.last_error': "''",'team_cleanup_outbox.state': "'pending'",'team_cleanup_outbox.attempt_count': '0','team_cleanup_outbox.last_error': "''",
   };
-  // The pre-lease v9/v10 migration used CREATE TABLE AS SELECT for these
-  // tables, which preserved rows but discarded their declared constraints.
-  // Recognize that complete, known shape; do not infer arbitrary broken tables.
-  const legacySnapshotTables = ['team_retouch_photos','team_person_identities','team_patch_tasks','team_person_assignments','team_person_exclusions','team_task_stages','team_task_artifacts','team_workflow_review_confirmations','team_durable_operations'];
-  const columnType = name => realColumns.has(name) ? 'REAL' : integerColumns.has(name) ? 'INTEGER' : 'TEXT';
-  const hasLegacySnapshots = storedVersion === '10'
-    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='team_project_revision_leases'").get()
-    && legacySnapshotTables.every(table => {
-      const required = new Set([...requiredColumns[table], ...(table === 'team_retouch_photos' ? ['calibrated_at'] : [])]);
-      const actual = db.prepare(`PRAGMA table_xinfo(${table})`).all();
-      return actual.length === required.size && actual.every(column => required.has(column.name)
-        && column.type === (column.name === 'calibrated_at' || columnType(column.name) === 'INTEGER' ? 'INT' : columnType(column.name))
-        && Number(column.hidden) === 0 && Number(column.pk) === 0 && Number(column.notnull) === 0 && column.dflt_value === null)
-        && !db.prepare(`PRAGMA foreign_key_list(${table})`).all().length;
-    });
-  const validateCurrentTables = ({ allowMissingInfrastructure = false } = {}) => {
+  const validateCurrentTables = () => {
     for (const [table, required] of Object.entries(requiredColumns)) {
       const actual = db.prepare(`PRAGMA table_xinfo(${table})`).all();
-      if (allowMissingInfrastructure && hasLegacySnapshots && legacySnapshotTables.includes(table)) continue;
-      if (!actual.length && allowMissingInfrastructure && ['team_project_revision_leases','team_output_outbox','team_cleanup_outbox'].includes(table)
-        && !db.prepare('SELECT 1 FROM sqlite_master WHERE name=?').get(table)) continue;
       if (actual.length !== required.length || actual.some((column, index) => column.name !== required[index] || Number(column.hidden) !== 0)) throw new Error(`团片 schema 10 表结构无效（列集合）：${table}`);
       const pk = primaryKeys[table] || [];
       for (const column of actual) {
@@ -764,29 +746,7 @@ const initializeSchema = db => {
       if (db.prepare(`PRAGMA foreign_key_list(${table})`).all().length) throw new Error(`团片 schema 10 包含未声明外键：${table}`);
     }
   };
-  if (storedVersion !== undefined) validateCurrentTables({ allowMissingInfrastructure: true });
-  if (hasLegacySnapshots) {
-    // Retain retired metadata and a record of old NULLs filled from declared
-    // defaults. Required values without a default still abort the transaction.
-    const calibration = db.prepare('SELECT project_id,photo_id,base_version_id,calibrated_at FROM team_retouch_photos ORDER BY project_id,photo_id').all();
-    db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run('schema10_recovery:photo_calibration', JSON.stringify(calibration));
-    for (const table of legacySnapshotTables) {
-      const temporary = `${table}_schema10_recovery`;
-      const columns = requiredColumns[table];
-      const definitions = columns.map(name => `${name} ${columnType(name)}${nullableColumns.has(`${table}.${name}`) ? '' : ' NOT NULL'}${defaults[`${table}.${name}`] === undefined ? '' : ` DEFAULT ${defaults[`${table}.${name}`]}`}`);
-      const defaultedColumns = columns.filter(name => defaults[`${table}.${name}`] !== undefined && !nullableColumns.has(`${table}.${name}`));
-      if (defaultedColumns.length) {
-        const affected = db.prepare(`SELECT ${[...primaryKeys[table], ...defaultedColumns].join(',')} FROM ${table} WHERE ${defaultedColumns.map(name => `${name} IS NULL`).join(' OR ')} ORDER BY ${primaryKeys[table].join(',')}`).all();
-        if (affected.length) db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(`schema10_recovery:defaulted:${table}`, JSON.stringify(affected.map(row => ({ key: Object.fromEntries(primaryKeys[table].map(name => [name, row[name]])), columns: defaultedColumns.filter(name => row[name] === null) }))));
-      }
-      const selection = columns.map(name => defaultedColumns.includes(name) ? `COALESCE(${name},${defaults[`${table}.${name}`]})` : name);
-      const schemaObjects = db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name").all(table);
-      db.exec(`CREATE TABLE ${temporary} (${definitions.join(',')},PRIMARY KEY(${primaryKeys[table].join(',')}));
-        INSERT INTO ${temporary}(${columns.join(',')}) SELECT ${selection.join(',')} FROM ${table};
-        DROP TABLE ${table}; ALTER TABLE ${temporary} RENAME TO ${table};`);
-      for (const object of schemaObjects) db.exec(object.sql);
-    }
-  }
+  if (storedVersion !== undefined) validateCurrentTables();
   db.exec(`
     CREATE TABLE IF NOT EXISTS team_project_revisions (project_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);
     CREATE TABLE IF NOT EXISTS team_revision_guards (request_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, bumped INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
@@ -973,9 +933,9 @@ const strictRowMembers = row => {
   return members;
 };
 const serializeTask = row => {
-  const generation = parseJson(row.generation_json, {});
+  const generation = parseJson(row.generation_json, null);
   const members = strictRowMembers(row);
-  if (Number(generation.version) !== 2) throw new Error(`团片当前任务 generation 格式无效：${row.id}`);
+  if (Number(generation?.version) !== 2) throw new Error(`团片当前任务 generation 格式无效：${row.id}`);
   return ({
   id: row.id, photoId: row.photo_id, baseVersionId: row.base_version_id,
   personIndex: row.person_index, personName: row.person_name, assignee: row.assignee,
@@ -2118,7 +2078,6 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
     try { db.prepare('INSERT INTO team_workflow_settings(project_id,settings_json,updated_at) VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET settings_json=excluded.settings_json,updated_at=excluded.updated_at').run(String(context.projectId), JSON.stringify(workflowSettings), now); db.exec('COMMIT'); }
     catch (error) { db.exec('ROLLBACK'); throw error; }
   } finally { db.close(); }
-  await replaceJsonAtomic(path.join(storage.dataRoot, 'workflow-settings', `${sha256(String(context.projectId))}.json`), { updatedAt: now, ...workflowSettings }).catch(() => undefined);
   return { success: true, workflowSettings };
 };
 
@@ -2389,7 +2348,7 @@ const workspaceSnapshot = async (parentId, context) => {
       returnMissingSince: row.return_missing_since, completedAt: row.completed_at, updatedAt: row.updated_at,
     }));
     const settings = parseJson(db.prepare('SELECT settings_json FROM team_workflow_settings WHERE project_id=?').get(projectId)?.settings_json, null)
-      || readJsonFile(path.join(storage.dataRoot, 'workflow-settings', `${sha256(String(context.projectId))}.json`)) || {};
+      || {};
     const identityIds = new Set(identities.map(identity => String(identity.id)));
     const preferredIdentityOrder = uniqueText(settings.preferredIdentityOrder).filter(id => identityIds.has(id));
     const requestedSameWeek = new Set(uniqueText(settings.sameWeekIdentityIds));
@@ -2403,11 +2362,9 @@ const workspaceSnapshot = async (parentId, context) => {
     const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
     const recoveryRequired = resolvedManifest?.recovery?.state === 'needs-republish' ? { required: true, state: 'needs-republish', resources: ['workflow-output'], action: 'team.workflow.reconcile-drain.v1' } : null;
     const assignmentIdentityBySubject = new Map(normalizedAssignments.map(item => [`${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
-    const assignmentIdentityByStableSubject = new Map(normalizedAssignments.map(item => [`${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
     const workflowItemIdentity = item => {
       const exactKey = `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`;
-      if (assignmentIdentityBySubject.has(exactKey)) return assignmentIdentityBySubject.get(exactKey);
-      return assignmentIdentityByStableSubject.get(`${item.baseVersionId}:${Number(item.personIndex)}`);
+      return assignmentIdentityBySubject.get(exactKey);
     };
     const generatedIdentityChanged = Boolean(manifest && (manifest.groups || []).some(group => (group.items || []).some(item =>
       workflowItemIdentity(item) !== String(group.identityId || '')
@@ -2422,9 +2379,7 @@ const workspaceSnapshot = async (parentId, context) => {
       workflowNeedsRegeneration: Boolean(manifest && (generatedIdentityChanged || generatedSettings && (JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
         || JSON.stringify(generatedOrder.slice(1).filter(id => generatedSameWeek.has(id))) !== JSON.stringify(sameWeekIdentityIds)))),
       workflowAvailableKeys: workflowAvailableItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),
-      workflowAvailableSubjectKeys: workflowAvailableItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowParticipantKeys: workflowItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),
-      workflowParticipantSubjectKeys: workflowItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds },
       recoveryRequired,
     };

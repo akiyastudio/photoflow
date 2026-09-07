@@ -108,11 +108,9 @@ export const workflowStageSummaries = (value: Json | undefined, active: Workflow
   const confirmed = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity)).length;
   const cropReview = tasks.filter((task: Json) => Boolean(task.needsReview || task.patchMissing)).length;
   const participantKeys = new Set((workspace.workflowParticipantKeys || []).map(String));
-  const participantSubjectKeys = new Set((workspace.workflowParticipantSubjectKeys || []).map(String));
-  const existingWorkflow = Boolean(workspace.workflowGenerated && (participantKeys.size || participantSubjectKeys.size));
+  const existingWorkflow = Boolean(workspace.workflowGenerated && participantKeys.size);
   const verifiedWorkflow = Boolean(existingWorkflow && !workspace.workflowNeedsRegeneration);
-  const isParticipant = (subject: Json) => participantKeys.has(String(subject.key))
-    || participantSubjectKeys.has(`${subject.photo.baseVersionId}:${Number(subject.personIndex)}`);
+  const isParticipant = (subject: Json) => participantKeys.has(String(subject.key));
   const eligible = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity) || existingWorkflow && isParticipant(subject));
   const completed = eligible.filter((subject: Json) => Boolean(subject.assignment?.completed)).length;
   const returned = eligible.filter((subject: Json) => subject.assignment?.completionKind === 'returned' && !subject.assignment?.returnMissing).length;
@@ -131,7 +129,7 @@ export const workflowStageSummaries = (value: Json | undefined, active: Workflow
     review: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先生成协作流程' : !stageComplete.relay ? missingReturns ? `还有 ${missingReturns} 个返图文件缺失` : pendingReviews ? `还有 ${pendingReviews} 张返图等待确认` : `还有 ${Math.max(0, eligible.length - completed)} 个接力任务未完成` : '',
   };
   const counts: Record<WorkflowStage, string> = {
-    detect: verifiedWorkflow ? `${eligible.length}/${eligible.length} 人已进入历史流程` : `${confirmed}/${subjects.length} 人已采用`,
+    detect: verifiedWorkflow ? `${eligible.length}/${eligible.length} 人已进入协作流程` : `${confirmed}/${subjects.length} 人已采用`,
     assignment: `${new Set(eligible.map((subject: Json) => subject.identity?.id).filter(Boolean)).size} 人 · ${tasks.length} 工作图`,
     relay: `${completed}/${eligible.length} 已完成 · ${returned} 已返图`,
     review: `${merged}/${workspace.photos.length} 已输出 · ${mergeBlockers} 阻断`,
@@ -153,7 +151,7 @@ export const latestWorkflowStage = (value: Json | undefined): WorkflowStage => {
   const relayComplete = Boolean(summaries.find(stage => stage.id === 'relay')?.complete);
   const hasMergedOutput = workspace.photos.some((photo: Json) => (photo.tasks || []).some((task: Json) => task.status === 'merged' || task.mergedVersionId));
   if (relayComplete || hasMergedOutput) return 'review';
-  const hasWorkflow = Boolean(workspace.workflowGenerated && ((workspace.workflowParticipantKeys || []).length || (workspace.workflowParticipantSubjectKeys || []).length));
+  const hasWorkflow = Boolean(workspace.workflowGenerated && (workspace.workflowParticipantKeys || []).length);
   const hasRelayActivity = (workspace.assignments || []).some((assignment: Json) => assignment.completed || assignment.returnMissing || assignment.editedPatchPath || assignment.completionKind);
   if (hasWorkflow || hasRelayActivity) return 'relay';
   if (canEnterWorkflowStage(workspace, 'assignment').allowed) return 'assignment';
@@ -164,20 +162,19 @@ export const workflowLayoutMode = (width: number) => Number.isFinite(width) && w
 
 export const workingImageMetrics = (task: Json, _photo: Json = {}) => {
   const generation = task?.generation && typeof task.generation === 'object' ? task.generation : {};
-  const crop = task?.crop || {};
-  const width = Math.max(0, Number(generation.workWidth ?? crop.width ?? 0));
-  const height = Math.max(0, Number(generation.workHeight ?? crop.height ?? 0));
-  const sourceWidth = Math.max(width, Number(generation.sourceWidth || 0));
-  const sourceHeight = Math.max(height, Number(generation.sourceHeight || 0));
+  const width = Math.max(0, Number(generation.workWidth || 0));
+  const height = Math.max(0, Number(generation.workHeight || 0));
+  const sourceWidth = Math.max(0, Number(generation.sourceWidth || 0));
+  const sourceHeight = Math.max(0, Number(generation.sourceHeight || 0));
   const coverageValue = generation.sourceCoverage;
   const reportedCoverage = coverageValue === undefined || coverageValue === null || coverageValue === '' ? Number.NaN : Number(coverageValue);
-  const areaRatio = Number.isFinite(reportedCoverage) ? Math.max(0, Math.min(1, reportedCoverage)) : sourceWidth && sourceHeight ? Math.min(1, width * height / (sourceWidth * sourceHeight)) : undefined;
+  const areaRatio = Number.isFinite(reportedCoverage) ? Math.max(0, Math.min(1, reportedCoverage)) : undefined;
   const fullFrameValue = generation.fullFrame;
   const fullFrame = typeof fullFrameValue === 'boolean' ? fullFrameValue : undefined;
   const manualCropValue = generation.requiresManualCrop;
   const requiresManualCrop = typeof manualCropValue === 'boolean' ? manualCropValue : undefined;
   const exceedsValue = generation.exceedsWorkTileEdge;
-  const exceedsWorkTileEdge = typeof exceedsValue === 'boolean' ? exceedsValue : width && height ? width > 4000 || height > 4000 : undefined;
+  const exceedsWorkTileEdge = typeof exceedsValue === 'boolean' ? exceedsValue : undefined;
   const detector = String(task?.detector || '');
   const backend = detector === 'rtmdet-pairdetr-sam2' || /advanced|pairdetr|sam2/i.test(detector) ? '增强' : detector === 'rtmdet-ins-m' || /basic|ins-m/i.test(detector) ? '基础' : '未知';
   const fallbackReason = String(generation.fallbackReason || '');

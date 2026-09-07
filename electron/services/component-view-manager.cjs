@@ -4,6 +4,14 @@ const { normalizeComponentSettingsFormValues, validateComponentSettingsFormPatch
 const { getComponentLifecycleLease } = require('./component-lifecycle-context.cjs');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
+const mediaToken = value => {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'photoflow-media:' || url.hostname !== 'file' || url.username || url.password || url.port || url.hash) return '';
+    return /^\/([A-Za-z0-9_-]{32})$/.exec(url.pathname)?.[1] || '';
+  } catch { return ''; }
+};
+const hasMediaGrant = (instance, token) => Boolean(token && instance && !instance.view.webContents.isDestroyed() && (instance.mediaGrants.get(token) || 0) > Date.now());
 const normalizeIdentity = value => String(value || '').trim().replace(/\\/g, '/').toLocaleLowerCase();
 const normalizeResolvedTheme = value => value === 'dark' ? 'dark' : 'light';
 const normalizeRelativePath = (value, field = 'component scope') => {
@@ -75,7 +83,7 @@ const componentSurfaceCss = (theme, surface) => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, lifecycleCoordinator = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, clearComponentViewState = clearComponentCapabilityState, partitionSessionProvider = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, lifecycleCoordinator = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, clearComponentViewState = clearComponentCapabilityState, partitionSessionProvider = null, mediaProtocolHandler = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -90,6 +98,8 @@ class ComponentViewManager {
     this.inputGrantService = inputGrantService;
     this.notificationService = notificationService;
     this.partitionSessionProvider = partitionSessionProvider;
+    this.mediaProtocolHandler = mediaProtocolHandler;
+    this.mediaProtocolSessions = new WeakSet();
     this.resolveOpenContext = resolveOpenContext;
     this.onViewStackChanged = onViewStackChanged;
     this.settingsCloseGraceMs = Math.max(0, Number(settingsCloseGraceMs) || 0);
@@ -360,6 +370,7 @@ class ComponentViewManager {
     const instance = {
       key, instanceId, view, descriptor, page, settingsPage, contribution,
       readyPromise: null,
+      mediaGrants: new Map(),
       settingsLeases: new Set(surface === 'application.settings' ? [leaseId] : []),
       leaseGeneration: 1,
       latestOpenGeneration: activationGeneration,
@@ -377,6 +388,15 @@ class ComponentViewManager {
         ...(!applicationLevel ? { contentKind: request.contentKind === 'inspiration' ? 'inspiration' : 'project', contentRootPath: String(request.contentRootPath || '') } : {}),
         ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
         eventSender: view.webContents,
+        grantMediaUrl: url => {
+          const token = mediaToken(url);
+          if (!token || this.senderBindings.get(view.webContents.id) !== instance || view.webContents.isDestroyed()) return;
+          const now = Date.now();
+          for (const [key, expires] of instance.mediaGrants) if (expires <= now) instance.mediaGrants.delete(key);
+          instance.mediaGrants.delete(token);
+          instance.mediaGrants.set(token, now + 60 * 60 * 1000);
+          while (instance.mediaGrants.size > 8192) instance.mediaGrants.delete(instance.mediaGrants.keys().next().value);
+        },
         emitComponentEvent: (topic, payload) => {
           if (!descriptor.service?.events?.includes(String(topic || ''))) return;
           // A background operation keeps its project binding after its original
@@ -395,6 +415,15 @@ class ComponentViewManager {
     const senderId = view.webContents.id;
     this.senderBindings.set(senderId, instance);
     this.partitionSessions.set(descriptor.componentId, view.webContents.session);
+    const partitionSession = view.webContents.session;
+    if (this.mediaProtocolHandler && partitionSession.protocol?.handle && !this.mediaProtocolSessions.has(partitionSession)) {
+      partitionSession.protocol.handle('photoflow-media', request => {
+        const token = mediaToken(request.url);
+        const granted = [...this.instancesById.values()].some(target => target.view.webContents.session === partitionSession && hasMediaGrant(target, token));
+        return granted ? this.mediaProtocolHandler(request) : new Response('Not found', { status: 404 });
+      });
+      this.mediaProtocolSessions.add(partitionSession);
+    }
     const componentRoot = descriptor.componentRoot ? path.resolve(descriptor.componentRoot) : '';
     let canonicalComponentRoot='';
     if(componentRoot){const componentRootStat = await require('node:fs').promises.lstat(componentRoot);canonicalComponentRoot = await require('node:fs').promises.realpath(componentRoot);if (!componentRootStat.isDirectory() || componentRootStat.isSymbolicLink()) { this.close(instanceId); throw new Error('Component root is unsafe'); }}
@@ -432,6 +461,10 @@ class ComponentViewManager {
       try {
         const requestUrl = new URL(details.url);
         if (['data:', 'blob:'].includes(requestUrl.protocol)) allowed = true;
+        else if (requestUrl.protocol === 'photoflow-media:') {
+          const requester = this.senderBindings.get(details.webContentsId);
+          allowed = Boolean(this.mediaProtocolHandler && requester?.descriptor.componentId === descriptor.componentId && hasMediaGrant(requester, mediaToken(requestUrl.href)));
+        }
         else if (requestUrl.protocol === 'file:') {
           if(!componentRoot)throw new Error('Component root is unavailable');
           const fs = require('node:fs'); const candidate = path.resolve(fileURLToPath(requestUrl));
@@ -475,7 +508,7 @@ class ComponentViewManager {
   }
 
   publicContext(instance) {
-    const { workspacePath: _privateWorkspacePath, contentRootPath: _privateContentRootPath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
+    const { workspacePath: _privateWorkspacePath, contentRootPath: _privateContentRootPath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, grantMediaUrl: _privateMediaGrant, ...publicContext } = instance.context;
     const applicationSettings = instance.context.surface === 'application.settings'; const applicationCommand = instance.context.surface === 'application.command'; const applicationSurface = applicationSettings || applicationCommand;
     const permissions = applicationSurface
       ? (instance.descriptor.service?.permissions || []).filter(permission => ['component.settings', 'component.secrets', 'network.fetch', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
