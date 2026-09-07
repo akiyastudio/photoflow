@@ -96,6 +96,17 @@ assert.notEqual(bufferedSent.at(-1)[1].notification?.message, 'after-crash', 're
 assert.equal(reloadBuffered.setRendererReady({ rendererToken: 'renderer-after-crash', revision: 0, ready: true }).flushed, 1);
 reloadBuffered.destroy();
 assert.equal(reloadContents.listenerCount('did-start-loading'), 0); assert.equal(reloadContents.listenerCount('render-process-gone'), 0, 'destroy removes every renderer lifecycle listener');
+
+const remountSent = [];
+const remountService = new ComponentNotificationService({ mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => remountSent.push(args) } }, now: () => now });
+assert.equal(remountService.setRendererReady({ rendererToken: 'provider-session-a', revision: 0, ready: true }).ready, true);
+assert.equal(remountService.setRendererReady({ rendererToken: 'provider-session-a', revision: 1, ready: false }).ready, false);
+assert.equal(remountService.setRendererReady({ rendererToken: 'provider-session-a', revision: 0, ready: true }).stale, true, 'a reset revision on the same session cannot restore readiness');
+assert.equal(remountService.publish(descriptor('provider-remount'), { tone: 'error', message: 'buffered during remount' }, project).accepted, true);
+assert.equal(remountSent.length, 0);
+assert.deepStrictEqual(remountService.setRendererReady({ rendererToken: 'provider-session-b', revision: 0, ready: true }), { ready: true, flushed: 1 }, 'a fresh provider session restores readiness and flushes the accepted notification');
+assert.equal(remountSent[0][1].notification.message, 'buffered during remount');
+remountService.destroy();
 buffered.clearComponent('buffered');
 assert.equal(bufferedSent.at(-1)[1].type, 'purge', 'component cleanup purges already rendered notifications');
 const ttlSent = []; let ttlNow = 50000;

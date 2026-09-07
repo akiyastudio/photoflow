@@ -47,6 +47,7 @@ const timers = new Map();
 let frameSequence = 0;
 const frames = new Map();
 const snapshots = [];
+const readinessCalls = [];
 let presentationListener = null;
 const observers = [];
 class TestResizeObserver {
@@ -65,7 +66,7 @@ Object.assign(testWindow, {
   ResizeObserver: TestResizeObserver,
   electronAPI: {
     onComponentNotification: () => () => undefined,
-    setComponentNotificationReady: async () => ({ ready: true, flushed: 0 }),
+    setComponentNotificationReady: async update => { readinessCalls.push(update); return { ready: true, flushed: 0 }; },
     updateToastView: async snapshot => { snapshots.push(snapshot); return { success: true }; },
     onToastViewAction: () => () => undefined,
     onToastViewPresentation: callback => { presentationListener = callback; return () => { presentationListener = null; }; },
@@ -121,6 +122,8 @@ const flushFrames = timestamp => {
   const root = createRoot(container);
   await React.act(async () => root.render(React.createElement(toastModule.TopToastProvider, null,
     React.createElement(toastModule.TopToastViewport), React.createElement(Harness))));
+  const firstReady = readinessCalls.find(call => call.ready === true);
+  assert(firstReady && firstReady.rendererToken.startsWith('renderer-test:notifications:'), 'component notification readiness uses an effect-lifetime session token');
   await React.act(async () => flushFrames(1));
   assert.equal(snapshots.length, 1, 'initial viewport mount publishes one structured Toast view snapshot');
   assert(!findAll(container, node => node.getAttribute?.('data-toast-view-model'))[0].getAttribute('class').includes('top-toast-stack--model'), 'the host fallback remains visible until the native view confirms the current revision');
@@ -188,5 +191,15 @@ const flushFrames = timestamp => {
 
   await React.act(async () => root.unmount());
   assert.equal(snapshots.at(-1).height, 0, 'unmount hides the persistent Toast view');
+  const firstNotReady = readinessCalls.find(call => call.ready === false && call.rendererToken === firstReady.rendererToken);
+  assert(firstNotReady && firstNotReady.revision > firstReady.revision, 'readiness cleanup advances only its own notification session');
+
+  const remountContainer = new TestNode(1, 'DIV', testDocument);
+  const remountRoot = createRoot(remountContainer);
+  await React.act(async () => remountRoot.render(React.createElement(toastModule.TopToastProvider, null, React.createElement(Harness))));
+  const remountReady = readinessCalls.find(call => call.ready === true && call.rendererToken !== firstReady.rendererToken);
+  assert(remountReady, 'a provider remount with the same host renderer token starts a fresh notification session');
+  assert.equal(remountReady.revision, 0, 'the fresh session may safely start at revision zero');
+  await React.act(async () => remountRoot.unmount());
   console.log('top toast mounted hook tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

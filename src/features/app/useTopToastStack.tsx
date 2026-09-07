@@ -37,7 +37,6 @@ export const TopToastProvider = ({ children }: { children: ReactNode }) => {
   const sequenceRef = useRef(0);
   const stackRef = useRef<HTMLDivElement>(null);
   const rendererToken = useHostRendererToken();
-  const readinessRevisionRef = useRef(0);
 
   const commit = useCallback((updater: (current: TopToastNotice[]) => TopToastNotice[]) => {
     const next = updater(noticesRef.current);
@@ -115,6 +114,9 @@ export const TopToastProvider = ({ children }: { children: ReactNode }) => {
   const api = useMemo<ToastApi>(() => ({ show, update, dismiss, activity }), [activity, dismiss, show, update]);
 
   useEffect(() => {
+    let active = true;
+    let notificationRendererToken = `${rendererToken}:notifications:${globalThis.crypto.randomUUID()}`;
+    let readinessRevision = 0;
     const unsubscribe = window.electronAPI.onComponentNotification(value => {
       if (value.type === 'purge') {
         commit(current => {
@@ -129,8 +131,20 @@ export const TopToastProvider = ({ children }: { children: ReactNode }) => {
       const handle = show(value.notification.message, { tone: value.notification.tone, dedupeKey });
       if (!existing) commit(current => current.map(notice => notice.id === handle.id ? { ...notice, sourceComponentId: value.componentId } : notice));
     });
-    void window.electronAPI.setComponentNotificationReady({ rendererToken, revision: readinessRevisionRef.current++, ready: true });
-    return () => { void window.electronAPI.setComponentNotificationReady({ rendererToken, revision: readinessRevisionRef.current++, ready: false }); unsubscribe(); };
+    const markReady = async () => {
+      for (let attempt = 0; active && attempt < 2; attempt += 1) {
+        const result = await window.electronAPI.setComponentNotificationReady({ rendererToken: notificationRendererToken, revision: readinessRevision++, ready: true });
+        if (!active || result.ready) return;
+        notificationRendererToken = `${rendererToken}:notifications:${globalThis.crypto.randomUUID()}`;
+        readinessRevision = 0;
+      }
+    };
+    void markReady().catch(() => undefined);
+    return () => {
+      active = false;
+      void window.electronAPI.setComponentNotificationReady({ rendererToken: notificationRendererToken, revision: readinessRevision++, ready: false }).catch(() => undefined);
+      unsubscribe();
+    };
   }, [commit, rendererToken, show]);
   useEffect(() => () => { for (const timer of timersRef.current.values()) window.clearTimeout(timer); timersRef.current.clear(); }, []);
 
