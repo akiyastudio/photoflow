@@ -16,6 +16,7 @@ export type ComponentSdk = {
   contractVersion: 1;
   getContext(): Promise<ComponentContext>;
   notify?: (payload: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string }) => Promise<{ accepted: boolean; deduplicated?: boolean; error?: { code: string; message: string; retryable: boolean } }>;
+  dialog<T = unknown>(payload: { kind: string; [key: string]: unknown }): Promise<T>;
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>;
   onEvent(topic: string, callback: (value: unknown) => void): () => void;
   onActivate(callback: () => void): () => void;
@@ -95,5 +96,5 @@ export const durableRpc = async <T = unknown>(method: string, payload: Record<st
   const operationId = String(payload.operationId || crypto.randomUUID());
   const accepted = await rpc<Record<string, unknown>>(method, { ...payload, operationId, acceptOnly: true });
   if (accepted.success === false || accepted.accepted !== true) return accepted as T;
-  return rpc<T>('team.operation.run.v1', { operationId });
+  return rpc<T>('team.operation.run.v1', { operationId: String(accepted.operationId || operationId) });
 };

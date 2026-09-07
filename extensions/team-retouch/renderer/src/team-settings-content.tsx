@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AlertCircle, Loader2, RotateCcw, Wrench } from 'lucide-react';
+import { AlertCircle, FolderOpen, Loader2, RotateCcw, Wrench } from 'lucide-react';
 import { useAppDialog } from './legacy/legacy-dialog-context';
 import { durableRpc, rpc } from './sdk';
 import { TeamLicenseContent } from './team-license-content';
@@ -69,6 +69,7 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
           <span className="team-settings-badge pf-status" data-tone={advanced.tone}>{advanced.state === 'loading' && <Loader2 size={13} className="animate-spin"/>}{advanced.label}</span>
           <div className="team-settings-banner pf-banner" data-tone={advanced.tone === 'danger' ? 'danger' : advanced.tone === 'warning' ? 'warning' : undefined}>{(advanced.state === 'error' || advanced.state === 'repair-needed' || advanced.state === 'unavailable') && <AlertCircle size={15}/>}<span>{advanced.description}</span></div>
           <div className="team-settings-actions">
+            {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('打开安装包目录', async () => { await window.photoFlowComponent.dialog({ kind: 'openComponentDataDirectory', relativePath: 'advanced/packages' }); })} disabled={Boolean(busy)}><FolderOpen size={14}/>打开安装目录</button>}
             {(advanced.state === 'error' || advanced.state === 'unavailable') && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void refreshEnvironment()} disabled={Boolean(busy)}><RotateCcw size={14}/>重新检查</button>}
             {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('检查安装条件', async () => { assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败'); await refreshEnvironment(); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>}
             {canManageEnvironment && <button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.install.v1'), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>}
@@ -80,7 +81,7 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
         <div className="team-settings-status">
           <ol className="list-decimal space-y-2 pl-5 text-sm">
             <li>将单独的高级环境 ZIP 放入下面的目录，保留原文件名，无需解压。完整插件包和 evidence 资料包不能用于此处。</li>
-            <li>在文件资源管理器地址栏粘贴：<code className="break-all">%LOCALAPPDATA%\PhotoFlow\components\team-retouch\advanced\packages</code>。目录不存在时，可先点一次「检查条件」创建。</li>
+            <li>点击「打开安装目录」，把 ZIP 放入打开的文件夹；也可以在文件资源管理器地址栏粘贴：<code className="break-all">%LOCALAPPDATA%\PhotoFlow\components\team-retouch\advanced\packages</code>。</li>
             <li>放好安装包后点击「安装 / 修复」，程序会自动查找并校验，完成后状态显示「可用」。也可先点「检查条件」。</li>
             <li>以后照常更新基础插件，高级环境会保留并自动复用；只有安装或修复环境时才需要该 ZIP。</li>
           </ol>

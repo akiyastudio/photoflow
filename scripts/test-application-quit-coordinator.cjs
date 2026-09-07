@@ -43,8 +43,13 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true, task
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
   const quitUiSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'app', 'ApplicationQuitController.tsx'), 'utf8');
   assert.match(quitUiSource, /confirmLabel: '仍然退出', cancelLabel: '暂不退出', tone: 'danger'/);
+  assert.doesNotMatch(quitUiSource, /退出暂未完成|重试退出/, '进入保存阶段后不能再让用户重试退出');
+  assert.match(quitUiSource, /flushApplicationBeforeQuit\(\)[\s\S]*?respondToApplicationQuit\(requestId, true\)/, '保存请求发出后应立即承诺退出，不等待渲染层保存结果');
   const quitWiring = mainSource.slice(mainSource.indexOf('const applicationQuitUi'), mainSource.indexOf("app.on('window-all-closed'"));
   assert(!quitWiring.includes('dialog.showMessageBox'), 'quit confirmation and failures use application visuals');
+  assert.match(quitWiring, /Application quit exceeded deadline; forcing process exit[\s\S]*?app\.exit\(0\)/, '已确认的退出必须有强制终止时限');
+  assert.match(quitWiring, /applicationQuitAccepted = true;\s*hideApplicationWindowForQuit\(\);\s*armApplicationQuitDeadline\(\);/, '用户确认后应立即隐藏整个应用界面，再在后台收尾');
+  assert.doesNotMatch(quitWiring, /setPhase\('failed'/, '收尾失败不能恢复成重试退出界面');
   const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续退出'[\s\S]*?buttons:\s*\[presentation\.continueLabel,\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/, '卸载确认锁定真实退出文案与安全默认项');
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;

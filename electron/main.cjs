@@ -50,6 +50,7 @@ const { createApplicationQuitUi } = require('./services/application-quit-ui.cjs'
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
 const { ComponentLifecycleCoordinator } = require('./services/component-lifecycle-coordinator.cjs');
+const { componentDataRoot } = require('./services/component-lifecycle-service.cjs');
 const { registerMainWindowQuitGuard, runApplicationQuit, selectApplicationQuitTasks } = require('./services/application-quit-coordinator.cjs');
 const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
@@ -1359,6 +1360,7 @@ app.whenReady().then(async () => {
     versionService,
     IMAGE_EXTENSIONS,
     path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
+    getComponentDataRoot: componentId => componentDataRoot(app, componentId, process.env),
     getProjectPath, dialog, mainWindow, mediaService, mediaRatingService, exiftool, shell, backgroundTasks,
     uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, pluginService, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
     lifecycleCoordinator: componentLifecycleCoordinator,
@@ -1476,6 +1478,22 @@ const applicationQuitUi = createApplicationQuitUi({ ipcMain, getMainWindow: () =
 } });
 let applicationQuitAccepted = false;
 let applicationQuitStartedAt = 0;
+let applicationQuitDeadlineTimer = null;
+let applicationQuitWindowHidden = false;
+const hideApplicationWindowForQuit = () => {
+  if (applicationQuitWindowHidden) return;
+  applicationQuitWindowHidden = true;
+  applicationQuitUi.setPhase('closing');
+  mainWindow?.hide();
+};
+const armApplicationQuitDeadline = () => {
+  if (applicationQuitDeadlineTimer) return;
+  applicationQuitDeadlineTimer = setTimeout(() => {
+    writeLog('error', 'Application quit exceeded deadline; forcing process exit', { elapsedMs: Date.now() - applicationQuitStartedAt });
+    hideApplicationWindowForQuit();
+    app.exit(0);
+  }, 15000);
+};
 getApplicationQuitState = registerConfigDrainBeforeQuit({
   app, getConfigMutationService: () => configMutationService, writeLog,
   beforeDrain: async () => {
@@ -1486,6 +1504,8 @@ getApplicationQuitState = registerConfigDrainBeforeQuit({
       if (!confirmed) throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
       if (pendingTasks.length) applicationQuitStartedAt = Date.now();
       applicationQuitAccepted = true;
+      hideApplicationWindowForQuit();
+      armApplicationQuitDeadline();
     }
     if (!componentLifecycleCoordinator.beginApplicationQuit()) throw Object.assign(new Error('组件变更仍在进行，请稍后重试退出'), { code: 'APP_QUIT_BUSY' });
   },
@@ -1505,8 +1525,7 @@ getApplicationQuitState = registerConfigDrainBeforeQuit({
       },
       saveState: () => configMutationService?.drain({ timeoutMs: 5000 }),
       hideWindow: () => {
-        applicationQuitUi.setPhase('closing');
-        mainWindow?.hide();
+        hideApplicationWindowForQuit();
         domainCommandJournal.stop();
       },
       cleanup: [
@@ -1523,15 +1542,23 @@ getApplicationQuitState = registerConfigDrainBeforeQuit({
     if (error?.code === 'APP_QUIT_CANCELLED') {
       applicationQuitAccepted = false;
       applicationQuitUi.setPhase('idle');
-      return;
+      return false;
     }
-    if (!mainWindow || mainWindow.isDestroyed()) { createWindow(); loadMainWindowRenderer(); }
-    mainWindow.show();
-    applicationQuitUi.setPhase('failed', { message: error?.code === 'APP_QUIT_BUSY' || error?.code === 'APP_QUIT_SAVE_FAILED'
-      ? error.message : '后台服务尚未确认结束，请重试退出。' });
+    if (!applicationQuitAccepted) {
+      applicationQuitWindowHidden = false;
+      applicationQuitUi.setPhase('idle');
+      return false;
+    }
+    writeLog('warn', 'Application cleanup failed after quit acceptance; forcing process exit', { error: error?.message || String(error), code: error?.code });
+    hideApplicationWindowForQuit();
+    return true;
   },
 });
-app.on('will-quit', destroyToastViewManager);
+app.on('will-quit', () => {
+  if (applicationQuitDeadlineTimer) clearTimeout(applicationQuitDeadlineTimer);
+  applicationQuitDeadlineTimer = null;
+  destroyToastViewManager();
+});
 
 app.on('window-all-closed', () => {
   writeLog('info', 'All application windows closed');

@@ -213,7 +213,12 @@ const registerConfigDrainBeforeQuit = ({ app, getConfigMutationService, writeLog
     if (state === 'draining') return;
     state = 'draining';
     const service = getConfigMutationService?.();
-    void (async()=>{await beforeDrain();await (service?.drain({timeoutMs})||Promise.resolve());await onQuit?.();state='ready';app.quit();})().catch(error=>{state='idle';writeLog('error','Application quit coordination failed',{error:error.message||String(error),code:error.code});return onQuitFailed(error);});
+    void (async()=>{await beforeDrain();await (service?.drain({timeoutMs})||Promise.resolve());await onQuit?.();state='ready';app.quit();})().catch(async error=>{
+      writeLog('error','Application quit coordination failed',{error:error.message||String(error),code:error.code});
+      const forceQuit = await onQuitFailed(error) === true;
+      if (forceQuit) { state='ready'; app.exit(0); return; }
+      state='idle';
+    });
   });
   return () => state;
 };

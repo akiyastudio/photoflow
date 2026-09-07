@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'advanced-installer\setup-team-retouch-advanced.ps1'
 . $setup -TestHelpersOnly
+if ((Normalize-AdvancedRegistrationPath '\\?\C:\PhotoFlow\advanced\candidate') -cne 'C:\PhotoFlow\advanced\candidate') { throw 'WSL extended-length BasePath was not normalized before ownership comparison' }
 if ((Resolve-AdvancedPackageVersion @{version='26.9.7'; advancedRuntime=@{packageVersion='26.9.4'}}) -cne '26.9.4') { throw 'Plugin update must preserve the pinned runtime version' }
 if ((Resolve-AdvancedPackageVersion @{version='26.9.7'; advancedRuntime=@{}}) -cne '26.9.7') { throw 'Unpinned package version must remain exact' }
 if ((Resolve-AdvancedLinuxUser @{linuxUser='photoflowlab'} 'photoflow' $false) -cne 'photoflowlab') { throw 'Trusted package user was not selected' }

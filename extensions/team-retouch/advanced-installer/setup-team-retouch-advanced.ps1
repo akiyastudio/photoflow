@@ -9,6 +9,12 @@ param(
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $OutputEncoding = [Text.Encoding]::UTF8
+$script:AdvancedProgressEnabled = -not $TestHelpersOnly
+
+function Write-AdvancedProgress([int]$Percent, [string]$Message) {
+    if (-not $script:AdvancedProgressEnabled) { return }
+    Write-Output "PHOTOFLOW_PROGRESS|$([Math]::Max(1, [Math]::Min(99, $Percent)))|$Message"
+}
 
 function Resolve-AdvancedLinuxUser([object]$Manifest, [string]$RequestedUser, [bool]$ExplicitUser) {
     $value = [string]$Manifest.linuxUser
@@ -131,17 +137,32 @@ function Open-EntityIdentityLock([string]$PathValue) {
     Assert-SafeLocalPath $PathValue | Out-Null
     [IO.FileStream]::new([IO.Path]::GetFullPath($PathValue), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
 }
-function Get-FileSha256([string]$PathValue) {
+function Get-FileSha256([string]$PathValue, [int]$ProgressStart = 0, [int]$ProgressEnd = 0, [string]$ProgressMessage = 'Verifying advanced environment file') {
     $stream = [IO.FileStream]::new($PathValue, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 8MB, [IO.FileOptions]::SequentialScan)
     $sha = [Security.Cryptography.SHA256]::Create()
-    try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose(); $stream.Dispose() }
+    try {
+        $buffer = [byte[]]::new(8MB); [int64]$read = 0; $reported = $ProgressStart - 1
+        while (($count = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $sha.TransformBlock($buffer, 0, $count, $null, 0) | Out-Null; $read += $count
+            if ($ProgressEnd -gt $ProgressStart -and $stream.Length -gt 0) {
+                $percent = $ProgressStart + [int](($ProgressEnd - $ProgressStart) * $read / $stream.Length)
+                if ($percent -gt $reported) { Write-AdvancedProgress $percent $ProgressMessage; $reported = $percent }
+            }
+        }
+        $sha.TransformFinalBlock($buffer, 0, 0) | Out-Null
+        return ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+    } finally { $sha.Dispose(); $stream.Dispose() }
 }
-function Copy-VerifiedFile([string]$Source, [string]$Destination) {
+function Copy-VerifiedFile([string]$Source, [string]$Destination, [int]$ProgressStart = 0, [int]$ProgressEnd = 0, [string]$ProgressMessage = 'Copying advanced environment file') {
     $input = [IO.FileStream]::new($Source, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 8MB, [IO.FileOptions]::SequentialScan)
     $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 8MB, [IO.FileOptions]::SequentialScan)
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $buffer=[byte[]]::new(8MB); while(($count=$input.Read($buffer,0,$buffer.Length)) -gt 0){ $sha.TransformBlock($buffer,0,$count,$null,0)|Out-Null; $output.Write($buffer,0,$count) }
+        $buffer=[byte[]]::new(8MB); [int64]$read=0; $reported=$ProgressStart-1
+        while(($count=$input.Read($buffer,0,$buffer.Length)) -gt 0){
+            $sha.TransformBlock($buffer,0,$count,$null,0)|Out-Null; $output.Write($buffer,0,$count); $read += $count
+            if($ProgressEnd -gt $ProgressStart -and $input.Length -gt 0){$percent=$ProgressStart+[int](($ProgressEnd-$ProgressStart)*$read/$input.Length);if($percent -gt $reported){Write-AdvancedProgress $percent $ProgressMessage;$reported=$percent}}
+        }
         $sha.TransformFinalBlock($buffer,0,0)|Out-Null; $output.Flush($true)
         return ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
     } finally { $sha.Dispose(); $output.Dispose(); $input.Dispose() }
@@ -170,13 +191,19 @@ function Get-DistroRegistration([string]$Name) {
 function Get-RegistrationBasePath($Registration) {
     if (-not $Registration) { return '' }
     $properties = Get-ItemProperty -LiteralPath $Registration.PSPath
-    [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$properties.BasePath)).TrimEnd('\')
+    Normalize-AdvancedRegistrationPath ([string]$properties.BasePath)
+}
+function Normalize-AdvancedRegistrationPath([string]$PathValue) {
+    $expanded = [Environment]::ExpandEnvironmentVariables($PathValue).Trim()
+    if ($expanded.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) { $expanded = '\\' + $expanded.Substring(8) }
+    elseif ($expanded.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) { $expanded = $expanded.Substring(4) }
+    [IO.Path]::GetFullPath($expanded).TrimEnd('\')
 }
 function Assert-RegistrationBasePath([string]$Name, [string]$ExpectedRoot) {
     $registration = Get-DistroRegistration $Name
     if (-not $registration) { throw "WSL distribution is not registered: $Name" }
     $actual = Get-RegistrationBasePath $registration
-    $expected = [IO.Path]::GetFullPath($ExpectedRoot).TrimEnd('\')
+    $expected = Normalize-AdvancedRegistrationPath $ExpectedRoot
     if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) { throw "Refusing to manage WSL distribution $Name because BasePath is not component-owned: $actual" }
     $registration
 }
@@ -192,14 +219,14 @@ function Remove-OwnedRegistrationIfPresent([string]$Name, [string]$ExpectedRoot)
     $registration = Get-DistroRegistration $Name
     if (-not $registration) { return $false }
     $actual = Get-RegistrationBasePath $registration
-    $expected = [IO.Path]::GetFullPath($ExpectedRoot).TrimEnd('\')
+    $expected = Normalize-AdvancedRegistrationPath $ExpectedRoot
     if (-not $actual.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to clean up WSL distribution $Name because BasePath is not this transaction's path: $actual"
     }
     Unregister-OwnedDistro $Name $ExpectedRoot
     return $true
 }
-function Test-Distro([string]$Name, [string]$User) {
+function Test-Distro([string]$Name, [string]$User, [int]$PairProgress = 0, [int]$SamProgress = 0, [int]$CompleteProgress = 0) {
     & wsl.exe --manage $Name --set-default-user $User
     if ($LASTEXITCODE -ne 0) { throw "Unable to set the default user for $Name" }
     $componentRoot = Split-Path -Parent $PSScriptRoot
@@ -208,12 +235,15 @@ function Test-Distro([string]$Name, [string]$User) {
     $pairLinux = Get-AdvancedWslText $Name $User @('wslpath', '-a', $pairWindows)
     $samLinux = Get-AdvancedWslText $Name $User @('wslpath', '-a', $samWindows)
     $runtimeHome = Get-AdvancedWslText $Name $User @('printenv', 'HOME')
+    if ($PairProgress) { Write-AdvancedProgress $PairProgress 'Verifying PairDETR environment' }
     & wsl.exe -d $Name -u $User --exec timeout 180 "$runtimeHome/miniforge3/envs/pairdetr/bin/python" $pairLinux --self-test
     if ($LASTEXITCODE -ne 0) { throw "The imported PairDETR environment failed its runtime probe: $Name" }
+    if ($SamProgress) { Write-AdvancedProgress $SamProgress 'Verifying SAM 2.1 environment' }
     & wsl.exe -d $Name -u $User --exec timeout 240 "$runtimeHome/miniforge3/envs/sam2/bin/python" $samLinux --self-test
     if ($LASTEXITCODE -ne 0) { throw "The imported SAM environment failed its runtime probe: $Name" }
+    if ($CompleteProgress) { Write-AdvancedProgress $CompleteProgress 'Advanced environment verification passed' }
 }
-function Open-ValidatedAdvancedArchive([string]$ArchivePath) {
+function Open-ValidatedAdvancedArchive([string]$ArchivePath, [int]$ProgressStart = 0, [int]$ProgressEnd = 0) {
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archiveFullPath = [IO.Path]::GetFullPath($ArchivePath)
@@ -225,8 +255,14 @@ function Open-ValidatedAdvancedArchive([string]$ArchivePath) {
     $packageStream = [IO.FileStream]::new($archiveFullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read, 8MB, [IO.FileOptions]::SequentialScan)
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $buffer = [byte[]]::new(8MB)
-        while (($count = $packageStream.Read($buffer, 0, $buffer.Length)) -gt 0) { $sha.TransformBlock($buffer, 0, $count, $null, 0) | Out-Null }
+        $buffer = [byte[]]::new(8MB); [int64]$read = 0; $reported = $ProgressStart - 1
+        while (($count = $packageStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $sha.TransformBlock($buffer, 0, $count, $null, 0) | Out-Null; $read += $count
+            if ($ProgressEnd -gt $ProgressStart) {
+                $percent = $ProgressStart + [int](($ProgressEnd - $ProgressStart) * $read / $archiveSize)
+                if ($percent -gt $reported) { Write-AdvancedProgress $percent 'Verifying advanced environment package'; $reported = $percent }
+            }
+        }
         $sha.TransformFinalBlock($buffer, 0, 0) | Out-Null
         $packageHash = ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
         $packageStream.Position = 0
@@ -275,18 +311,22 @@ function Close-ValidatedAdvancedArchive($Validated) {
     if ($Validated.Archive) { $Validated.Archive.Dispose() }
     if ($Validated.PackageStream) { $Validated.PackageStream.Dispose() }
 }
-function Copy-ValidatedVhdEntry($Validated, [string]$Destination) {
+function Copy-ValidatedVhdEntry($Validated, [string]$Destination, [int]$ProgressStart = 0, [int]$ProgressEnd = 0, [string]$ProgressMessage = 'Extracting advanced environment') {
     Assert-SafeStagingPath (Split-Path -Parent $Destination) $Destination
     $input = $Validated.VhdEntry.Open()
     $output = [IO.FileStream]::new($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 8MB, [IO.FileOptions]::SequentialScan)
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        $buffer = [byte[]]::new(8MB); [int64]$written = 0
+        $buffer = [byte[]]::new(8MB); [int64]$written = 0; $reported = $ProgressStart - 1
         while (($count = $input.Read($buffer, 0, $buffer.Length)) -gt 0) {
             $written += $count
             if ($written -gt [int64]$Validated.VhdEntry.Length -or $written -gt $MaxVhdBytes) { throw 'Advanced VHD exceeded its declared extraction bound.' }
             $sha.TransformBlock($buffer, 0, $count, $null, 0) | Out-Null
             $output.Write($buffer, 0, $count)
+            if ($ProgressEnd -gt $ProgressStart) {
+                $percent = $ProgressStart + [int](($ProgressEnd - $ProgressStart) * $written / [int64]$Validated.VhdEntry.Length)
+                if ($percent -gt $reported) { Write-AdvancedProgress $percent $ProgressMessage; $reported = $percent }
+            }
         }
         $sha.TransformFinalBlock($buffer, 0, 0) | Out-Null
         if ($written -ne [int64]$Validated.VhdEntry.Length) { throw 'Advanced VHD length did not match the trusted ZIP entry.' }
@@ -397,10 +437,11 @@ if (-not $ExpectedComponentVersion.Trim()) { $ExpectedComponentVersion = $manife
 if ($ExpectedAdvancedRuntimeApiVersion -le 0) { $ExpectedAdvancedRuntimeApiVersion = $manifestAdvancedRuntimeApiVersion }
 if ($ExpectedComponentVersion -ne $manifestComponentVersion -or $ExpectedAdvancedRuntimeApiVersion -ne $manifestAdvancedRuntimeApiVersion) { throw 'Host lifecycle contract does not match the installed component manifest.' }
 $packageDirectory = Join-Path $stateRoot 'packages'
+Write-AdvancedProgress 2 'Locating advanced environment package'
 $source = Resolve-AdvancedPackageSource $componentManifest $componentRoot $PackagePath $packageDirectory
 $PackagePath = $source.Path
 $declaredPackageSha256 = $source.Sha256
-$validatedPackage = Open-ValidatedAdvancedArchive $PackagePath
+$validatedPackage = Open-ValidatedAdvancedArchive $PackagePath 3 20
 $packageHash = [string]$validatedPackage.PackageSha256
 if ($ExpectedPackageSha256.Trim() -and $packageHash -ne $ExpectedPackageSha256.ToLowerInvariant()) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced package does not match the Host-pinned SHA256.' }
 if ($packageHash -ne $declaredPackageSha256.ToLowerInvariant()) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced package does not match the installed component manifest.' }
@@ -419,6 +460,7 @@ $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($componentDataRoot))
 $existingBytes = if ($registration -and (Test-Path -LiteralPath $stableVhd -PathType Leaf)) { (Get-Item -LiteralPath $stableVhd).Length } else { 0 }
 $peakBytes = [int64]([Math]::Ceiling(([int64]$manifest.installedSizeBytes * 2 + $existingBytes) * 1.15) + 2GB)
 Assert-AdvancedPreflight ([Environment]::Is64BitOperatingSystem) $computeCapability $drive.DriveType $drive.AvailableFreeSpace $peakBytes
+Write-AdvancedProgress 22 'Advanced environment prerequisites passed'
 
 if ($CheckOnly) { Close-ValidatedAdvancedArchive $validatedPackage; Write-Host 'OFFLINE_PREFLIGHT_OK|trusted package, WSL 2, NVIDIA CUDA, precision and disk ready'; exit 0 }
 
@@ -449,7 +491,7 @@ try {
     New-Item -ItemType Directory -Path $candidateRoot -Force | Out-Null
     $candidateLock = Open-StagingDirectoryLock $candidateRoot
     $candidateVhd = Join-Path $candidateRoot 'ext4.vhdx'
-    $vhdHash = Copy-ValidatedVhdEntry $validatedPackage $candidateVhd
+    $vhdHash = Copy-ValidatedVhdEntry $validatedPackage $candidateVhd 25 50 'Extracting and verifying validation environment'
     Invoke-TestFault 'candidate-copy'
     Assert-SafeStagingPath $candidateRoot $candidateVhd
     Assert-StagingEntities $candidateRoot @('ext4.vhdx','.photoflow-extraction.lock')
@@ -458,6 +500,7 @@ try {
     # The VHD file handle must be released for WSL to mount it. The directory
     # and non-shareable sentinel remain locked across this minimal call window.
     if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed before import.' }
+    Write-AdvancedProgress 52 'Registering validation environment'
     & wsl.exe --import-in-place $candidateName $candidateVhd
     Invoke-TestFault 'candidate-import'
     $candidateRegistered = [bool](Get-DistroRegistration $candidateName)
@@ -465,13 +508,13 @@ try {
     Assert-RegistrationBasePath $candidateName $candidateRoot | Out-Null
     if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during import.' }
     Assert-StagingEntities $candidateRoot @('ext4.vhdx','.photoflow-extraction.lock')
-    Test-Distro $candidateName $LinuxUser
+    Test-Distro $candidateName $LinuxUser 55 61 68
     if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during self-test.' }
     Invoke-TestFault 'candidate-probe'
     & wsl.exe --terminate $candidateName 2>$null
     Assert-SafeStagingPath $candidateRoot $candidateVhd
     if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed before unregister.' }
-    $candidatePostProbeDigest = Get-FileSha256 $candidateVhd
+    $candidatePostProbeDigest = Get-FileSha256 $candidateVhd 69 76 'Rechecking validation environment'
     if ($candidatePostProbeDigest -notmatch '^[a-f0-9]{64}$') { throw 'Candidate VHD digest could not be verified before unregister.' }
     Unregister-ReleasingLocks $candidateName $candidateRoot ([ref]$candidateVhdLock) ([ref]$candidateLock)
     $candidateRegistered = $false
@@ -482,8 +525,8 @@ try {
         $installLock = Open-StagingDirectoryLock $InstallRoot
         $oldFileId = Get-TrustedFileIdentity $stableVhd
         $oldVhdLock = Open-EntityIdentityLock $stableVhd
-        $oldDigest = Get-FileSha256 $stableVhd
-        $backupDigest = Copy-VerifiedFile $stableVhd $backupVhd
+        $oldDigest = Get-FileSha256 $stableVhd 77 79 'Verifying existing environment'
+        $backupDigest = Copy-VerifiedFile $stableVhd $backupVhd 80 83 'Creating repair rollback copy'
         if ($backupDigest -ne $oldDigest -or $oldFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Rollback VHD copy did not preserve the owned environment.' }
         Invoke-TestFault 'backup'
         Close-VhdTransactionLocks ([ref]$oldVhdLock) ([ref]$installLock)
@@ -495,7 +538,7 @@ try {
     }
     $installLock = Open-StagingDirectoryLock $InstallRoot
     if (Test-Path -LiteralPath $stableVhd) { throw 'Unregister left an unexpected stable VHD behind.' }
-    $finalVhdHash = Copy-ValidatedVhdEntry $validatedPackage $stableVhd
+    $finalVhdHash = Copy-ValidatedVhdEntry $validatedPackage $stableVhd 84 92 'Writing final advanced environment'
     Invoke-TestFault 'final-copy'
     Assert-SafeLocalPath $stableVhd | Out-Null
     $finalFileId = Get-TrustedFileIdentity $stableVhd
@@ -505,6 +548,7 @@ try {
     Assert-StagingEntities $InstallRoot $installEntities
     if ($finalVhdHash -ne $vhdHash) { throw 'Candidate and final VHD digests differ.' }
     $finalImportAttempted = $true
+    Write-AdvancedProgress 93 'Registering final advanced environment'
     & wsl.exe --import-in-place $DistroName $stableVhd
     Invoke-TestFault 'final-import'
     $finalRegistered = [bool](Get-DistroRegistration $DistroName)
@@ -512,7 +556,7 @@ try {
     Assert-RegistrationBasePath $DistroName $InstallRoot | Out-Null
     if ($finalFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Final VHD identity changed during import.' }
     foreach ($safePath in @($InstallRoot,$stableVhd,$markerPath,$statePath)) { Assert-SafeLocalPath $safePath | Out-Null }
-    Test-Distro $DistroName $LinuxUser
+    Test-Distro $DistroName $LinuxUser 94 96 98
     if ($finalFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Final VHD identity changed during self-test.' }
     Invoke-TestFault 'final-probe'
     $ownerToken = [Guid]::NewGuid().ToString('N')
@@ -522,6 +566,7 @@ try {
     Invoke-TestFault 'state-write'
     Write-JsonAtomic $statePath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; installedAt=[DateTime]::UtcNow.ToString('o'); version=3; componentVersion=$manifestComponentVersion; advancedRuntimeApiVersion=[int]$manifest.advancedRuntimeApiVersion; packageSha256=$packageHash; vhdSha256=$vhdHash; offline=$true }
     $installCompleted = $true
+    Write-AdvancedProgress 99 'Advanced environment installation complete'
     Write-Host "PhotoFlow advanced offline environment is ready in $InstallRoot"
 } catch {
     $originalFailure = $_

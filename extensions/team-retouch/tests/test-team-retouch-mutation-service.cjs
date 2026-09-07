@@ -63,6 +63,7 @@ console.log(JSON.stringify({ detector: 'fake-child', personCount: 1, tasks: [{ i
 
 let currentBasePath = basePath;
 let materializeCount = 0;
+let materializeBatchCount = 0;
 const emittedTopics = new Set();
 const emittedEvents = [];
 const outputStages = new Map(); const outputReceipts = new Map(); const outputByIdempotencyKey = new Map(); const versionsByIdempotencyKey = new Map(); const projectOutputRoot = path.join(sandbox, 'project-output');
@@ -94,7 +95,7 @@ const ready = new Promise((resolve, reject) => {
         else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { emitted: true }; }
         else if (frame.method === 'tasks') result = { task: null, cancelled: false };
         else if (frame.method === 'dialogs') result = { cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
-        else if (frame.method === 'project.input.tokens') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        else if (frame.method === 'project.input.tokens') { const tokens = frame.payload.action === 'materializeBatch' ? frame.payload.tokens : [frame.payload.token]; materializeCount += tokens.length; if (frame.payload.action === 'materializeBatch') materializeBatchCount += 1; const items = tokens.map(token => { const source = token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); return { inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }); result = frame.payload.action === 'materializeBatch' ? { items } : items[0]; }
         else if (frame.method === 'project.media.variants') {
           const requested = frame.payload.relativePath;
           let photoId = frame.payload.photoId || (requested === 'two.jpg' ? 'photo-2' : 'photo-1');
@@ -197,6 +198,7 @@ const ready = new Promise((resolve, reject) => {
     const suggested = await invoke('team.identity.suggest.v1');
     assert.equal(suggested.success, true);
     assert.equal(materializeCount - beforeIdentityMaterialize, 2, 'identity batching materializes each unique photo/version exactly once');
+    assert(materializeBatchCount >= 1, 'multi-image operations materialize input tokens through the bounded batch capability');
     assert.equal(fs.readdirSync(path.join(dataRoot, 'inputs')).length, 0, 'identity batch inputs are removed after the operation');
     const selectedReturns = await invoke('team.patch.select-returns.v1');
     const returned = await invoke('team.patch.return-batch.v1', { operationId: 'return-progress-test', returnedFiles: selectedReturns.files, relativePaths: ['one.jpg'] });

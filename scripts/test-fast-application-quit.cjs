@@ -59,11 +59,12 @@ const run = async () => {
   };
   const closing = runApplicationQuit(context);
   await delay(25);
-  assert.equal(hidden, false); assert.equal(processStops, 0, 'file submission finishes before closing its worker');
+  assert.equal(hidden, true, 'the application surface disappears while critical file work finishes in the background');
+  assert.equal(processStops, 0, 'file submission finishes before closing its worker');
   saving.complete();
   const outcome = await closing;
   assert.equal(outcome.committed, true);
-  assert(stages.indexOf('quiesce') < stages.indexOf('save') && stages.indexOf('save') < stages.indexOf('hide') && stages.indexOf('hide') < stages.indexOf('processes'));
+  assert(stages.indexOf('quiesce') < stages.indexOf('hide') && stages.indexOf('hide') < stages.indexOf('save') && stages.indexOf('save') < stages.indexOf('processes'));
   assert(outcome.timings.completedMs < 250, 'independent cleanup runs concurrently');
   assert(outcome.timings.windowHiddenMs < 200);
   const oldFailure = { id: 'scan-error', type: 'version-media-rescan', title: '自动扫描', state: 'failed', error: 'Process supervisor is stopping' };

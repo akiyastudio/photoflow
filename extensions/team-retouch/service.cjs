@@ -255,6 +255,15 @@ const callHost = async (parentId, method, payload = {}) => {
 };
 
 const materializeInput = async (parentId, token) => callHost(parentId, 'project.input.tokens', { action: 'materialize', token });
+const materializeInputs = async (parentId, tokens) => {
+  const items = [];
+  for (let index = 0; index < tokens.length; index += 256) {
+    const batch = tokens.slice(index, index + 256);
+    if (batch.length === 1) items.push(await materializeInput(parentId, batch[0]));
+    else items.push(...(await callHost(parentId, 'project.input.tokens', { action: 'materializeBatch', tokens: batch })).items);
+  }
+  return items;
+};
 const readHostMedia = async (parentId, payload) => {
   const refs = Array.isArray(payload.mediaRefs) ? payload.mediaRefs
     : [...(payload.photoIds || []).map(photoId => ({ photoId })), ...(payload.relativePaths || []).map(relativePath => ({ relativePath }))];
@@ -287,10 +296,15 @@ const materializeMediaForOperation = async (parentId, refs) => {
   for (const ref of refs || []) unique.set(ref.photoId ? `${ref.photoId}\0${ref.versionId || ''}` : `path\0${ref.relativePath || ''}`, ref);
   const items = []; const directories = new Set();
   try {
+    const grants = [];
     for (const ref of unique.values()) {
       const variant = await callHost(parentId, 'project.media.variants', { ...ref, variants: ['original'] });
       if (!variant.input?.token) throw new Error('Host did not grant materialization for requested media');
-      const input = await materializeInput(parentId, variant.input.token); directories.add(path.dirname(input.privatePath));
+      grants.push({ ref, variant, token: variant.input.token });
+    }
+    const inputs = await materializeInputs(parentId, grants.map(item => item.token));
+    for (const [index, grant] of grants.entries()) {
+      const { ref, variant } = grant; const input = inputs[index]; directories.add(path.dirname(input.privatePath));
       const metadata = variant.metadata || {}; const photoId = String(metadata.photoId || variant.mediaRef?.photoId || ref.photoId || ''); const versionId = String(metadata.versionId || variant.mediaRef?.versionId || ref.versionId || '');
       const relativePath = metadata.relativePath || variant.mediaRef?.relativePath || ref.relativePath || '';
       items.push({ relativePath, photo: { id: photoId, currentVersionId: String(metadata.currentVersionId || versionId), displayName: metadata.displayName || metadata.originalName || '', originalName: metadata.originalName || '' }, versions: [{ id: versionId, photoId, filePath: input.privatePath, relativePath, fileMissing: Boolean(metadata.fileMissing), isCurrent: Boolean(metadata.isCurrent || metadata.currentVersionId === versionId) }] });
@@ -324,7 +338,8 @@ const selectInputFiles = (parentId, { title = '选择图片', multiple = true } 
 const materializeInputStage = async (parentId, tokens) => {
   const stageId = crypto.randomUUID(); const items = []; const directories = new Set();
   try {
-    for (const [index, token] of (tokens || []).entries()) { const input = await materializeInput(parentId, token); directories.add(path.dirname(input.privatePath)); items.push({ id: input.inputId, name: path.basename(input.privatePath), path: input.privatePath, index }); }
+    const inputs = await materializeInputs(parentId, tokens || []);
+    for (const [index, input] of inputs.entries()) { directories.add(path.dirname(input.privatePath)); items.push({ id: input.inputId, name: path.basename(input.privatePath), path: input.privatePath, index }); }
     inputStages.set(stageId, [...directories]); return { stageId, items };
   } catch (error) { for (const directory of directories) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); throw error; }
 };
@@ -2957,8 +2972,11 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     const stagedSources = new Set(staged.items.map(item => path.resolve(item.path)));
     const returnedById = new Map(returned.map(item => [String(item.returnId), path.resolve(item.path)]));
     const candidateTuples = new Set(candidates.map(item => `${item.taskId}\0${item.photoId}\0${item.baseVersionId}\0${Number(item.personIndex)}`));
+    let lastMatcherProgress = -2;
     const matched = pendingReturned.length ? await runMatcher(parentId, pendingReturned, candidates, message => {
       const matcherProgress = Math.max(0, Math.min(100, Number(message.progress) || 0));
+      if (matcherProgress < 100 && matcherProgress - lastMatcherProgress < 2) return;
+      lastMatcherProgress = matcherProgress;
       matcherProgressReports = matcherProgressReports.catch(() => undefined).then(() => report('report', progressUpdate('matching', 40 + matcherProgress * 0.42, String(message.message || '正在比对返图内容')))).catch(() => undefined);
     }, context.signal) : { matches: [] };
     await matcherProgressReports;
@@ -3223,6 +3241,8 @@ const runDurableOperation = (parentId, payload, context) => withKeyedOperation(d
 const acceptAdvancedLifecycle = (parentId, payload, action) => {
   const operationId = String(payload.operationId || `advanced-${crypto.randomUUID()}`);
   const existing = advancedLifecycleRecords.get(operationId);
+  const active = [...advancedLifecycleRecords.values()].find(record => record.operationId !== operationId && record.state === 'running');
+  if (active) throw Object.assign(new Error('高级环境操作正在后台进行，请等待后台任务完成后再重试'), { code: 'COMPONENT_LIFECYCLE_BUSY' });
   if (!existing) advancedLifecycleRecords.set(operationId, { operationId, kind: 'advanced-lifecycle', parentId: String(parentId), action, state: 'accepted', phase: 'accepted', progress: 0, result: {}, error: '', createdAt: Date.now(), updatedAt: Date.now() });
   return { success: true, accepted: true, operationId, state: existing?.state || 'accepted', phase: existing?.phase || 'accepted', scope: 'application.settings' };
 };

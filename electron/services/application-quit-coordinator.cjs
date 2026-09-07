@@ -56,13 +56,13 @@ const runApplicationQuit = async ({
     backgroundTasks.beginShutdown?.();
     await quiesce();
     mark('admissionStoppedMs');
+    await hideWindow();
+    mark('windowHiddenMs');
     await backgroundTasks.waitForShutdown?.({ timeoutMs: 5000 });
     await saveState();
     componentLifecycleCoordinator.requestApplicationStop();
     backgroundTasks.stop?.();
     mark('stateSavedMs');
-    await hideWindow();
-    mark('windowHiddenMs');
 
     const initialStatuses = processSupervisor.list();
     const guardedComponentIds = [...new Set([...componentIds, ...initialStatuses.map(status => status.owner?.componentId).filter(Boolean)])];

@@ -152,6 +152,7 @@ const registerComponentProjectCapabilities = ({
   broker, ensureWorkspace, getWorkspaceDataRoot, resolveProjectEntry, versionService,
   IMAGE_EXTENSIONS, VIDEO_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
   path, fs, crypto, getConfigPath, readSavedConfig, getProjectPath, dialog, mainWindow, shell, requestConfirmation = presentation => requestAppConfirmation(mainWindow?.webContents, presentation),
+  getComponentDataRoot = null,
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail, getBoundProject = null, projectVirtualPaths = null, resolveComponentContentBinding = null,
   replaceJson = replaceJsonAtomic, readConfig = null, mutateConfig = null, now = Date.now, adoptionInteractiveBudgetMs = 25, adoptionFaultInjector = () => undefined,
 }) => {
@@ -438,11 +439,22 @@ const registerComponentProjectCapabilities = ({
   });
 
   broker.register('project.input.tokens', async (payload, context, descriptor) => {
-    if (payload.action !== 'materialize') throw hostError(CODES.INVALID_REQUEST, 'Unknown input token action');
-    const source = await consumeInput(payload.token, descriptor, context);
-    const stat = await fs.promises.stat(source);
-    const grant = inputGrants.get(String(payload.token || ''));
-    return { inputId: path.basename(path.dirname(source)), privatePath: source, byteLength: stat.size, expiresAt: grant?.expiresAt || Date.now() + INPUT_TOKEN_TTL_MS };
+    const materialize = async token => {
+      const source = await consumeInput(token, descriptor, context);
+      const stat = await fs.promises.stat(source);
+      const grant = inputGrants.get(String(token || ''));
+      return { inputId: path.basename(path.dirname(source)), privatePath: source, byteLength: stat.size, expiresAt: grant?.expiresAt || Date.now() + INPUT_TOKEN_TTL_MS };
+    };
+    if (payload.action === 'materialize') return materialize(payload.token);
+    if (payload.action === 'materializeBatch') {
+      const tokens = Array.isArray(payload.tokens) ? payload.tokens.map(String) : [];
+      if (!tokens.length || tokens.length > 256 || new Set(tokens).size !== tokens.length) throw hostError(CODES.INVALID_REQUEST, 'Input token batch must contain 1-256 unique tokens');
+      const items = [];
+      try { for (const token of tokens) items.push(await materialize(token)); }
+      catch (error) { for (const item of items) await fs.promises.rm(path.dirname(item.privatePath), { recursive: true, force: true }).catch(() => undefined); throw error; }
+      return { items };
+    }
+    throw hostError(CODES.INVALID_REQUEST, 'Unknown input token action');
   });
 
   broker.register('component.storage', async (payload, context, descriptor) => {
@@ -1058,7 +1070,29 @@ const registerComponentProjectCapabilities = ({
   });
 
   broker.register('dialogs', async (payload, context, descriptor) => {
-    if (context?.surface === 'application.settings' && !['confirm', 'openComponentDirectory'].includes(payload.kind)) throw hostError(CODES.PERMISSION_DENIED, 'Only confirmation and component-directory dialogs are available on the application settings surface');
+    if (context?.surface === 'application.settings' && !['confirm', 'openComponentDirectory', 'openComponentDataDirectory'].includes(payload.kind)) throw hostError(CODES.PERMISSION_DENIED, 'Only confirmation and component-directory dialogs are available on the application settings surface');
+    if (payload.kind === 'openComponentDataDirectory') {
+      if (typeof getComponentDataRoot !== 'function') throw hostError(CODES.NOT_FOUND, 'Component data directory is unavailable');
+      const relativePath = assertRelativePath(path, payload.relativePath, 'relativePath');
+      const dataRoot = path.resolve(String(getComponentDataRoot(descriptor.componentId) || ''));
+      await fs.promises.mkdir(dataRoot, { recursive: true });
+      const rootStat = await fs.promises.lstat(dataRoot).catch(() => null);
+      if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) throw hostError(CODES.NOT_FOUND, 'Component data directory is unavailable');
+      let target = dataRoot;
+      for (const part of relativePath.split('/')) {
+        target = path.resolve(target, part);
+        if (!inside(path, dataRoot, target)) throw hostError(CODES.INVALID_REQUEST, 'Component data directory path escapes its component');
+        const existing = await fs.promises.lstat(target).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+        if (!existing) await fs.promises.mkdir(target);
+        const stat = existing || await fs.promises.lstat(target);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Component data directory path is unsafe');
+      }
+      const [realRoot, realTarget] = await Promise.all([fs.promises.realpath(dataRoot), fs.promises.realpath(target)]);
+      if (!inside(path, realRoot, realTarget)) throw hostError(CODES.PERMISSION_DENIED, 'Component data directory path is unsafe');
+      const error = await shell.openPath(realTarget);
+      if (error) throw hostError(CODES.INTERNAL, String(error));
+      return { opened: true, componentDataDirectory: { relativePath } };
+    }
     if (payload.kind === 'openComponentDirectory') {
       const relativePath = assertRelativePath(path, payload.relativePath, 'relativePath');
       if (relativePath.includes('/')) throw hostError(CODES.INVALID_REQUEST, 'Component directory must be a direct child');

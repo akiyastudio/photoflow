@@ -69,7 +69,7 @@ main:has(> div > .workflow-board-view) > div { width: 100%; height: auto; min-he
 .workflow-person-summary { min-width: 0; min-height: 9.5rem; align-content: flex-start; align-items: flex-start; justify-content: flex-start; flex-wrap: wrap; border-right: 1px solid var(--pf-border-subtle); border-bottom-width: 0; padding: var(--pf-space-3); }
 .workflow-person-summary .dialog-primary, .workflow-person-summary .dialog-secondary { flex-basis: auto; margin-left: 0; min-height: var(--pf-control-sm); padding: 0 var(--pf-space-2); font-size: .68rem; }
 .workflow-task-strip { display: flex; min-width: 0; gap: var(--pf-space-3); overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; padding: var(--pf-space-3); scrollbar-width: thin; }
-.workflow-task-card { display: grid; width: 220px; flex: none; grid-template-columns: 74px minmax(0, 1fr); gap: var(--pf-space-2); align-content: start; contain: paint; overflow: hidden; border: 1px solid var(--pf-border-subtle); border-radius: var(--pf-radius-sm); background: var(--pf-surface); }
+.workflow-task-card { display: grid; width: 220px; flex: none; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--pf-space-2); align-content: start; contain: paint; overflow: hidden; border: 1px solid var(--pf-border-subtle); border-radius: var(--pf-radius-sm); background: var(--pf-surface); }
 .workflow-task-card > .workflow-task-action { min-width: 0; height: var(--pf-control-sm); gap: var(--pf-space-1); padding: 0 var(--pf-space-2); border-radius: var(--pf-radius-sm); font-size: .7rem; line-height: 1; white-space: nowrap; }
 .workflow-task-thumbnail, .workflow-task-card > .min-w-0 { grid-column: 1 / -1; }
 .workflow-task-thumbnail { width: 100%; height: 150px; overflow: hidden; background: #020617; }

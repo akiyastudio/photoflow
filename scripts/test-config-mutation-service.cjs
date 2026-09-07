@@ -196,5 +196,18 @@ const service = createConfigMutationService({ fs, crypto, getConfigPath: () => c
   retryEvents.emit('before-quit', { preventDefault() {} });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(retryState(), 'ready'); assert.equal(retryQuitCalls, 1, 'a failed stop must allow a second quit attempt to succeed');
+
+  const forcedEvents = new EventEmitter(); let forcedExitCalls = 0; let forcedFailureCalls = 0;
+  const forcedApp = { on: (...args) => forcedEvents.on(...args), quit: () => assert.fail('forced quit must bypass before-quit'), exit: code => { assert.equal(code, 0); forcedExitCalls += 1; } };
+  const forcedState = registerConfigDrainBeforeQuit({
+    app: forcedApp,
+    getConfigMutationService: () => service,
+    beforeDrain: () => { throw Object.assign(new Error('stuck cleanup'), { code: 'APP_QUIT_BUSY' }); },
+    onQuitFailed: () => { forcedFailureCalls += 1; return true; },
+  });
+  forcedEvents.emit('before-quit', { preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(forcedFailureCalls, 1); assert.equal(forcedExitCalls, 1);
+  assert.equal(forcedState(), 'ready', 'an accepted quit failure becomes terminal instead of returning to idle for another click');
   console.log('Config mutation concurrency tests passed');
 })().finally(() => fs.rmSync(root, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });

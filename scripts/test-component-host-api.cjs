@@ -25,6 +25,7 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-'));
 const workspaceRoot = path.join(sandbox, 'workspace');
 const projectRoot = path.join(workspaceRoot, 'active', 'Project');
 const dataRoot = path.join(workspaceRoot, '.data');
+const componentDataDirectoryRoot = path.join(sandbox, 'component-data', 'fixture-component');
 const imagePath = path.join(projectRoot, 'images', 'one.jpg');
 const externalRoot = path.join(sandbox, 'managed-external');
 const externalImagePath = path.join(externalRoot, 'outside.jpg');
@@ -189,7 +190,7 @@ invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api.schema.json'), 'utf8'));
 const schemaMethods = Object.values(capabilitySchema.$defs).map(value => value?.properties?.method?.const).filter(Boolean).sort();
 assert.deepEqual(schemaMethods, [...HOST_CAPABILITIES].sort(), 'machine-readable schema must discriminate every supported capability method');
-const dialogResults = capabilitySchema.$defs.dialogs.properties.result.oneOf; assert.equal(dialogResults.length, 4); const selectionResult = dialogResults.find(item => item.required?.includes('inputs')); assert.equal(selectionResult.additionalProperties, false); assert.equal(selectionResult.properties.inputs.maxItems, 2000); assert.equal(selectionResult.properties.inputs.items.additionalProperties, false); assert.equal(selectionResult.properties.truncated.type, 'boolean', 'dialogs schema and SDK expose the bounded directory truncation flag');
+const dialogResults = capabilitySchema.$defs.dialogs.properties.result.oneOf; assert.equal(dialogResults.length, 5); const selectionResult = dialogResults.find(item => item.required?.includes('inputs')); assert.equal(selectionResult.additionalProperties, false); assert.equal(selectionResult.properties.inputs.maxItems, 2000); assert.equal(selectionResult.properties.inputs.items.additionalProperties, false); assert.equal(selectionResult.properties.truncated.type, 'boolean', 'dialogs schema and SDK expose the bounded directory truncation flag');
 const runtimeSources = [
   'electron/services/component-project-capabilities.cjs',
   'electron/services/component-project-read-capabilities.cjs',
@@ -329,6 +330,7 @@ const registrationOptions = overrides => ({
   resolveProjectEntry: (_workspace, _status, _name, relative) => projectVirtualPaths.resolve(projectRoot, relative, { externalRootMode: 'target' }).physicalPath,
   versionService, IMAGE_EXTENSIONS: new Set(['.jpg']), VIDEO_EXTENSIONS: new Set(['.mp4']), RAW_EXTENSIONS: new Set(['.cr3']),
   path, fs, crypto, getConfigPath: () => configPath, readSavedConfig: () => config,
+  getComponentDataRoot: () => componentDataDirectoryRoot,
   readConfig: async () => config,
   mutateConfig: async mutator => { config = await mutator(config); await atomicJson({ filePath: configPath, value: config }); return config; },
   getProjectPath: () => projectRoot,
@@ -384,6 +386,11 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const materialized = await broker.invoke(descriptor, 'project.input.tokens', { action: 'materialize', token: freshInputVariant.input.token }, context);
   assert(fs.existsSync(materialized.privatePath));
   await assert.rejects(broker.invoke(descriptor, 'project.input.tokens', { action: 'materialize', token: freshInputVariant.input.token }, context), error => error.code === 'COMPONENT_HOST_TOKEN_EXPIRED', 'input grants are single-use');
+  const batchVariantA = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-1', versionId: 'version-1', variants: ['original'] }, context);
+  const batchVariantB = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-external', versionId: 'version-external', variants: ['original'] }, context);
+  const materializedBatch = await broker.invoke(descriptor, 'project.input.tokens', { action: 'materializeBatch', tokens: [batchVariantA.input.token, batchVariantB.input.token] }, context);
+  assert.equal(materializedBatch.items.length, 2, 'bounded input token batches materialize multiple return images in one Host capability call');
+  assert(materializedBatch.items.every(item => fs.existsSync(item.privatePath)));
 
   const legacyDataRoot = path.join(dataRoot, descriptor.componentId); const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
   fs.mkdirSync(legacyDataRoot, { recursive: true }); fs.mkdirSync(path.dirname(legacyDatabasePath), { recursive: true }); fs.writeFileSync(path.join(legacyDataRoot, 'legacy-private.bin'), 'legacy-private'); fs.writeFileSync(legacyDatabasePath, 'legacy-database');
@@ -582,6 +589,10 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal(openedPaths.at(-1), path.join(manifestRoot, 'models'), 'application settings may open a created directory only inside its own installed component');
   await assert.rejects(broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDirectory', relativePath: '../escape' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'component-directory dialog rejects escapes');
   await assert.rejects(broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDirectory', relativePath: 'nested/child' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'component-directory dialog cannot traverse a linked parent while creating a directory');
+  const openedComponentDataDirectory = await broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDataDirectory', relativePath: 'advanced/packages' }, applicationSettingsContext);
+  assert.equal(openedComponentDataDirectory.componentDataDirectory.relativePath, 'advanced/packages');
+  assert.equal(openedPaths.at(-1), path.join(componentDataDirectoryRoot, 'advanced', 'packages'), 'application settings may open a nested directory only inside its Host-controlled component data root');
+  await assert.rejects(broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDataDirectory', relativePath: '../escape' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'component-data directory dialog rejects escapes');
   await assert.rejects(broker.invoke(descriptor, 'dialogs', { kind: 'openFiles' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'application settings surface cannot mint project input tokens');
   assert.throws(() => broker.invoke(descriptor, 'project.media.page', { pageSize: 10 }, applicationSettingsContext), /not available on the application.settings surface/, 'project capabilities fail closed on an application surface');
   assert.throws(() => broker.invoke(descriptor, 'component.storage', {}, applicationSettingsContext), /not available on the application.settings surface/, 'project-scoped component storage fails closed on an application surface');

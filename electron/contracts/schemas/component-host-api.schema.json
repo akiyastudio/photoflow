@@ -809,46 +809,96 @@
           "const": "project.input.tokens"
         },
         "payload": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "action",
-            "token"
-          ],
-          "properties": {
-            "action": {
-              "const": "materialize"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "action",
+                "token"
+              ],
+              "properties": {
+                "action": {
+                  "const": "materialize"
+                },
+                "token": {
+                  "type": "string"
+                }
+              }
             },
-            "token": {
-              "type": "string"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "action",
+                "tokens"
+              ],
+              "properties": {
+                "action": {
+                  "const": "materializeBatch"
+                },
+                "tokens": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 256,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
             }
-          }
+          ]
         },
         "result": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "inputId",
-            "privatePath",
-            "byteLength",
-            "expiresAt"
-          ],
-          "properties": {
-            "inputId": {
-              "type": "string"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/materializedInput"
             },
-            "privatePath": {
-              "type": "string"
-            },
-            "byteLength": {
-              "type": "number",
-              "minimum": 0
-            },
-            "expiresAt": {
-              "type": "number",
-              "minimum": 0
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "items"
+              ],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 256,
+                  "items": {
+                    "$ref": "#/$defs/materializedInput"
+                  }
+                }
+              }
             }
-          }
+          ]
+        }
+      }
+    },
+    "materializedInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputId",
+        "privatePath",
+        "byteLength",
+        "expiresAt"
+      ],
+      "properties": {
+        "inputId": {
+          "type": "string"
+        },
+        "privatePath": {
+          "type": "string"
+        },
+        "byteLength": {
+          "type": "number",
+          "minimum": 0
+        },
+        "expiresAt": {
+          "type": "number",
+          "minimum": 0
         }
       }
     },
@@ -1761,6 +1811,22 @@
               "additionalProperties": false,
               "required": [
                 "kind",
+                "relativePath"
+              ],
+              "properties": {
+                "kind": {
+                  "const": "openComponentDataDirectory"
+                },
+                "relativePath": {
+                  "$ref": "#/$defs/relativePath"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
                 "commitId",
                 "artifactId"
               ],
@@ -1862,6 +1928,31 @@
                   "const": true
                 },
                 "componentDirectory": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "relativePath"
+                  ],
+                  "properties": {
+                    "relativePath": {
+                      "$ref": "#/$defs/relativePath"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "opened",
+                "componentDataDirectory"
+              ],
+              "properties": {
+                "opened": {
+                  "const": true
+                },
+                "componentDataDirectory": {
                   "type": "object",
                   "additionalProperties": false,
                   "required": [
