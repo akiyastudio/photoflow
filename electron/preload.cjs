@@ -53,6 +53,21 @@ const omitUndefined = value => Object.fromEntries(Object.entries(value).filter((
 
 contextBridge.exposeInMainWorld('electronAPI', {
   apiContractVersion: 1,
+  onAppConfirmation: callback => {
+    const listener = async (_event, presentation) => {
+      if (!presentation || typeof presentation.requestId !== 'string') return;
+      let accepted = false;
+      try { accepted = await callback(presentation) === true; } catch {}
+      ipcRenderer.send('app-dialog:confirmation-response', { requestId: presentation.requestId, accepted });
+    };
+    ipcRenderer.on('app-dialog:confirmation', listener);
+    return () => ipcRenderer.removeListener('app-dialog:confirmation', listener);
+  },
+  onAppConfirmationClosed: callback => {
+    const listener = (_event, requestId) => callback(requestId);
+    ipcRenderer.on('app-dialog:confirmation-closed', listener);
+    return () => ipcRenderer.removeListener('app-dialog:confirmation-closed', listener);
+  },
   runScript: (scriptName, args, requestId, presentation) => {
     const invocation = validatePythonInvocation(scriptName, args, requestId);
     const feature = invocation.scriptName.replace(/\.py$/i, '').slice(0, 48);

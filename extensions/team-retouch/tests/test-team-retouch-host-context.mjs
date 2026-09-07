@@ -24,6 +24,10 @@ let loads=0; const coordinator=createHistoryContextLoadCoordinator(async () => {
 await coordinator.request(context); await coordinator.request({ ...context }); assert.equal(loads, 1);
 await coordinator.request(context, { force: true }); assert.equal(loads, 2);
 assert.match(readableComponentRpcError('team.project.get.v1', new Error('SQLITE_BUSY: database is locked')), /正在整理/);
+assert.match(readableComponentRpcError('team.operation.run.v1', new Error('Component RPC method is not allowed on the application settings surface: team.operation.run.v1')), /缺少操作权限声明/);
+assert.match(readableComponentRpcError('team.operation.run.v1', new Error('WSL 2 is not ready.')), /WSL 2/);
+assert.match(readableComponentRpcError('team.operation.run.v1', new Error('The NVIDIA GPU capability could not be verified.')), /NVIDIA 驱动查询失败/);
+assert.match(readableComponentRpcError('team.operation.run.v1', new Error('ADVANCED_PACKAGE_MISSING: package absent')), /设置页所示目录/);
 const entry=fs.readFileSync(new URL('../renderer/src/legacy-main.tsx', import.meta.url),'utf8');
 assert(entry.includes("teamProjectRpc<Json>('team.project.get.v1')") && entry.includes("teamProjectRpc<Json>('team.project.register.v1'"));
 assert.equal(/migrate-step|calibrat|HostStorageAdoption|legacyMigration/.test(entry), false);

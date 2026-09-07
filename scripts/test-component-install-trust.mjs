@@ -101,30 +101,29 @@ assert.equal(await confirmation('unsigned'), true, 'the explicit dangerous actio
 assert.equal(await confirmation('invalid'), true, 'source labels do not control consent; package validation is separate');
 
 let backgroundPrompts = 0;
-const promptDialog = { showMessageBox: async (_window, options) => {
+const promptDialog = { confirm: async options => {
   backgroundPrompts += 1;
-  assert.equal(options.defaultId, 1);
-  assert.equal(options.cancelId, 1);
-  assert.deepEqual(options.buttons, ['关闭后台进程并继续禁用', '取消']);
-  return { response: 1 };
+  assert.equal(options.cancelDefault, true);
+  assert.equal(options.confirmLabel, '关闭后台进程并继续禁用');
+  return false;
 } };
 const inactiveSupervisor = { hasWhere: () => false, hasUnconfirmedOwner: () => false };
-assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: inactiveSupervisor, lifecycleCoordinator: { hasWork: () => true }, dialog: promptDialog, mainWindow: {} }), true);
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: inactiveSupervisor, lifecycleCoordinator: { hasWork: () => true }, requestConfirmation: options => promptDialog.confirm(options), mainWindow: {} }), true);
 assert.equal(backgroundPrompts, 0, 'ordinary lifecycle work without a child process means no prompt');
 const activeSupervisor = { hasWhere: () => true };
-assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'disable', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), false);
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'disable', processSupervisor: activeSupervisor, requestConfirmation: options => promptDialog.confirm(options), mainWindow: {} }), false);
 assert.equal(backgroundPrompts, 1);
-promptDialog.showMessageBox = async (_window, options) => {
-  assert.deepEqual(options.buttons, ['关闭后台进程并继续安装或更新', '取消']);
-  return { response: 0 };
+promptDialog.confirm = async options => {
+  assert.equal(options.confirmLabel, '关闭后台进程并继续安装或更新');
+  return true;
 };
-assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
-promptDialog.showMessageBox = async (_window, options) => {
-  assert.deepEqual(options.buttons, ['关闭后台进程并继续退出', '取消']);
-  return { response: 0 };
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: activeSupervisor, requestConfirmation: options => promptDialog.confirm(options), mainWindow: {} }), true);
+promptDialog.confirm = async options => {
+  assert.equal(options.confirmLabel, '关闭后台进程并继续卸载');
+  return true;
 };
-assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
-assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: { hasWhere: () => false, hasUnconfirmedOwner: () => true }, dialog: promptDialog, mainWindow: {} }), true);
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: activeSupervisor, requestConfirmation: options => promptDialog.confirm(options), mainWindow: {} }), true);
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: { hasWhere: () => false, hasUnconfirmedOwner: () => true }, requestConfirmation: options => promptDialog.confirm(options), mainWindow: {} }), true);
 const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
 assert.match(preloadSource, /installComponent: async \(request, confirm\)[\s\S]*ipcRenderer\.invoke\('components-install', request\)/);

@@ -1104,6 +1104,8 @@ export interface IElectronAPI {
   closeWindow: () => void;
   getApplicationQuitState: () => Promise<ApplicationQuitState>;
   respondToApplicationQuit: (requestId: string, confirmed: boolean, error?: string) => Promise<{ accepted: boolean }>;
+  onAppConfirmation: (callback: (options: { requestId: string; title: string; message: string; detail?: string; confirmLabel?: string; cancelDefault?: boolean }) => Promise<boolean>) => () => void;
+  onAppConfirmationClosed: (callback: (requestId: string) => void) => () => void;
   onApplicationQuitState: (callback: (state: ApplicationQuitState) => void) => () => void;
   isWindowMaximized: () => Promise<boolean>;
   setWindowFullscreen: (enabled: boolean) => Promise<boolean>;

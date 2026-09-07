@@ -10,6 +10,7 @@ const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, clea
 const { componentInstallTimeoutMs } = require('../component-zip64.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 const { validateComponentPackageInspection } = require('../component-registry.cjs');
+const { requestAppConfirmation } = require('../services/app-dialog-confirmation.cjs');
 const { requestComponentInstallConfirmation } = require('../services/component-install-confirmation.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
@@ -269,7 +270,7 @@ const confirmComponentPackageInstall = async ({ componentId, componentName = com
     detail: '组件可访问或修改你的文件、连接网络并运行程序。请确认后继续安装。',
   }) === true;
 };
-const confirmComponentBackgroundStop = async ({ componentId, componentName = componentId, action, processSupervisor, dialog, mainWindow }) => {
+const confirmComponentBackgroundStop = async ({ componentId, componentName = componentId, action, processSupervisor, mainWindow, requestConfirmation = presentation => requestAppConfirmation(mainWindow?.webContents, presentation) }) => {
   const active = processSupervisor?.hasComponentOwnerProcesses?.(componentId) === true
     || processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId) === true
     || processSupervisor?.hasUnconfirmedOwner?.(componentId) === true;
@@ -277,15 +278,14 @@ const confirmComponentBackgroundStop = async ({ componentId, componentName = com
   const messages = {
     disable: { title: '插件仍在后台运行', message: '禁用此插件需要先关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续禁用' },
     install: { title: '更新需要关闭插件后台进程', message: '安装或更新此插件前，需要关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续安装或更新' },
-    uninstall: { title: '插件仍在后台运行', message: `“${componentName}”仍有后台进程。`, detail: '继续卸载需要先关闭该插件的全部后台进程。', continueLabel: '关闭后台进程并继续退出' },
+    uninstall: { title: '插件仍在后台运行', message: `“${componentName}”仍有后台进程。`, detail: '继续卸载需要先关闭该插件的全部后台进程。', continueLabel: '关闭后台进程并继续卸载' },
   };
   const presentation = messages[action];
   if (!presentation) throw new Error('组件后台停止确认动作无效');
-  const response = await dialog.showMessageBox(mainWindow, {
-    type: 'warning', title: presentation.title, message: presentation.message, detail: presentation.detail,
-    buttons: [presentation.continueLabel, '取消'], defaultId: 1, cancelId: 1, noLink: true,
-  });
-  return response.response === 0;
+  return await requestConfirmation({
+    title: presentation.title, message: presentation.message, detail: presentation.detail,
+    confirmLabel: presentation.continueLabel, cancelDefault: true,
+  }) === true;
 };
 const snapshotComponentTrust = (componentId, manifest) => {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('组件快照清单无效');
@@ -509,6 +509,9 @@ const registerSystemIpc = context => {
       }
     }
     const components = reusableIntegrity ? mergeCachedComponentStatuses(listedComponents) : await pluginService.listWithSizes();
+    // An install/uninstall may have completed while this scan was in flight.
+    // Never publish its pre-mutation catalog over the fresh list.
+    if (refreshGeneration !== componentStatusGeneration) return { count: 0, stale: true };
     const probeTimestamps = nextComponentProbeTimestamps({
       attempted: policy.shouldProbeRuntime,
       succeeded: true,
@@ -526,7 +529,7 @@ const registerSystemIpc = context => {
       writeLog('warn', 'Unable to persist component status cache', { error: error.message || String(error) });
     });
     task?.report(100, '组件状态已刷新');
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('components-status-changed', {
+    if (refreshGeneration === componentStatusGeneration && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('components-status-changed', {
       success: true,
       components,
       installPath: pluginService.installRoot,
@@ -1134,7 +1137,7 @@ const registerSystemIpc = context => {
       if (!await confirmComponentBackgroundStop({ componentId: recoveryComponentId, componentName: promptComponent?.name || recoveryComponentId, action: 'uninstall', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
       const recoveredTransactions = await recoverPendingComponentTransaction(recoveryComponentId);
       const recoveredUninstall = recoveredTransactions.find(result => result.kind === 'uninstall' && result.status === 'committed');
-      if (recoveredUninstall) return { success: true, recovered: true, dataCleared: recoveredUninstall.clearUserData, cleanupWarnings: [], operationId: recoveredUninstall.operationId };
+      if (recoveredUninstall) { invalidateComponentStatus(); return { success: true, recovered: true, dataCleared: recoveredUninstall.clearUserData, cleanupWarnings: [], operationId: recoveredUninstall.operationId }; }
       const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
       if (component.source !== 'user') throw new Error('此组件不在用户组件目录中，不能通过组件管理卸载');
@@ -1166,6 +1169,7 @@ const registerSystemIpc = context => {
       return { success: true, dataCleared: clearUserData, cleanupWarnings: [], operationId: result.operationId };
       } finally { capabilityBarrier.release(); }
     } catch (error) {
+      writeLog('error', 'Component uninstall failed', { componentId, clearUserData: options?.clearUserData === true, code: error.code, error: error.message || String(error), stack: error.stack, operationId: error?.journal?.operationId || error?.transactionRecord?.operationId });
       return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId || error?.transactionRecord?.operationId, cleanupPending: Boolean(error?.journal) || error?.cleanupPending === true, outcomeUnknown: Boolean(error?.outcomeUnknown) };
     } finally { transitionLease?.release?.(); }
   });

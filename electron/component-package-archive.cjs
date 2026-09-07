@@ -7,6 +7,7 @@ const zlib = require('node:zlib');
 const { uint64, zip64Extra, directoryLocation } = require('./component-zip64.cjs');
 
 const MAX_ENTRIES = 10_000;
+const IO_CHUNK_BYTES = 1024 * 1024;
 const MAX_DIRECTORY_BYTES = 32 * 1024 * 1024;
 // No product-size ceiling: ZIP64 files are bounded by exact integer arithmetic,
 // streaming verification and reserved disk space, not an arbitrary MiB limit.
@@ -140,7 +141,7 @@ const snapshotComponentArchive = async (sourcePath, targetPath, options = {}) =>
     targetHandle = await fs.promises.open(targetPath, fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
     const hash = crypto.createHash('sha256');
     const digestStream = new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); hash.update(chunk); callback(null, chunk); } catch (error) { callback(error); } } });
-    await pipeline(handle.createReadStream({ autoClose: false }), digestStream, fs.createWriteStream(null, { fd: targetHandle.fd, autoClose: false }), operation.signal ? { signal: operation.signal } : {});
+    await pipeline(handle.createReadStream({ autoClose: false, highWaterMark: IO_CHUNK_BYTES }), digestStream, fs.createWriteStream(null, { fd: targetHandle.fd, autoClose: false, highWaterMark: IO_CHUNK_BYTES }), operation.signal ? { signal: operation.signal } : {});
     await targetHandle.sync();
     if (!sameFileIdentity(identity, fileIdentity(await handle.stat()))) throw new Error('组件包在快照期间被修改');
     const afterPath = await fs.promises.lstat(resolvedSource);
@@ -148,7 +149,7 @@ const snapshotComponentArchive = async (sourcePath, targetPath, options = {}) =>
     const sourceSha256 = hash.digest('hex');
     const snapshotIdentity = fileIdentity(await targetHandle.stat());
     const outputHash = crypto.createHash('sha256');
-    await pipeline(targetHandle.createReadStream({ autoClose: false, start: 0, end: snapshotIdentity.size - 1 }), new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); outputHash.update(chunk); callback(); } catch (error) { callback(error); } } }), operation.signal ? { signal: operation.signal } : {});
+    await pipeline(targetHandle.createReadStream({ autoClose: false, highWaterMark: IO_CHUNK_BYTES, start: 0, end: snapshotIdentity.size - 1 }), new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); outputHash.update(chunk); callback(); } catch (error) { callback(error); } } }), operation.signal ? { signal: operation.signal } : {});
     if (!sameFileIdentity(snapshotIdentity, fileIdentity(await targetHandle.stat())) || outputHash.digest('hex') !== sourceSha256) throw new Error('组件包快照输出内容与源文件不一致');
     const targetPathStat = await fs.promises.lstat(targetPath);
     if (!targetPathStat.isFile() || targetPathStat.isSymbolicLink() || snapshotIdentity.size !== identity.size || !sameFileIdentity(snapshotIdentity, fileIdentity(targetPathStat))) throw new Error('组件包快照输出在写入期间被替换或截断');
@@ -403,7 +404,7 @@ const extractEntry = async (archiveHandle, inspection, entry, target, actualBudg
   assertOperationActive(operation);
   if (entry.isDirectory) { await assertSafeExtractionParents(inspection.targetRoot, path.join(target, '.directory')); return null; }
   const parentIdentities = await assertSafeExtractionParents(inspection.targetRoot, target);
-  const source = entry.compressedSize ? fs.createReadStream(null, { fd: archiveHandle.fd, autoClose: false, start: entry.dataStart, end: entry.dataStart + entry.compressedSize - 1 }) : Readable.from([]);
+  const source = entry.compressedSize ? fs.createReadStream(null, { fd: archiveHandle.fd, autoClose: false, highWaterMark: IO_CHUNK_BYTES, start: entry.dataStart, end: entry.dataStart + entry.compressedSize - 1 }) : Readable.from([]);
   const digest = crypto.createHash('sha256');
   let bytes = 0;
   let crc = 0xffffffff;
@@ -495,7 +496,7 @@ const fileDigest = async (filePath, expectedIdentity, operation = {}) => {
   const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
   try {
     if (!sameFileIdentity(expectedIdentity, fileIdentity(await handle.stat()))) throw new Error('组件文件在哈希前被替换');
-    await pipeline(handle.createReadStream({ autoClose: false }), new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); hash.update(chunk); callback(); } catch (error) { callback(error); } } }), operation.signal ? { signal: operation.signal } : {});
+    await pipeline(handle.createReadStream({ autoClose: false, highWaterMark: IO_CHUNK_BYTES }), new Transform({ transform(chunk, _encoding, callback) { try { assertOperationActive(operation); hash.update(chunk); callback(); } catch (error) { callback(error); } } }), operation.signal ? { signal: operation.signal } : {});
     if (!sameFileIdentity(expectedIdentity, fileIdentity(await handle.stat()))) throw new Error('组件文件在哈希期间发生变化');
     return hash.digest('hex');
   } finally { await handle.close(); }

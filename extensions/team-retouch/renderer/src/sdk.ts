@@ -64,6 +64,15 @@ const allowedMethods = new Set([
 
 export const readableComponentRpcError = (method: string, error: unknown) => {
   const raw = error instanceof Error ? error.message : String(error || '');
+  if (/ADVANCED_PACKAGE_MISSING/i.test(raw)) return '未找到高级环境包，请将独立环境 ZIP 放到设置页所示目录，保留原文件名后重试。';
+  if (/NVIDIA GPU capability could not be verified|Failed to initialize NVML/i.test(raw)) return 'NVIDIA 驱动查询失败，请确认显卡驱动正常；若命令行查询正常，请更新团片插件后重试。';
+  if (/CUDA-capable NVIDIA driver is required/i.test(raw)) return '未找到 NVIDIA 驱动查询工具，请先安装 NVIDIA 显卡驱动。';
+  if (/Insufficient disk space/i.test(raw)) return '高级环境安装盘可用空间不足，请清理空间后重试。';
+  if (/foreign or incomplete advanced ownership state exists/i.test(raw)) return '检测到已有或未完成安装的同名高级环境，不能直接覆盖。请先核对旧环境归属和安装状态。';
+  if (/RPC method is not allowed on the application settings surface/i.test(raw)) return '团片插件的设置页面缺少操作权限声明，请安装修复后的插件；重启无法解决此问题。';
+  if (/Advanced runtime package selection cancelled/i.test(raw)) return '已取消选择高级环境包。';
+  if (/WSL 2 is not (installed|ready)/i.test(raw)) return 'WSL 2 尚未安装或未就绪，请先启用 WSL 2 后重试。';
+  if (/does not match.*(SHA256|manifest)|package version does not match|runtime API version does not match/i.test(raw)) return '高级环境包校验不通过，请选择与当前插件匹配的独立高级环境 ZIP。';
   if (/timed out|timeout|COMPONENT_HOST_TIMEOUT/i.test(raw)) return method === 'team.project.get.v1'
     ? '团片历史读取超时，请重试；若持续发生，请重启应用后再打开项目。'
     : '团片服务响应超时，请稍后重试；当前操作会从上次安全进度继续。';

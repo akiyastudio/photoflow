@@ -22,6 +22,8 @@ type ChoiceDialogOptions = {
 
 type ConfirmDialogOptions = {
   priority?: boolean;
+  requestId?: string;
+  cancelDefault?: boolean;
   title: string;
   message: string;
   detail?: string;
@@ -92,6 +94,18 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
   }), [enqueue]);
 
   useEffect(() => {
+    const unsubscribe = window.electronAPI?.onAppConfirmation?.(options => api.confirm(options));
+    const close = window.electronAPI?.onAppConfirmationClosed?.(requestId => {
+      setQueue(current => {
+        const cancelled = current.filter(item => 'requestId' in item.options && item.options.requestId === requestId);
+        cancelled.forEach(item => item.resolve(false));
+        return current.filter(item => !cancelled.includes(item));
+      });
+    });
+    return () => { unsubscribe?.(); close?.(); };
+  }, [api]);
+
+  useEffect(() => {
     if (active?.kind === 'prompt') setPromptValue((active.options as PromptDialogOptions).defaultValue || '');
   }, [active?.id, active?.kind]);
 
@@ -134,9 +148,9 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
   const promptOptions = active?.kind === 'prompt' ? options as PromptDialogOptions : null;
   const choiceOptions = active?.kind === 'choice' ? options as ChoiceDialogOptions : null;
   const confirmClass = (confirmOptions?.tone || alertOptions?.tone) === 'danger'
-    ? 'rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-red-500'
+    ? 'dialog-primary !bg-red-600 hover:!bg-red-500'
     : 'dialog-primary';
-  const dangerousConfirm = confirmOptions?.tone === 'danger';
+  const dangerousConfirm = confirmOptions?.tone === 'danger' || confirmOptions?.cancelDefault === true;
   const dangerousDefaultChoice = choiceOptions?.choices.find(choice => choice.value === choiceOptions.defaultValue)?.tone === 'danger';
   const trapFocus = (event: React.KeyboardEvent<HTMLFormElement>) => {
     if (event.key !== 'Tab') return;
@@ -166,7 +180,7 @@ const AppDialogProvider = ({ children }: { children: ReactNode }) => {
             ? <button type="button" data-default-focus={!dangerousConfirm} onClick={() => finish(true)} className={confirmClass}>{confirmOptions.confirmLabel || '确认'}</button>
             : promptOptions
             ? <button type="submit" disabled={!promptValue.trim()} className="dialog-primary">{promptOptions.confirmLabel || '确认'}</button>
-            : choiceOptions?.choices.map(choice => <button key={choice.value} type="button" data-default-focus={choice.value === choiceOptions.defaultValue && choice.tone !== 'danger'} onClick={() => finish(choice.value)} className={choice.tone === 'danger' ? 'rounded-md bg-red-600 px-3 py-2 text-sm font-bold text-white transition hover:bg-red-500' : 'dialog-primary'}>{choice.label}</button>)}
+            : choiceOptions?.choices.map(choice => <button key={choice.value} type="button" data-default-focus={choice.value === choiceOptions.defaultValue && choice.tone !== 'danger'} onClick={() => finish(choice.value)} className={choice.tone === 'danger' ? 'dialog-primary !bg-red-600 hover:!bg-red-500' : 'dialog-primary'}>{choice.label}</button>)}
         </div>
       </form>
     </div>}

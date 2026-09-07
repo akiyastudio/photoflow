@@ -41,14 +41,14 @@ const fixture = async supplied => {
   const hostCommit = async () => fs.promises.writeFile(hostPath, JSON.stringify({ version: 'new' }));
   const defaultCleanup = (_id, clear) => clear ? ['settings', 'secrets'].map(name => ({ name, run: () => fs.promises.rm(path.join(sandbox, name), { force: true }) })) : [];
   const makeService = ({ fault = async () => undefined, cleanupFault = async () => undefined, trashFault = null, onTrash = async () => undefined, fsImpl = fs, preparationRoot = '', cleanupProvider = defaultCleanup,
-    recoverInstallHostState = hostCommit, captureTreeIdentityOverride = captureComponentTreeIdentity, verifyTreeIdentityOverride = verifyComponentTreeIdentity } = {}) => createComponentTransactionService({
+    requireInstalledForEnablement = false, recoverInstallHostState = hostCommit, captureTreeIdentityOverride = captureComponentTreeIdentity, verifyTreeIdentityOverride = verifyComponentTreeIdentity } = {}) => createComponentTransactionService({
     fs: fsImpl, path, crypto, installRoot, preparationRoot, fault,
     captureTreeIdentity: captureTreeIdentityOverride, verifyTreeIdentity: verifyTreeIdentityOverride,
     cleanupOwnedPath: (receipt, options) => cleanupOwnedComponentPath(receipt, { ...options, fault: cleanupFault, beforeDelete: async () => {
       await options.beforeDelete?.(); await onTrash(receipt);
       if (trashFault?.current) { const error = trashFault.current; trashFault.current = null; throw error; }
     } }),
-    getComponentEnabled: id => enabled.get(id) !== false, setComponentEnabled: (id, value) => enabled.set(id, value), clearComponentEnabledState: id => enabled.delete(id),
+    getComponentEnabled: id => enabled.get(id) !== false, setComponentEnabled: (id, value) => { if (requireInstalledForEnablement && !exists(destination)) throw new Error('组件尚未安装或发现'); return enabled.set(id, value); }, clearComponentEnabledState: id => enabled.delete(id),
     cleanupProvider, recoverInstallHostState, onBlocked: id => blocked.add(id), onUnblocked: id => blocked.delete(id), onWarning: error => warnings.push(error),
   });
   const stage = async value => {
@@ -411,6 +411,21 @@ const recoveryDoesNotCrossActiveUninstall = async () => {
   } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
 };
 
+const uninstallWithRealEnablementContract = async () => {
+  for (const recover of [false, true]) await withFixture(async state => {
+    await writeTree(state.destination, 'installed');
+    const service = state.makeService({ requireInstalledForEnablement: true, fault: recover ? crashOnceAt('uninstall:after-quarantine') : undefined });
+    if (recover) {
+      await assert.rejects(service.uninstall(await state.uninstallArgs(false)), /uninstall:after-quarantine/);
+      const result = await state.makeService({ requireInstalledForEnablement: true }).recover(state.componentId);
+      assert.equal(result[0].status, 'committed');
+    } else await service.uninstall(await state.uninstallArgs(false));
+    assert.equal(exists(state.destination), false);
+    assert.equal(fs.readdirSync(state.installRoot).some(name => name.includes('-uninstall-')), false);
+    assert.equal(exists(state.container), true, 'keep-data uninstall preserves the container');
+  });
+};
+
 (async () => {
   if (process.argv[2] === '--crash-child') {
     const state = await fixture(process.argv[3]);
@@ -418,7 +433,7 @@ const recoveryDoesNotCrossActiveUninstall = async () => {
     await service.install(state.installArgs(await state.stage('new')));
     throw new Error('child crash point was not reached');
   }
-  for (const test of [installCrashMatrix, rollbackCanCrashAgain, uninstallCrashMatrix, partialDeletionAndOrdinaryFailures, corruptionAndOwnership,
+  for (const test of [uninstallWithRealEnablementContract, installCrashMatrix, rollbackCanCrashAgain, uninstallCrashMatrix, partialDeletionAndOrdinaryFailures, corruptionAndOwnership,
     atomicStateAndMetadataFailures, largeReceiptAndSmallState, actualProcessCrash, commitFailuresStayForward, metadataCannotCrossOperations, concurrentRecoveryIsSingleFlight, activeTransactionRejectsRecovery,
     crossScopeRecoveryIsExclusive, fullRecoveryWaitsForActiveInstall, recoveryDoesNotCrossActiveUninstall]) {
     await test(); console.log(`${test.name} passed`);

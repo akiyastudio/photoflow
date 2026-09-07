@@ -36,7 +36,7 @@
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" },
-      { "type": "application.settingsPage", "id": "settings", "label": "团片协作", "title": "团片协作设置", "entry": "ui/settings.html", "rpcMethods": ["team.settings.get.v1", "team.settings.update.v1", "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"] }
+      { "type": "application.settingsPage", "id": "settings", "label": "团片协作", "title": "团片协作设置", "entry": "ui/settings.html", "rpcMethods": ["team.settings.get.v1", "team.settings.update.v1", "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1", "team.operation.run.v1", "team.operation.get.v1"] }
     ],
     "service": {
       "protocolVersion": 1,
@@ -97,9 +97,9 @@
         }
       ],
       "lifecycleActions": {
-        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "576e546767c02125359f7e93864077cea7c5b7aa9306d5ebc777be047507e760" },
-        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "576e546767c02125359f7e93864077cea7c5b7aa9306d5ebc777be047507e760" },
-        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "576e546767c02125359f7e93864077cea7c5b7aa9306d5ebc777be047507e760" },
+        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "c7be1064ea4ea1264d0991e07874d46527b3665fcce0dcfe969d02434769bc3f" },
+        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "c7be1064ea4ea1264d0991e07874d46527b3665fcce0dcfe969d02434769bc3f" },
+        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "c7be1064ea4ea1264d0991e07874d46527b3665fcce0dcfe969d02434769bc3f" },
         "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "afafbf6bdc21cb609f270dc22f0f1d2d11ad806a9aa4af724b03d2a74844ece2" }
       }
     }

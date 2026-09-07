@@ -1,3 +1,4 @@
+const { requestAppConfirmation } = require('./app-dialog-confirmation.cjs');
 const { COMPONENT_HOST_ERROR_CODES: CODES, hostError } = require('../contracts/component-host-errors.cjs');
 const { adoptLegacyStorageV1 } = require('./component-storage-adoption.cjs');
 const { nextComponentRevision, normalizeComponentRevision } = require('./config-mutation-service.cjs');
@@ -150,7 +151,7 @@ const resetComponentHostCapabilityStateForTest = () => {
 const registerComponentProjectCapabilities = ({
   broker, ensureWorkspace, getWorkspaceDataRoot, resolveProjectEntry, versionService,
   IMAGE_EXTENSIONS, VIDEO_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
-  path, fs, crypto, getConfigPath, readSavedConfig, getProjectPath, dialog, mainWindow, shell,
+  path, fs, crypto, getConfigPath, readSavedConfig, getProjectPath, dialog, mainWindow, shell, requestConfirmation = presentation => requestAppConfirmation(mainWindow?.webContents, presentation),
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail, getBoundProject = null, projectVirtualPaths = null, resolveComponentContentBinding = null,
   replaceJson = replaceJsonAtomic, readConfig = null, mutateConfig = null, now = Date.now, adoptionInteractiveBudgetMs = 25, adoptionFaultInjector = () => undefined,
 }) => {
@@ -1099,8 +1100,8 @@ const registerComponentProjectCapabilities = ({
       return { opened: true, outputRef: { commitId: receipt.commitId, artifactId: output.artifactId } };
     }
     if (payload.kind === 'confirm') {
-      const response = await dialog.showMessageBox(mainWindow, { type: 'question', title: String(payload.title || '组件确认').slice(0, 120), message: String(payload.message || '').slice(0, 1000), buttons: ['取消', '继续'], defaultId: 0, cancelId: 0, noLink: true });
-      return { confirmed: response.response === 1 };
+      const confirmed = await requestConfirmation({ title: String(payload.title || '组件确认').slice(0, 120), message: String(payload.message || '').slice(0, 1000), confirmLabel: '继续', cancelDefault: true });
+      return { confirmed: confirmed === true };
     }
     if (!['openFiles', 'openDirectory'].includes(payload.kind)) throw hostError(CODES.INVALID_REQUEST, 'Unknown safe dialog kind');
     const extensions = [...new Set((payload.extensions || []).map(value => String(value).replace(/^\./, '').toLowerCase()).filter(value => /^[a-z0-9]{1,12}$/.test(value)))].slice(0, 64);

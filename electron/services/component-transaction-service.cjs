@@ -405,7 +405,8 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, prep
       } else if (!quarantine && !record.state.cleanup['uninstall-runtime']) throw new Error('卸载源与隔离目录均缺失');
       if (!record.state.cleanup['uninstall-runtime']) await verifyDirectory(receipt.source, receipt.quarantinePath);
       if (record.state.phase === 'prepared') record = await persist(record, { phase: 'quarantined' });
-      await setComponentEnabled(receipt.componentId, false);
+      // Disabled durably before rename. The runtime is no longer discoverable
+      // here, so the public enablement setter cannot be called after quarantine.
       return record;
     } catch (error) { throw attach(error, error.record || record); }
   };

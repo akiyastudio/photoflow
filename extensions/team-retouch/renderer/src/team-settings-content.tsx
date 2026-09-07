@@ -79,9 +79,9 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
       <SettingsRow title="如何安装增强版" description="高级环境单独安装一次；日常更新基础插件后继续使用。" align="start">
         <div className="team-settings-status">
           <ol className="list-decimal space-y-2 pl-5 text-sm">
-            <li>准备单独的团片协作高级环境 ZIP，无需解压，也无需放入主程序的组件目录。完整插件包和 evidence 资料包不能用于此处。</li>
-            <li>点击「检查条件」，在文件选择窗口中选择高级环境 ZIP。检查通过后会记住该文件位置。</li>
-            <li>点击「安装 / 修复」，等待完成，确认状态显示「可用」。也可直接点击「安装 / 修复」选择环境包并安装。</li>
+            <li>将单独的高级环境 ZIP 放入下面的目录，保留原文件名，无需解压。完整插件包和 evidence 资料包不能用于此处。</li>
+            <li>在文件资源管理器地址栏粘贴：<code className="break-all">%LOCALAPPDATA%\PhotoFlow\components\team-retouch\advanced\packages</code>。目录不存在时，可先点一次「检查条件」创建。</li>
+            <li>放好安装包后点击「安装 / 修复」，程序会自动查找并校验，完成后状态显示「可用」。也可先点「检查条件」。</li>
             <li>以后照常更新基础插件，高级环境会保留并自动复用；只有安装或修复环境时才需要该 ZIP。</li>
           </ol>
           {buildWithoutAdvanced && <p className="pf-settings-description">当前插件不支持此高级环境接口，请先更新团片协作基础插件。</p>}

@@ -20,19 +20,7 @@ function Resolve-AdvancedPackageVersion([object]$ComponentManifest) {
     if ($value -notmatch '^\d+(\.\d+)+$') { throw 'Invalid pinned advanced runtime package version.' }
     return $value
 }
-function Select-AdvancedPackageFile {
-    Add-Type -AssemblyName System.Windows.Forms
-    $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Title = 'PhotoFlow - Select standalone advanced runtime ZIP'
-    $dialog.Filter = 'Advanced runtime ZIP (*.zip)|*.zip'
-    $dialog.CheckFileExists = $true
-    $dialog.Multiselect = $false
-    try {
-        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { throw 'Advanced runtime package selection cancelled.' }
-        return $dialog.FileName
-    } finally { $dialog.Dispose() }
-}
-function Resolve-AdvancedPackageSource([object]$ComponentManifest, [string]$ComponentRoot, [string]$RequestedPath, [string]$SourceRecord) {
+function Resolve-AdvancedPackageSource([object]$ComponentManifest, [string]$ComponentRoot, [string]$RequestedPath, [string]$PackageDirectory) {
     $embedded = $ComponentManifest.advancedRuntime.offlinePackage
     $declaration = if ($embedded) { $embedded } else { $ComponentManifest.advancedRuntime.externalPackage }
     $name = [string]$declaration.path
@@ -41,19 +29,26 @@ function Resolve-AdvancedPackageSource([object]$ComponentManifest, [string]$Comp
         $target = [IO.Path]::GetFullPath((Join-Path $ComponentRoot $name))
         if ($RequestedPath -and -not ([IO.Path]::GetFullPath($RequestedPath)).Equals($target, [StringComparison]::OrdinalIgnoreCase)) { throw 'Embedded advanced package path mismatch.' }
     } else {
-        $target = $RequestedPath
-        Assert-SafeLocalPath $SourceRecord | Out-Null
-        if (-not $target -and (Test-Path -LiteralPath $SourceRecord -PathType Leaf)) {
-            try {
-                $saved = Get-Content -LiteralPath $SourceRecord -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ([string]$saved.sha256 -eq [string]$declaration.sha256 -and (Test-Path -LiteralPath ([string]$saved.path) -PathType Leaf)) { $target = [string]$saved.path }
-            } catch { $target = '' }
-        }
-        if (-not $target) { $target = Select-AdvancedPackageFile }
+        $PackageDirectory = Assert-SafeLocalPath $PackageDirectory
+        if (-not (Test-Path -LiteralPath $PackageDirectory)) { New-Item -ItemType Directory -Path $PackageDirectory -Force | Out-Null }
+        $target = if ($RequestedPath) { $RequestedPath } else { Join-Path $PackageDirectory $name }
     }
     $target = Assert-SafeLocalPath $target
-    if (-not [IO.Path]::GetExtension($target).Equals('.zip', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'Select the standalone advanced runtime .zip package.' }
+    if (-not [IO.Path]::GetExtension($target).Equals('.zip', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'ADVANCED_PACKAGE_MISSING: Place the standalone runtime ZIP in the advanced/packages directory.' }
     return @{ Path=$target; Sha256=([string]$declaration.sha256).ToLowerInvariant(); External=(-not [bool]$embedded) }
+}
+function Get-AdvancedGpuCapability([string]$Executable) {
+    # The Host strips environment variables. NVML on Windows requires ProgramFiles.
+    $previousProgramFiles = $env:ProgramFiles
+    try {
+        if (-not $env:ProgramFiles) { $env:ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles) }
+        $lines = @(& $Executable --query-gpu=compute_cap --format=csv,noheader 2>&1)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { throw 'The NVIDIA GPU capability could not be verified.' }
+        $capabilities = @($lines | ForEach-Object { $value = 0.0; if ([double]::TryParse(([string]$_).Trim(), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { $value } })
+        if (-not $capabilities.Count) { throw 'The NVIDIA GPU capability could not be verified.' }
+        return ($capabilities | Measure-Object -Maximum).Maximum
+    } finally { $env:ProgramFiles = $previousProgramFiles }
 }
 function Get-AdvancedWslText([string]$Name, [string]$User, [string[]]$CommandArguments) {
     $lines = @(& wsl.exe -d $Name -u $User --exec @CommandArguments)
@@ -401,8 +396,8 @@ $manifestAdvancedRuntimeApiVersion = [int]$componentManifest.advancedRuntime.api
 if (-not $ExpectedComponentVersion.Trim()) { $ExpectedComponentVersion = $manifestComponentVersion }
 if ($ExpectedAdvancedRuntimeApiVersion -le 0) { $ExpectedAdvancedRuntimeApiVersion = $manifestAdvancedRuntimeApiVersion }
 if ($ExpectedComponentVersion -ne $manifestComponentVersion -or $ExpectedAdvancedRuntimeApiVersion -ne $manifestAdvancedRuntimeApiVersion) { throw 'Host lifecycle contract does not match the installed component manifest.' }
-$sourceRecord = Join-Path $stateRoot 'package-source.json'
-$source = Resolve-AdvancedPackageSource $componentManifest $componentRoot $PackagePath $sourceRecord
+$packageDirectory = Join-Path $stateRoot 'packages'
+$source = Resolve-AdvancedPackageSource $componentManifest $componentRoot $PackagePath $packageDirectory
 $PackagePath = $source.Path
 $declaredPackageSha256 = $source.Sha256
 $validatedPackage = Open-ValidatedAdvancedArchive $PackagePath
@@ -419,16 +414,12 @@ catch { Close-ValidatedAdvancedArchive $validatedPackage; throw }
 
 $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
 if (-not $nvidia) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'A CUDA-capable NVIDIA driver is required.' }
-$compute = @(& $nvidia.Source --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or -not $compute) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The NVIDIA GPU capability could not be verified.' }
+try { $computeCapability = Get-AdvancedGpuCapability $nvidia.Source } catch { Close-ValidatedAdvancedArchive $validatedPackage; throw }
 $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($componentDataRoot))
 $existingBytes = if ($registration -and (Test-Path -LiteralPath $stableVhd -PathType Leaf)) { (Get-Item -LiteralPath $stableVhd).Length } else { 0 }
 $peakBytes = [int64]([Math]::Ceiling(([int64]$manifest.installedSizeBytes * 2 + $existingBytes) * 1.15) + 2GB)
-Assert-AdvancedPreflight ([Environment]::Is64BitOperatingSystem) ([double]$compute[0]) $drive.DriveType $drive.AvailableFreeSpace $peakBytes
-if ($source.External) {
-    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
-    Write-JsonAtomic $sourceRecord @{ path=$PackagePath; sha256=$packageHash }
-}
+Assert-AdvancedPreflight ([Environment]::Is64BitOperatingSystem) $computeCapability $drive.DriveType $drive.AvailableFreeSpace $peakBytes
+
 if ($CheckOnly) { Close-ValidatedAdvancedArchive $validatedPackage; Write-Host 'OFFLINE_PREFLIGHT_OK|trusted package, WSL 2, NVIDIA CUDA, precision and disk ready'; exit 0 }
 
 $priorState = $null; $priorMarker = $null
