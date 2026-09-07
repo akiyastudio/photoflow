@@ -16,6 +16,7 @@ for (const contract of ['aria-busy={cropBusy}', 'disabled={cropBusy}', 'disabled
 assert(dialog.includes('aria-modal="true"') && dialog.includes('pf-dialog-title'));
 assert.equal((layer.match(/window\.addEventListener\('keydown'/g) || []).length, 1, 'one registry owns modal keyboard handling');
 assert(style.includes('grid-template-columns: repeat(2, minmax(0, 1fr))'), 'upload-return and no-retouch actions use equal-width columns');
+assert(style.includes('min-height: var(--pf-control-sm); height: var(--pf-control-sm)'), 'upload-return and no-retouch actions override shared button minimums with one equal height');
 for (const source of [manager, photoManager, progressHook]) assert.equal(source.includes('@ts-nocheck'), false);
 const distAssets = path.join(root, 'dist/ui/assets');
 const builtMain = fs.readdirSync(distAssets).filter(name => /^main-.*\.js$/u.test(name)).map(name => fs.readFileSync(path.join(distAssets, name), 'utf8')).join('\n');

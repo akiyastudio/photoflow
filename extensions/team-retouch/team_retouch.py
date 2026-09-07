@@ -1213,16 +1213,10 @@ def _perceptual_hash(gray):
     return coefficients > median
 
 
-def describe_match_image(image_path):
+def describe_match_image(image_path, role="work"):
     """Build edit-tolerant visual descriptors without relying on names or metadata."""
-    rgb = load_rgb(image_path, role="work")
-    height, width = rgb.shape[:2]
-    scale = min(1.0, 960.0 / max(width, height))
-    proxy = cv2.resize(
-        rgb,
-        (max(1, round(width * scale)), max(1, round(height * scale))),
-        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR,
-    )
+    width, height = inspect_oriented_dimensions(image_path, role=role)
+    proxy = load_array(image_path, role=role, mode="RGB", max_edge=960)
     gray = cv2.cvtColor(proxy, cv2.COLOR_RGB2GRAY)
     normalized = cv2.equalizeHist(gray)
     structure = cv2.resize(normalized, (96, 96), interpolation=cv2.INTER_AREA)
@@ -1244,10 +1238,10 @@ def describe_match_image(image_path):
         keypoint_coverage = min(1.0, float(cv2.contourArea(hull)) / max(1, proxy.shape[0] * proxy.shape[1]))
     else:
         keypoint_coverage = 0.0
-    comparison = cv2.resize(rgb, (192, 192), interpolation=cv2.INTER_AREA)
+    comparison = cv2.resize(proxy, (192, 192), interpolation=cv2.INTER_AREA)
     return {
         "path": str(image_path), "width": width, "height": height,
-        "pixelDigest": hashlib.sha256(rgb.tobytes()).hexdigest(), "comparison": comparison,
+        "pixelDigest": hashlib.sha256(proxy.tobytes()).hexdigest(), "comparison": comparison,
         "proxyWidth": proxy.shape[1], "proxyHeight": proxy.shape[0],
         "structure": structure, "edges": edges, "hash": _perceptual_hash(normalized),
         "keypoints": keypoints or [], "descriptors": descriptors,
@@ -1414,7 +1408,7 @@ def match_returned_batch(manifest_path):
     for candidate in candidates:
         original_path = candidate.get("originalPath")
         if original_path and original_path not in original_descriptors and os.path.isfile(original_path):
-            original_descriptors[original_path] = describe_match_image(original_path)
+            original_descriptors[original_path] = describe_match_image(original_path, role="original")
 
     scores = []
     for row_index, returned in enumerate(returned_descriptors):

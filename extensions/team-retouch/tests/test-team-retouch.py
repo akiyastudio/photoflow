@@ -91,6 +91,13 @@ def main():
         high_edit=high_key.copy(); high_edit[72:78,112:118]=205; Image.fromarray(high_key,'L').save(candidate); Image.fromarray(high_edit,'L').save(returned)
         with redirect_stdout(io.StringIO()): high_match=match_returned_batch(str(manifest))['matches'][0]
         assert high_match['informationGate']=={'returned':True,'candidate':True}, high_match
+        large_original_proxy=np.zeros((960,640,3),np.uint8)
+        with mock.patch.object(team_retouch,'inspect_oriented_dimensions',return_value=(5464,8192)) as inspect_large, \
+             mock.patch.object(team_retouch,'load_array',return_value=large_original_proxy) as load_large:
+            large_descriptor=team_retouch.describe_match_image(root/'large-original.jpg',role='original')
+        assert (large_descriptor['width'],large_descriptor['height'])==(5464,8192)
+        inspect_large.assert_called_once_with(root/'large-original.jpg',role='original')
+        load_large.assert_called_once_with(root/'large-original.jpg',role='original',mode='RGB',max_edge=960)
     with mock.patch.object(advanced_bridge, 'script_path', side_effect=lambda name: ROOT/'advanced'/name), \
          mock.patch.object(advanced_bridge, 'wsl_path', side_effect=lambda path: f"/mnt/c/{Path(path).name}"), \
          mock.patch.object(advanced_bridge, 'run_shell', side_effect=[subprocess.TimeoutExpired(['wsl.exe'], 12), '']) as run_shell:
