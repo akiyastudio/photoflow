@@ -60,12 +60,13 @@ const allowedMethods = new Set([
   'team.workflow.reconcile-drain.v1',
   'team.operation.run.v1', 'team.operation.get.v1', 'team.operation.cancel.v1',
   'team.settings.get.v1', 'team.settings.update.v1', 'team.advanced.status.v1', 'team.advanced.preflight.v1',
-  'team.advanced.install.v1', 'team.advanced.uninstall.v1',
+  'team.advanced.package.verify.v1', 'team.advanced.install.v1', 'team.advanced.uninstall.v1',
 ]);
 
 export const readableComponentRpcError = (method: string, error: unknown) => {
   const raw = error instanceof Error ? error.message : String(error || '');
   if (/ADVANCED_PACKAGE_MISSING/i.test(raw)) return '未找到高级环境包，请将独立环境 ZIP 放到设置页所示目录，保留原文件名后重试。';
+  if (/ENOENT.*component\.json|component\.json.*ENOENT/i.test(raw)) return '开发组件清单尚未生成或已变化，请刷新组件后重试。';
   if (/NVIDIA GPU capability could not be verified|Failed to initialize NVML/i.test(raw)) return 'NVIDIA 驱动查询失败，请确认显卡驱动正常；若命令行查询正常，请更新团片插件后重试。';
   if (/CUDA-capable NVIDIA driver is required/i.test(raw)) return '未找到 NVIDIA 驱动查询工具，请先安装 NVIDIA 显卡驱动。';
   if (/Insufficient disk space/i.test(raw)) return '高级环境安装盘可用空间不足，请清理空间后重试。';
@@ -73,6 +74,7 @@ export const readableComponentRpcError = (method: string, error: unknown) => {
   if (/RPC method is not allowed on the application settings surface/i.test(raw)) return '团片插件的设置页面缺少操作权限声明，请安装修复后的插件；重启无法解决此问题。';
   if (/Advanced runtime package selection cancelled/i.test(raw)) return '已取消选择高级环境包。';
   if (/WSL 2 is not (installed|ready)/i.test(raw)) return 'WSL 2 尚未安装或未就绪，请先启用 WSL 2 后重试。';
+  if (/正由另一进程使用|waiting for WSL to release|used by another process/i.test(raw)) return 'WSL 尚未释放高级环境虚拟磁盘，请稍候片刻后重试。';
   if (/does not match.*(SHA256|manifest)|package version does not match|runtime API version does not match/i.test(raw)) return '高级环境包校验不通过，请选择与当前插件匹配的独立高级环境 ZIP。';
   if (/timed out|timeout|COMPONENT_HOST_TIMEOUT/i.test(raw)) return method === 'team.project.get.v1'
     ? '团片历史读取超时，请重试；若持续发生，请重启应用后再打开项目。'

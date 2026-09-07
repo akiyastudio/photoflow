@@ -64,8 +64,8 @@ export type ComponentAuthorizedInput = { name: string; relativeName: string; kin
 export type DialogsResponse = { confirmed: boolean } | { cancelled: boolean; inputs: ComponentAuthorizedInput[]; truncated?: boolean } | { opened: true; componentDirectory: { relativePath: string } } | { opened: true; outputRef: { commitId: string; artifactId: string } };
 export interface ComponentEventRequest<T extends JsonObject = JsonObject> { topic: VersionedName; event: T }
 export interface ComponentEventResponse { emitted: true }
-export type ComponentLifecycleRequest = { action: 'describe' } | { action: 'preflight' | 'install' | 'repair' | 'uninstall' };
-export type ComponentLifecycleResponse = { componentId: string; componentVersion: string; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' | 'termination-unconfirmed' } | { success: true; action: 'preflight' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
+export type ComponentLifecycleRequest = { action: 'describe' } | { action: 'preflight' | 'verify-package' | 'install' | 'repair' | 'uninstall' };
+export type ComponentLifecycleResponse = { componentId: string; componentVersion: string; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' | 'termination-unconfirmed' } | { success: true; action: 'preflight' | 'verify-package' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
 export type NotificationTone = 'info' | 'success' | 'warning' | 'error';
 export interface NotificationRequest { tone: NotificationTone; message: string; dedupeKey?: string }
 export type NotificationResult = { accepted: true; id: string } | { accepted: false; deduplicated: true; code: 'NOTIFICATION_DEDUPLICATED' } | { accepted: false; error: { code: string; message: string; retryable: boolean } };

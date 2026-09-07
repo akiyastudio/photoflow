@@ -13,10 +13,12 @@ const simulator = createHostSimulator({
   try {
     const direct = await simulator.request('team.advanced.preflight.v1');
     assert.equal(direct.success, true);
+    const packageCheck = await simulator.request('team.advanced.package.verify.v1');
+    assert.equal(packageCheck.action, 'verify-package');
     const accepted = await simulator.request('team.advanced.uninstall.v1', { acceptOnly: true, operationId: 'advanced-global' });
     assert.equal(accepted.scope, 'application.settings'); assert.equal(accepted.revision, undefined);
     const completed = await simulator.request('team.operation.run.v1', { operationId: 'advanced-global' });
-    assert.equal(completed.success, true); assert.equal(lifecycleCalls, 2);
+    assert.equal(completed.success, true); assert.equal(lifecycleCalls, 3);
     console.log('Team-retouch application.settings lifecycle global-scope tests passed');
   } finally { await simulator.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -8,6 +8,7 @@ const MAX_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const BACKUP_RESTORE_INVOCATION = Symbol('component-backup-restore-invocation');
+const isUnboundedLifecycleAction = (method, payload) => method === 'component.lifecycle' && ['install','repair'].includes(String(payload?.action || ''));
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -246,7 +247,7 @@ class ComponentServiceManager {
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const pending = { resolve, reject, timer: null, context: withComponentLifecycleLease(boundContext, lifecycleLease), method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, onTimeout: null };
+      const pending = { resolve, reject, timer: null, context: withComponentLifecycleLease(boundContext, lifecycleLease), method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, deadlineDisabled: false, onTimeout: null };
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
@@ -420,10 +421,15 @@ class ComponentServiceManager {
       parent.capabilityStartedAt = capabilityStartedAt;
       try {
         const invocation = this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
-        if (((frame.method === 'component.lifecycle' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || '')))
+        if (isUnboundedLifecycleAction(frame.method, frame.payload) && !parent.deadlineDisabled) {
+          clearTimeout(parent.timer);
+          parent.longTimeoutArmed = true;
+          parent.deadlineDisabled = true;
+          parent.timer = null;
+        } else if (((frame.method === 'component.lifecycle' && ['preflight', 'verify-package', 'uninstall'].includes(String(frame.payload?.action || '')))
           || frame.method === 'tasks'
           || frame.method === 'component.runtime.execute' && frame.payload?.action === 'execute'
-          || frame.method === 'project.media.process') && !parent.longTimeoutArmed) {
+          || frame.method === 'project.media.process') && !parent.longTimeoutArmed && !parent.deadlineDisabled) {
           clearTimeout(parent.timer);
           parent.longTimeoutArmed = true;
           parent.timer = setTimeout(parent.onTimeout, this.longRequestTimeoutMs);
@@ -547,4 +553,4 @@ class ComponentServiceManager {
   }
 }
 
-module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_CAPABILITIES_PER_REQUEST, MAX_CONCURRENT_CAPABILITIES, MAX_LINE_BYTES, MAX_PENDING_WRITE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };
+module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_CAPABILITIES_PER_REQUEST, MAX_CONCURRENT_CAPABILITIES, MAX_LINE_BYTES, MAX_PENDING_WRITE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, isUnboundedLifecycleAction, prepareReady, publicContext, serviceEnvironment };

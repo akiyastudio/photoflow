@@ -3581,6 +3581,11 @@ const handlers = {
     try { return await withKeyedOperation(advancedLifecycleRuns, 'application.settings', () => lifecycleAction(parentId, 'preflight'), context.signal); }
     catch (error) { return { success: false, state: 'repair-needed', errorCategory: 'installation-prerequisite', message: String(error?.message || '增强人物检测安装条件未满足') }; }
   },
+  'team.advanced.package.verify.v1': async (parentId, payload, context) => {
+    if (payload.acceptOnly) return acceptAdvancedLifecycle(parentId, payload, 'verify-package');
+    try { return await withKeyedOperation(advancedLifecycleRuns, 'application.settings', () => lifecycleAction(parentId, 'verify-package'), context.signal); }
+    catch (error) { return { success: false, state: 'not-installed', errorCategory: 'advanced-package-invalid', message: String(error?.message || '高级环境安装包未找到或校验失败') }; }
+  },
   'team.advanced.install.v1': async (parentId, payload, context) => {
     const current = await advancedRuntimeStatus(parentId, { refresh: true });
     const action = current.state === 'not-installed' ? 'install' : 'repair';

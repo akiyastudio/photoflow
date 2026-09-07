@@ -7,8 +7,22 @@ button, input, select, textarea { font:inherit; }
 .team-settings-banner { display:flex; min-width:0; align-items:flex-start; gap:.5rem; padding:.75rem; font-size:.75rem; line-height:1.25rem; }
 .team-settings-banner svg { flex:none; margin-top:.125rem; }
 .team-settings-actions { display:flex; min-width:0; flex-wrap:wrap; justify-content:flex-end; gap:.5rem; }
+.team-setup-flow { display:flex; min-width:0; flex-direction:column; gap:.75rem; margin:0; padding:0; list-style:none; }
+.team-setup-flow > li { display:grid; grid-template-columns:1.75rem minmax(0,1fr); gap:.75rem; border:1px solid var(--pf-border-subtle); border-radius:var(--pf-radius-sm); padding:.875rem; background:var(--pf-surface); }
+.team-setup-flow > li[data-state="waiting"] { opacity:.58; }
+.team-setup-flow > li[data-state="done"] { border-color:var(--pf-success); }
+.team-setup-number { display:flex; width:1.75rem; height:1.75rem; align-items:center; justify-content:center; border-radius:999px; background:var(--pf-subtle); color:var(--pf-muted); font-size:.75rem; font-weight:800; }
+.team-setup-flow > li[data-state="current"] .team-setup-number { background:var(--pf-primary); color:#fff; }
+.team-setup-flow > li[data-state="done"] .team-setup-number { background:var(--pf-success-soft); color:var(--pf-success); }
+.team-setup-flow strong, .team-setup-complete strong { display:block; font-size:.8125rem; color:var(--pf-text); }
+.team-setup-flow p, .team-setup-complete p { margin:.25rem 0 .75rem; font-size:.75rem; line-height:1.25rem; color:var(--pf-muted); }
+.team-setup-flow .team-settings-actions { justify-content:flex-start; }
+.team-setup-complete { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:.75rem; border:1px solid var(--pf-success); border-radius:var(--pf-radius-sm); padding:1rem; color:var(--pf-success); background:var(--pf-success-soft); }
+.team-setup-complete p { margin-bottom:0; }
 
 @media (max-width:720px) {
   .team-settings-actions { justify-content:flex-start; }
   .team-settings-actions .pf-button { flex:1 1 auto; }
+  .team-setup-complete { grid-template-columns:auto minmax(0,1fr); }
+  .team-setup-complete .pf-button { grid-column:1 / -1; }
 }

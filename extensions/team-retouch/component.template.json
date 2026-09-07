@@ -36,7 +36,7 @@
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" },
-      { "type": "application.settingsPage", "id": "settings", "label": "团片协作", "title": "团片协作设置", "entry": "ui/settings.html", "rpcMethods": ["team.settings.get.v1", "team.settings.update.v1", "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1", "team.operation.run.v1", "team.operation.get.v1"] }
+      { "type": "application.settingsPage", "id": "settings", "label": "团片协作", "title": "团片协作设置", "entry": "ui/settings.html", "rpcMethods": ["team.settings.get.v1", "team.settings.update.v1", "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.package.verify.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1", "team.operation.run.v1", "team.operation.get.v1"] }
     ],
     "service": {
       "protocolVersion": 1,
@@ -71,7 +71,7 @@
         "team.operation.run.v1", "team.operation.get.v1", "team.operation.cancel.v1",
         "team.progress.list.v1", "team.progress.create.v1",
         "team.settings.get.v1", "team.settings.update.v1",
-        "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
+        "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.package.verify.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
       ],
       "capabilities": [
         "project.media.page", "project.media.variants", "project.input.tokens",
@@ -97,9 +97,10 @@
         }
       ],
       "lifecycleActions": {
-        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "1c8f58323f9bdc1b7c74efb24b4129e67913ec57ab3d289e512803510b4c22d6" },
-        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "1c8f58323f9bdc1b7c74efb24b4129e67913ec57ab3d289e512803510b4c22d6" },
-        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "1c8f58323f9bdc1b7c74efb24b4129e67913ec57ab3d289e512803510b4c22d6" },
+        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d0611b4074f24c05d200d32aa00ad5642aae4be942f90d3494c600a394f579fd" },
+        "verify-package": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d0611b4074f24c05d200d32aa00ad5642aae4be942f90d3494c600a394f579fd" },
+        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d0611b4074f24c05d200d32aa00ad5642aae4be942f90d3494c600a394f579fd" },
+        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "d0611b4074f24c05d200d32aa00ad5642aae4be942f90d3494c600a394f579fd" },
         "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "afafbf6bdc21cb609f270dc22f0f1d2d11ad806a9aa4af724b03d2a74844ece2" }
       }
     }

@@ -1,6 +1,10 @@
 $ErrorActionPreference = 'Stop'
 $setup = Join-Path (Split-Path -Parent $PSScriptRoot) 'advanced-installer\setup-team-retouch-advanced.ps1'
 . $setup -TestHelpersOnly
+$script:AdvancedProgressEnabled = $true
+$progressPipeline = @(Write-AdvancedProgress 25 'test progress'; 'digest-result')
+$script:AdvancedProgressEnabled = $false
+if ($progressPipeline.Count -ne 1 -or $progressPipeline[0] -cne 'digest-result') { throw 'Progress reporting polluted the installer function result pipeline' }
 if ((Normalize-AdvancedRegistrationPath '\\?\C:\PhotoFlow\advanced\candidate') -cne 'C:\PhotoFlow\advanced\candidate') { throw 'WSL extended-length BasePath was not normalized before ownership comparison' }
 if ((Resolve-AdvancedPackageVersion @{version='26.9.7'; advancedRuntime=@{packageVersion='26.9.4'}}) -cne '26.9.4') { throw 'Plugin update must preserve the pinned runtime version' }
 if ((Resolve-AdvancedPackageVersion @{version='26.9.7'; advancedRuntime=@{}}) -cne '26.9.7') { throw 'Unpinned package version must remain exact' }
@@ -101,6 +105,36 @@ try {
         $renamed=$false; try { Move-Item -LiteralPath $entityPath -Destination (Join-Path $root 'renamed.vhdx') -ErrorAction Stop; $renamed=$true } catch { }
         if ($renamed -or -not (Test-Path -LiteralPath $entityPath)) { throw 'entity identity lock allowed concurrent rename' }
     } finally { $entityLock.Dispose() }
+
+    $waitPath = Join-Path $root 'wsl-release.vhdx'; [IO.File]::WriteAllText($waitPath, 'wait')
+    $blockingHandle = [IO.FileStream]::new($waitPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $timedOut = $false
+        try { Wait-AdvancedFileReadable $waitPath 100 } catch { $timedOut = $_.Exception.Message -match 'waiting for WSL to release' }
+        if (-not $timedOut) { throw 'WSL virtual-disk release wait accepted an exclusively locked file' }
+    } finally { $blockingHandle.Dispose() }
+    Wait-AdvancedFileReadable $waitPath 1000
+    $sharedWriter = [IO.FileStream]::new($waitPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    try {
+        Wait-AdvancedFileReadable $waitPath 1000
+        if ((Get-FileSha256 $waitPath 0 0 'shared VHD test' -AllowSharedWrite) -notmatch '^[a-f0-9]{64}$') { throw 'Shared WSL virtual disk could not be hashed' }
+        $sharedCopy = Join-Path $root 'wsl-release-copy.vhdx'
+        if ((Copy-VerifiedFile $waitPath $sharedCopy 0 0 'shared VHD copy test' -AllowSharedWrite) -ne (Get-FileSha256 $sharedCopy)) { throw 'Shared WSL virtual disk copy changed content' }
+    } finally { $sharedWriter.Dispose() }
+
+    $wslEntityRoot = Join-Path $root 'wsl-created-entities'; New-Item -ItemType Directory -Path $wslEntityRoot | Out-Null
+    foreach ($name in @('ext4.vhdx','.photoflow-extraction.lock','shortcut.ico')) { [IO.File]::WriteAllText((Join-Path $wslEntityRoot $name), $name) }
+    Assert-StagingEntities $wslEntityRoot @('ext4.vhdx','.photoflow-extraction.lock','shortcut.ico')
+
+    $interruptedRoot = Join-Path $root 'interrupted-install'; New-Item -ItemType Directory -Path $interruptedRoot | Out-Null
+    $interruptedState = Join-Path $root 'missing-state.json'; $interruptedMarker = Join-Path $interruptedRoot '.photoflow-team-retouch-owner.json'; $interruptedVhd = Join-Path $interruptedRoot 'ext4.vhdx'
+    foreach ($name in @('ext4.vhdx','.photoflow-extraction.lock','shortcut.ico')) { [IO.File]::WriteAllText((Join-Path $interruptedRoot $name), $name) }
+    if (-not (Remove-IncompleteAdvancedInstall $interruptedRoot $interruptedState $interruptedMarker $interruptedVhd) -or (Test-Path -LiteralPath $interruptedRoot)) { throw 'Interrupted fresh install was not safely removed' }
+    $refusedRoot = Join-Path $root 'interrupted-with-foreign-file'; New-Item -ItemType Directory -Path $refusedRoot | Out-Null
+    $refusedVhd = Join-Path $refusedRoot 'ext4.vhdx'; [IO.File]::WriteAllText($refusedVhd, 'vhd'); [IO.File]::WriteAllText((Join-Path $refusedRoot 'foreign.bin'), 'foreign')
+    $refusedCleanup = $false
+    try { Remove-IncompleteAdvancedInstall $refusedRoot (Join-Path $root 'missing-state-2.json') (Join-Path $refusedRoot '.photoflow-team-retouch-owner.json') $refusedVhd | Out-Null } catch { $refusedCleanup = $true }
+    if (-not $refusedCleanup -or -not (Test-Path -LiteralPath (Join-Path $refusedRoot 'foreign.bin'))) { throw 'Interrupted install cleanup removed an unknown file' }
 
     $script:mockRegistrations = @{}
     function Get-DistroRegistration([string]$Name) { if ($script:mockRegistrations[$Name]) { return @{ Name=$Name } }; return $null }

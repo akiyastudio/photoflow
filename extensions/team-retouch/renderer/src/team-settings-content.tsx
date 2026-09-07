@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { AlertCircle, FolderOpen, Loader2, RotateCcw, Wrench } from 'lucide-react';
+import { AlertCircle, CheckCircle2, FolderOpen, Loader2, PackageCheck, RotateCcw, ShieldCheck, Wrench } from 'lucide-react';
 import { useAppDialog } from './legacy/legacy-dialog-context';
-import { durableRpc, rpc } from './sdk';
+import { durableRpc, notify, rpc } from './sdk';
 import { TeamLicenseContent } from './team-license-content';
 import { advancedEnvironmentPresentation, createLatestRequestGuard, runNotifiedAction, type TeamSettings, type TeamSettingsPatch } from './team-settings-model';
 
@@ -25,6 +25,8 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
   const [environment, setEnvironment] = useState<Json>();
   const [environmentLoading, setEnvironmentLoading] = useState(true);
   const [environmentFailed, setEnvironmentFailed] = useState(false);
+  const [environmentChecked, setEnvironmentChecked] = useState(false);
+  const [packageReady, setPackageReady] = useState(false);
   const statusGuardRef = useRef(createLatestRequestGuard());
   const refreshEnvironment = useCallback(async () => {
     const generation = statusGuardRef.current.begin();
@@ -32,7 +34,10 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
     setEnvironmentFailed(false);
     try {
       const status = await rpc<Json>('team.advanced.status.v1');
-      if (statusGuardRef.current.isCurrent(generation)) setEnvironment(status);
+      if (statusGuardRef.current.isCurrent(generation)) {
+        setEnvironment(status);
+        if (status.advancedAvailable === true || status.state === 'ready') { setEnvironmentChecked(true); setPackageReady(true); }
+      }
     } catch {
       if (statusGuardRef.current.isCurrent(generation)) setEnvironmentFailed(true);
     } finally {
@@ -49,7 +54,7 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
     if (busy) return;
     setBusy(label);
     try { await runNotifiedAction(label, action, notice); }
-    catch (error) { notice(error instanceof Error ? error.message : String(error), 'error'); }
+    catch (error) { notify(error instanceof Error ? error.message : String(error), 'error', { dedupeKey: 'team-advanced-setup-error' }); }
     finally { setBusy(''); }
   };
   const applyLifecycleResult = (result: Json) => {
@@ -59,9 +64,16 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
     setEnvironmentLoading(false);
   };
   const advanced = advancedEnvironmentPresentation(environment, environmentLoading, environmentFailed);
-  const developmentRuntime = environment?.runtimeSource === 'development';
   const buildWithoutAdvanced = environment?.errorCategory === 'advanced-package-not-in-build';
-  const canManageEnvironment = !environmentLoading && !environmentFailed && !developmentRuntime && !buildWithoutAdvanced;
+  const canManageEnvironment = !environmentLoading && !buildWithoutAdvanced;
+  const installed = advanced.state === 'ready';
+  const uninstall = () => run('卸载增强版', async () => {
+    if (!await appDialog.confirm({ title: '卸载人物检测增强版吗？', message: '将删除 PairDETR、SAM 2.1 和独立运行环境；基础检测和身份识别不受影响。', confirmLabel: '卸载增强版', tone: 'danger' })) return false;
+    assertSuccess(await durableRpc<Json>('team.advanced.uninstall.v1'), '卸载失败');
+    setEnvironmentChecked(false); setPackageReady(false);
+    applyLifecycleResult({ success: true, state: 'not-installed', installed: false, runtimeSource: environment?.runtimeSource || 'packaged' });
+    return true;
+  });
   return <>
     <SettingsGroup title="人物检测增强版">
       <SettingsRow title="PairDETR + SAM 2.1" description="改善多人、遮挡和精细分割效果。" align="start">
@@ -69,23 +81,18 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
           <span className="team-settings-badge pf-status" data-tone={advanced.tone}>{advanced.state === 'loading' && <Loader2 size={13} className="animate-spin"/>}{advanced.label}</span>
           <div className="team-settings-banner pf-banner" data-tone={advanced.tone === 'danger' ? 'danger' : advanced.tone === 'warning' ? 'warning' : undefined}>{(advanced.state === 'error' || advanced.state === 'repair-needed' || advanced.state === 'unavailable') && <AlertCircle size={15}/>}<span>{advanced.description}</span></div>
           <div className="team-settings-actions">
-            {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('打开安装包目录', async () => { await window.photoFlowComponent.dialog({ kind: 'openComponentDataDirectory', relativePath: 'advanced/packages' }); })} disabled={Boolean(busy)}><FolderOpen size={14}/>打开安装目录</button>}
             {(advanced.state === 'error' || advanced.state === 'unavailable') && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void refreshEnvironment()} disabled={Boolean(busy)}><RotateCcw size={14}/>重新检查</button>}
-            {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('检查安装条件', async () => { assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败'); await refreshEnvironment(); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>}
-            {canManageEnvironment && <button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.install.v1'), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>}
-            {canManageEnvironment && <button type="button" className="pf-button pf-button-danger" onClick={() => void run('卸载增强版', async () => { if (!await appDialog.confirm({ title: '卸载人物检测增强版吗？', message: '将删除 PairDETR、SAM 2.1 和独立运行环境；基础检测和身份识别不受影响。', confirmLabel: '卸载增强版', tone: 'danger' })) return false; assertSuccess(await durableRpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); applyLifecycleResult({ success: true, state: 'not-installed', installed: false, runtimeSource: 'packaged' }); return true; })} disabled={Boolean(busy)}>卸载</button>}
           </div>
         </div>
       </SettingsRow>
-      <SettingsRow title="如何安装增强版" description="高级环境单独安装一次；日常更新基础插件后继续使用。" align="start">
+      <SettingsRow title="增强版安装向导" description="按顺序完成检查、放置安装包和安装；开发版与正式版使用相同流程。" align="start">
         <div className="team-settings-status">
-          <ol className="list-decimal space-y-2 pl-5 text-sm">
-            <li>将单独的高级环境 ZIP 放入下面的目录，保留原文件名，无需解压。完整插件包和 evidence 资料包不能用于此处。</li>
-            <li>点击「打开安装目录」，把 ZIP 放入打开的文件夹；也可以在文件资源管理器地址栏粘贴：<code className="break-all">%LOCALAPPDATA%\PhotoFlow\components\team-retouch\advanced\packages</code>。</li>
-            <li>放好安装包后点击「安装 / 修复」，程序会自动查找并校验，完成后状态显示「可用」。也可先点「检查条件」。</li>
-            <li>以后照常更新基础插件，高级环境会保留并自动复用；只有安装或修复环境时才需要该 ZIP。</li>
-          </ol>
           {buildWithoutAdvanced && <p className="pf-settings-description">当前插件不支持此高级环境接口，请先更新团片协作基础插件。</p>}
+          {canManageEnvironment && installed ? <div className="team-setup-complete"><CheckCircle2 size={20}/><div><strong>增强版已安装</strong><p>PairDETR 与 SAM 2.1 已可用。</p></div><button type="button" className="pf-button pf-button-danger" onClick={() => void uninstall()} disabled={Boolean(busy)}>卸载增强版</button></div> : canManageEnvironment && <ol className="team-setup-flow">
+            <li data-state={environmentChecked ? 'done' : 'current'}><span className="team-setup-number">1</span><div><strong>检查安装环境</strong><p>验证 Windows x64、WSL 2、NVIDIA CUDA 和磁盘空间。</p><button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('检查安装环境', async () => { assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装环境检查失败'); setEnvironmentChecked(true); })} disabled={Boolean(busy)}>{busy === '检查安装环境' ? <Loader2 size={14} className="animate-spin"/> : <ShieldCheck size={14}/>} {environmentChecked ? '重新检查环境' : '检查安装环境'}</button></div></li>
+            <li data-state={packageReady ? 'done' : environmentChecked ? 'current' : 'waiting'}><span className="team-setup-number">2</span><div><strong>放入并检测高级版安装包</strong><p>打开专用目录，放入原始 ZIP，无需解压；随后检测版本与完整性。</p><div className="team-settings-actions justify-start"><button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('打开高级版安装目录', async () => { await window.photoFlowComponent.dialog({ kind: 'openComponentDataDirectory', relativePath: 'advanced/packages' }); })} disabled={Boolean(busy) || !environmentChecked}><FolderOpen size={14}/>打开高级版安装目录</button><button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('检测高级版安装包', async () => { assertSuccess(await durableRpc<Json>('team.advanced.package.verify.v1'), '高级版安装包检测失败'); setPackageReady(true); })} disabled={Boolean(busy) || !environmentChecked}>{busy === '检测高级版安装包' ? <Loader2 size={14} className="animate-spin"/> : <PackageCheck size={14}/>} {packageReady ? '重新检测安装包' : '检测安装包'}</button></div></div></li>
+            <li data-state={packageReady ? 'current' : 'waiting'}><span className="team-setup-number">3</span><div><strong>安装增强版</strong><p>检测通过后即可安装；完成后页面只显示已安装状态与卸载按钮。</p><button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('安装增强版', async () => { const result = assertSuccess(await durableRpc<Json>('team.advanced.install.v1'), '安装失败'); setEnvironmentChecked(true); setPackageReady(true); applyLifecycleResult(result); })} disabled={Boolean(busy) || !packageReady}><Wrench size={14}/>{busy === '安装增强版' ? '正在安装…' : '安装增强版'}</button></div></li>
+          </ol>}
         </div>
       </SettingsRow>
       <SettingsRow title="安装条件" description="Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动，以及至少 35 GB 可用空间。建议至少 8 GB 显存和 16 GB 系统内存。"><span className="team-settings-badge pf-status">离线安装</span></SettingsRow>

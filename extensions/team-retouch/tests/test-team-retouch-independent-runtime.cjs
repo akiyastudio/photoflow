@@ -9,8 +9,12 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'team-independent-runtim
 const packaging = fs.readFileSync(path.join(root, 'scripts/package-component.cjs'), 'utf8');
 const assembly = packaging.slice(packaging.indexOf('const advancedPackageName='), packaging.indexOf("fs.writeFileSync(path.join(packageRoot,'component.json')"));
 const service = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8');
+const setup = fs.readFileSync(path.join(root, 'advanced-installer/setup-team-retouch-advanced.ps1'), 'utf8');
 const descriptor = service.slice(service.indexOf('const packagedAdvancedDescriptor ='), service.indexOf('const OUTPUT_OUTBOX ='));
 try {
+  assert(setup.includes("Join-Path $componentRoot 'component.template.json'"), 'development lifecycle resolves the verified source manifest');
+  assert(setup.includes("$EnvironmentCheckOnly = $hostAction -eq 'preflight'"), 'environment preflight is independent of package placement');
+  assert(setup.includes("if ($hostAction -eq 'verify-package') { $CheckOnly = $true }"), 'package verification is a separate lifecycle step');
   // Run the actual assembly section for two successive base releases. There is
   // deliberately no runtime ZIP or advanced release lock in the fixture.
   for (const version of ['26.9.7', '26.9.8']) {

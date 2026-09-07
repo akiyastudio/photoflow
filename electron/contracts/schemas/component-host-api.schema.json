@@ -2065,6 +2065,7 @@
               "enum": [
                 "describe",
                 "preflight",
+                "verify-package",
                 "install",
                 "repair",
                 "uninstall"
@@ -2137,6 +2138,7 @@
                 "action": {
                   "enum": [
                     "preflight",
+                    "verify-package",
                     "install",
                     "repair",
                     "uninstall"
