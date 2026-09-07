@@ -1,0 +1,31 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { privateOutputPath } = require('./project-output-paths.cjs');
+const { copyComponentIntoStaging } = require('../electron/modules/system-ipc.cjs');
+
+(async () => {
+  const parent = privateOutputPath(path.resolve(__dirname, '..'), 'diagnostics');
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, 'component-staging-test-'));
+  const source = path.join(root, 'source');
+  const staging = path.join(root, 'staging');
+  fs.mkdirSync(path.join(source, 'nested'), { recursive: true });
+  fs.mkdirSync(staging);
+  fs.writeFileSync(path.join(source, 'nested', 'worker.cjs'), 'component');
+  const before = fs.statSync(staging);
+  await copyComponentIntoStaging(fs, path, source, staging);
+  assert.equal(fs.readFileSync(path.join(staging, 'nested', 'worker.cjs'), 'utf8'), 'component');
+  assert.equal(fs.statSync(staging).ino, before.ino, 'the admitted staging root is preserved');
+  fs.writeFileSync(path.join(staging, 'nested', 'worker.cjs'), 'existing content');
+  await assert.rejects(copyComponentIntoStaging(fs, path, source, staging), { code: 'ERR_FS_CP_EEXIST' });
+  assert.equal(fs.readFileSync(path.join(staging, 'nested', 'worker.cjs'), 'utf8'), 'existing content', 'conflicting content is never overwritten');
+  fs.unlinkSync(path.join(source, 'nested', 'worker.cjs'));
+  assert.equal(fs.readFileSync(path.join(staging, 'nested', 'worker.cjs'), 'utf8'), 'existing content', 'removing preparation links preserves installed bytes');
+  fs.writeFileSync(path.join(source, 'nested', 'worker.cjs'), 'cross-volume');
+  const fallback = path.join(root, 'fallback'); fs.mkdirSync(fallback);
+  const crossVolumeFs = { ...fs, promises: { ...fs.promises, link: async () => { throw Object.assign(new Error('cross volume'), { code: 'EXDEV' }); } } };
+  await copyComponentIntoStaging(crossVolumeFs, path, source, fallback);
+  assert.equal(fs.readFileSync(path.join(fallback, 'nested', 'worker.cjs'), 'utf8'), 'cross-volume');
+  console.log(`Component staging copy passed (${process.versions.electron ? `Electron ${process.versions.electron}` : `Node ${process.versions.node}`})`);
+})().catch(error => { console.error(error); process.exitCode = 1; });

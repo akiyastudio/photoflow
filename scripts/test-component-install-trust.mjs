@@ -78,28 +78,27 @@ assert.equal(failedBarrierReleased, true, 'a failed quiesce releases the capabil
 
 let dialogCalls = 0;
 const dialog = {
-  showMessageBox: async (_window, options) => {
+  confirm: async options => {
     dialogCalls += 1;
-    assert.equal(options.defaultId, 0);
-    assert.equal(options.cancelId, 0);
-    assert.deepEqual(options.buttons, ['取消安装', '我信任来源，继续安装']);
-    assert.match(options.detail, /读取或修改.*文件/);
+    assert.equal(options.title, '安装“测试组件”？');
+    assert.match(options.message, /1\.0\.0.*可能存在风险/);
+    assert.match(options.detail, /访问或修改.*文件/);
     assert.match(options.detail, /连接网络/);
-    assert.match(options.detail, /启动其他进程/);
-    assert.match(options.detail, /只适用于本次安装/);
-    return { response: 0 };
+    assert.match(options.detail, /运行程序/);
+    assert.doesNotMatch(JSON.stringify(options), /SHA-256|字节数|third-party\.tool/);
+    return false;
   },
 };
-const confirmation = integrityStatus => confirmComponentPackageInstall({ componentId: 'third-party.tool', componentVersion: '1.0.0', integrityStatus, dialog, mainWindow: {} });
+const confirmation = integrityStatus => confirmComponentPackageInstall({ componentId: 'third-party.tool', componentName: '测试组件', componentVersion: '1.0.0', integrityStatus, requestConfirmation: options => dialog.confirm(options) });
 
-assert.equal(await confirmation('verified'), true);
-assert.equal(await confirmation('pinned-unverified'), true);
-assert.equal(dialogCalls, 0, 'app-verified and app-pinned packages do not show the unsigned warning');
+assert.equal(await confirmation('verified'), false);
+assert.equal(await confirmation('pinned-unverified'), false);
+assert.equal(dialogCalls, 2, 'all components require the same risk confirmation');
 assert.equal(await confirmation('unsigned'), false, 'cancel rejects the unsigned package');
-assert.equal(dialogCalls, 1);
-dialog.showMessageBox = async () => ({ response: 1 });
+assert.equal(dialogCalls, 3);
+dialog.confirm = async () => true;
 assert.equal(await confirmation('unsigned'), true, 'the explicit dangerous action authorizes this invocation');
-await assert.rejects(confirmation('invalid'), /完整性状态无效/);
+assert.equal(await confirmation('invalid'), true, 'source labels do not control consent; package validation is separate');
 
 let backgroundPrompts = 0;
 const promptDialog = { showMessageBox: async (_window, options) => {
@@ -128,10 +127,10 @@ assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.to
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: { hasWhere: () => false, hasUnconfirmedOwner: () => true }, dialog: promptDialog, mainWindow: {} }), true);
 const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
 const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
-assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
+assert.match(preloadSource, /installComponent: async \(request, confirm\)[\s\S]*ipcRenderer\.invoke\('components-install', request\)/);
 assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath,[\s\S]*inspectComponentArchive\(packageSnapshotPath,[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath,/);
 assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive[\s\S]*captureComponentTreeIdentity/);
-assert.match(mainSource, /fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity\(stagingPath[\s\S]*componentTransactions\.install/);
+assert.match(mainSource, /await copyComponentIntoStaging\(fs, path, componentRoot, stagingPath\)[\s\S]*captureVerifiedComponentTreeIdentity\(stagingPath[\s\S]*componentTransactions\.install/);
 assert.match(mainSource, /componentTransactions\.install\(\{[\s\S]*operationId:\s*installOperationId[\s\S]*preparationCleanup:\s*packageCleanupPaths/);
 assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*recoverPendingComponentTransaction[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive/);
 assert.match(mainSource, /if \(!confirmed\) return installResponse = \{ success: false, cancelled: true \}/);
@@ -151,7 +150,7 @@ try {
   assert.equal(inspected.manifest.marker, 'new');
   const cancelledExpansion = path.join(temporaryRoot, 'cancelled-expansion');
   const snapshotTrust = snapshotComponentTrust('third-party.tool', inspected.manifest);
-  assert.equal(await confirmComponentPackageInstall({ ...snapshotTrust, dialog: { showMessageBox: async () => ({ response: 0 }) }, mainWindow: {} }), false);
+  assert.equal(await confirmComponentPackageInstall({ ...snapshotTrust, requestConfirmation: async () => false }), false);
   assert.equal(fs.existsSync(cancelledExpansion), false, 'cancelling an unsigned snapshot does not create or write an expansion directory');
   const extracted = path.join(temporaryRoot, 'extracted');
   const extractedPackage = await extractComponentArchive(inspected, extracted);

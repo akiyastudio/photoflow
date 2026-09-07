@@ -355,8 +355,9 @@ const packagedAdvancedDescriptor = (() => {
   if (!fs.existsSync(manifestPath)) return null; // source/development runtime
   try {
     const value = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    const offline = value?.advancedRuntime?.offlinePackage;
-    return offline && typeof offline.path === 'string' && /^[a-f0-9]{64}$/i.test(String(offline.sha256 || '')) ? offline : false;
+    // Runtime availability is independent of whether the 11 GB archive ships
+    // inside this plugin. Ordinary plugin updates reuse the installed runtime.
+    return value?.advancedRuntime?.apiVersion === 1 ? value.advancedRuntime : false;
   } catch { return false; }
 })();
 const advancedBuildUnavailable = () => packagedAdvancedDescriptor === false;

@@ -11,6 +11,10 @@
     "win32-x64": "team-retouch.exe"
   },
   "advancedRuntime": {
+    "externalPackage": {
+      "path": "PhotoFlow-team-retouch-advanced-26.9.4-win32-x64.zip",
+      "sha256": "1ed873b220d5fefc8e590b7bf5826d3e3484ed87cbde3daca051cffc7be37a8b"
+    },
     "packageVersion": "26.9.4",
     "apiVersion": 1
   },
@@ -93,9 +97,9 @@
         }
       ],
       "lifecycleActions": {
-        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "85ccdb9ded21b832b308d9ab404b6031df9bd18b2c4c44c35f893eda71e70593" },
-        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "85ccdb9ded21b832b308d9ab404b6031df9bd18b2c4c44c35f893eda71e70593" },
-        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "85ccdb9ded21b832b308d9ab404b6031df9bd18b2c4c44c35f893eda71e70593" },
+        "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "576e546767c02125359f7e93864077cea7c5b7aa9306d5ebc777be047507e760" },
+        "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "576e546767c02125359f7e93864077cea7c5b7aa9306d5ebc777be047507e760" },
+        "repair": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "576e546767c02125359f7e93864077cea7c5b7aa9306d5ebc777be047507e760" },
         "uninstall": { "entry": "advanced-installer/uninstall-team-retouch-advanced.ps1", "sha256": "afafbf6bdc21cb609f270dc22f0f1d2d11ad806a9aa4af724b03d2a74844ece2" }
       }
     }

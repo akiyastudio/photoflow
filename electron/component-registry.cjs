@@ -8,7 +8,13 @@ const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentInteg
 const { developmentComponentMetadataToken, discoverDevelopmentComponents, safeFile } = require('./component-development.cjs');
 const { legacyRuntimeCapabilities } = require('./compatibility/legacy-runtime-capabilities.cjs');
 
-const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
+const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => {
+  const runtimeDefinition = { ...definition, capability: definition.capabilities[0] };
+  // Installation uses a uniform risk acknowledgement, not publisher trust.
+  // Retain package structure/runtime checks without an official-version pin.
+  delete runtimeDefinition.integrityManifest;
+  return [id, runtimeDefinition];
+})));
 const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const CASE_INSENSITIVE_COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const COMPONENT_STATE_VERSION = 1;

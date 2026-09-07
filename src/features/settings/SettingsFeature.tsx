@@ -284,7 +284,9 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     setBusyId(component.id);
     setBusyAction('install');
     try {
-      const result = await window.electronAPI.installComponent({ componentId: component.id });
+      const result = await window.electronAPI.installComponent({ componentId: component.id }, async presentation => (
+        await appDialog.choice({ ...presentation, cancelLabel: '取消', cancelDefault: true, choices: [{ value: 'install', label: '继续安装' }] })
+      ) === 'install');
       if (result.cancelled) return;
       if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}；请重试`, 6000); return; }
       onNotice(`已安装“${component.name}”`);
@@ -362,8 +364,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
       const canUninstall = component.installed && component.source === 'user';
       const canToggle = component.installed && (component.enabled === false || component.compatible);
       const hasInstallablePackage = Boolean(component.source !== 'development' && component.packagePath && (component.packageCompatible ?? component.compatible) && component.status !== 'package-invalid');
-      const trustText = component.integrityStatus === 'verified' ? '完整性已验证' : component.integrityMessage || '';
-      const details = [component.description, stateText, component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', trustText, component.error || component.packageError || ''].filter(Boolean).join(' · ');
+      const details = [component.description, stateText, component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', component.error || component.packageError || ''].filter(Boolean).join(' · ');
       return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && busyAction === 'install' && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canToggle && <button type="button" onClick={() => void setEnabled(component, component.enabled === false)} disabled={Boolean(busyId)} className={`dialog-secondary inline-flex items-center gap-1.5 disabled:opacity-45 ${component.enabled === false ? '!border-emerald-500' : ''}`}>{busy && busyAction === 'toggle' ? <Loader2 size={13} className="animate-spin"/> : <Power size={13}/>} {component.enabled === false ? '启用' : '禁用'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && busyAction === 'uninstall' && <Loader2 size={13} className="animate-spin"/>}卸载</button> : component.source === 'development' ? <span className="text-xs font-bold text-amber-600">开发组件</span> : component.installed ? <span className="text-xs text-slate-400">系统组件</span> : null}</div></SettingsRow>;
     })}
     {!loading && !components.length && <SettingsRow title="组件状态" description="组件目录中没有安装包或已安装组件。"><span className="ml-auto block w-fit text-xs text-slate-400">暂无组件</span></SettingsRow>}

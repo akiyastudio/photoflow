@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 let applicationClosing = false;
+let componentInstallPending = false;
 ipcRenderer.on('application-quit:state', (_event, state) => { applicationClosing = ['saving', 'closing', 'failed'].includes(state?.phase); });
 // Sandboxed preloads only expose Electron's limited preload `require`; local
 // CommonJS modules are unavailable here even when the file exists on disk.
@@ -136,7 +137,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearLogs: () => ipcRenderer.invoke('logs-clear'),
   clearInterfaceCache: () => ipcRenderer.invoke('interface-cache-clear'),
   getCursorScreenPoint: () => ipcRenderer.invoke('cursor-screen-point'),
-  installComponent: request => ipcRenderer.invoke('components-install', request),
+  installComponent: async (request, confirm) => {
+    if (componentInstallPending) throw new Error('已有组件正在安装，请稍后重试');
+    componentInstallPending = true;
+    const listener = async (_event, presentation) => {
+      let accepted = false;
+      try { accepted = typeof confirm === 'function' && await confirm({ title: presentation.title, message: presentation.message, detail: presentation.detail }) === true; }
+      catch { /* A failed or dismissed UI never grants consent. */ }
+      ipcRenderer.send('components-install-confirmation-response', { requestId: presentation.requestId, accepted });
+    };
+    ipcRenderer.on('components-install-confirmation', listener);
+    try { return await ipcRenderer.invoke('components-install', request); }
+    finally { ipcRenderer.removeListener('components-install-confirmation', listener); componentInstallPending = false; }
+  },
   setComponentEnabled: (componentId, enabled) => ipcRenderer.invoke('components-set-enabled', componentId, enabled),
   deleteComponentPackage: (kind, componentId) => ipcRenderer.invoke('components-delete-package', kind, componentId),
   uninstallComponent: (componentId, options) => ipcRenderer.invoke('components-uninstall', componentId, options),

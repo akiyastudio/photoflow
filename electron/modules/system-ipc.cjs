@@ -10,8 +10,30 @@ const { captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, clea
 const { componentInstallTimeoutMs } = require('../component-zip64.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 const { validateComponentPackageInspection } = require('../component-registry.cjs');
+const { requestComponentInstallConfirmation } = require('../services/component-install-confirmation.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
+const copyComponentIntoStaging = async (fsApi, pathApi, source, staging) => {
+  // Both trees are installer-owned and immutable until publication. Same-volume
+  // hard links avoid a second full payload write; deleting preparation names
+  // leaves staging files intact. Cross-volume/unsupported links use normal copy.
+  for (const name of await fsApi.promises.readdir(source)) {
+    const from = pathApi.join(source, name); const to = pathApi.join(staging, name);
+    const stat = await fsApi.promises.lstat(from);
+    if (stat.isSymbolicLink()) throw new Error('组件暂存来源包含链接');
+    if (stat.isDirectory()) {
+      await fsApi.promises.mkdir(to).catch(error => { if (error.code === 'EEXIST') throw Object.assign(new Error('组件暂存目标已存在'), { code: 'ERR_FS_CP_EEXIST' }); throw error; });
+      await copyComponentIntoStaging(fsApi, pathApi, from, to);
+    } else if (stat.isFile()) {
+      try { await fsApi.promises.link(from, to); }
+      catch (error) {
+        if (error.code === 'EEXIST') throw Object.assign(new Error('组件暂存目标已存在'), { code: 'ERR_FS_CP_EEXIST' });
+        if (!['EXDEV', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EACCES', 'EMLINK'].includes(error.code)) throw error;
+        await fsApi.promises.cp(from, to, { force: false, errorOnExist: true });
+      }
+    } else throw new Error('组件暂存来源不是普通文件或目录');
+  }
+};
 const relativePathEscapes = (pathApi, relative) => pathApi.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${pathApi.sep}`);
 const componentTemporaryCleanupTargets = ({ path, tempRoot, installRoot, receipts }) => {
   const seen = new Set();
@@ -240,20 +262,12 @@ const validateComponentInstallRequest = request => {
   if (typeof request.componentId !== 'string' || !COMPONENT_INSTALL_ID.test(request.componentId)) throw new TypeError('组件 ID 无效');
   return { componentId: request.componentId };
 };
-const confirmComponentPackageInstall = async ({ componentId, componentVersion, integrityStatus, packageFileName = '', packageSizeBytes = 0, packageSha256 = '', dialog, mainWindow }) => {
-  if (integrityStatus === 'verified' || integrityStatus === 'pinned-unverified') return true;
-  if (integrityStatus !== 'unsigned') throw new Error('组件包完整性状态无效，请刷新组件状态后重试');
-  const response = await dialog.showMessageBox(mainWindow, {
-    type: 'warning',
-    title: `安装未验证来源的组件“${componentId}”？`,
-    message: '这个组件包没有可由 PhotoFlow 验证的来源签名。',
-    detail: `组件 ID：${componentId}\n版本：${componentVersion}\n文件：${packageFileName || '未知'}\n字节数：${packageSizeBytes}\nSHA-256：${packageSha256 || '未知'}\n\n安装后，它的服务、生命周期脚本或可执行程序将以你的当前用户权限运行，可能读取或修改你有权访问的文件、连接网络或启动其他进程。仅在你信任安装包来源时继续。此确认只适用于本次安装的这个组件包快照。`,
-    buttons: ['取消安装', '我信任来源，继续安装'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true,
-  });
-  return response.response === 1;
+const confirmComponentPackageInstall = async ({ componentId, componentName = componentId, componentVersion, requestConfirmation }) => {
+  return await requestConfirmation({
+    title: `安装“${componentName}”？`,
+    message: `版本 ${componentVersion} · 安装组件可能存在风险`,
+    detail: '组件可访问或修改你的文件、连接网络并运行程序。请确认后继续安装。',
+  }) === true;
 };
 const confirmComponentBackgroundStop = async ({ componentId, componentName = componentId, action, processSupervisor, dialog, mainWindow }) => {
   const active = processSupervisor?.hasComponentOwnerProcesses?.(componentId) === true
@@ -278,9 +292,7 @@ const snapshotComponentTrust = (componentId, manifest) => {
   if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
   if (manifest.apiVersion !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
   if (typeof manifest.version !== 'string' || !manifest.version.trim() || manifest.version.length > 128) throw new Error('组件版本无效');
-  const pinned = PLUGIN_DEFINITIONS[componentId]?.integrityManifest;
-  if (pinned && String(PLUGIN_DEFINITIONS[componentId].version) !== manifest.version) throw new Error(`组件版本不兼容：需要 ${PLUGIN_DEFINITIONS[componentId].version}，安装包为 ${manifest.version}`);
-  return { componentId, componentVersion: manifest.version, integrityStatus: pinned ? 'pinned-unverified' : 'unsigned' };
+  return { componentId, componentVersion: manifest.version };
 };
 const directoryNodeIdentity = stat => ({ dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs });
 const sameDirectoryNode = (left, right) => left && right && left.dev === right.dev && left.ino === right.ino && left.birthtimeMs === right.birthtimeMs;
@@ -995,7 +1007,8 @@ const registerSystemIpc = context => {
       await capacityReservation.resize(packageSizeBytes + snapshotPackage.totalUncompressedBytes + 64 * 1024 * 1024);
       installVolumeReservation = await reserveComponentInstallCapacity(pluginService.installRoot, snapshotPackage.totalUncompressedBytes + 128 * 1024 * 1024);
       const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
-      const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, packageFileName: path.basename(archivePath), packageSizeBytes, packageSha256: sourceIdentity.sha256, dialog, mainWindow });
+      const componentName = PLUGIN_DEFINITIONS[componentId]?.name || String(snapshotPackage.manifest.displayName || snapshotPackage.manifest.name || componentId).slice(0, 120);
+      const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, componentName, requestConfirmation: presentation => requestComponentInstallConfirmation(event.sender, presentation, operation) });
       if (!confirmed) return installResponse = { success: false, cancelled: true };
       if (!await confirmComponentBackgroundStop({ componentId, action: 'install', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return installResponse = { success: false, cancelled: true };
       const recoveredTransactions = await recoverPendingComponentTransaction(componentId);
@@ -1028,15 +1041,11 @@ const registerSystemIpc = context => {
         if (!(await fs.promises.stat(sourceFile).catch(() => null))?.isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
       }
       await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true);
-      const integrityToken = pluginService.componentIntegrityToken(componentId, componentRoot);
-      const extractedIntegrityStatus = integrityToken.startsWith('integrity|') ? 'pinned-unverified' : integrityToken.startsWith('metadata|') ? 'unsigned' : 'invalid';
-      if (extractedIntegrityStatus !== snapshotTrust.integrityStatus) throw new Error('组件快照完整性状态在解压后发生变化');
       componentTreeIdentity = componentSubtreeIdentity(extractedPackage.treeIdentity, extractedPackage.manifestEntry);
-      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity, { ...operation, includeNode: true });
       const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
       await installVolumeReservation.resize((componentSizeBytes * 2) + 128 * 1024 * 1024);
-
-      await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity, { ...operation, includeNode: true });
+      // Extraction already read back the tree. Check the copied destination
+      // against that receipt below instead of rehashing the source twice.
 
       const installLocation = await prepareSafeComponentInstallContainer({ fs, path, installRoot: pluginService.installRoot, componentId });
       const { installRoot, container } = installLocation;
@@ -1045,7 +1054,7 @@ const registerSystemIpc = context => {
       assertInstallActive();
       await fs.promises.mkdir(stagingPath);
       stagingNodeIdentity = await readDirectoryNodeIdentity(fs, stagingPath, '组件发布暂存目录');
-      await fs.promises.cp(componentRoot, stagingPath, { recursive: true, force: false, errorOnExist: true });
+      await copyComponentIntoStaging(fs, path, componentRoot, stagingPath);
       stagingNodeIdentity = await readDirectoryNodeIdentity(fs, stagingPath, '组件发布暂存目录');
       componentTreeIdentity = await captureVerifiedComponentTreeIdentity(stagingPath, componentTreeIdentity);
       assertInstallActive();
@@ -1069,6 +1078,7 @@ const registerSystemIpc = context => {
       return installResponse = { success: true, installed: true, packageSizeBytes, operationId: transactionResult.operationId, cleanupPending: false };
     } catch (error) {
       const pendingCleanup = Array.isArray(error?.cleanupPendingReceipts) && error.cleanupPendingReceipts.length ? error.cleanupPendingReceipts : error?.cleanupPendingPaths;
+      writeLog('error', 'Component installation failed', { componentId, operationId: installOperationId, code: error.code, error: error.message || String(error), stack: error.stack });
       if (!packageCleanupAttempted && Array.isArray(pendingCleanup) && pendingCleanup.length) await queueSystemFilesystemCleanup(pendingCleanup, `清理“${componentId || '未知'}”组件失败暂存文件`).catch(cleanupError => { error.message = `${error.message || String(error)}；${cleanupError.message || String(cleanupError)}`; });
       return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId || error?.transactionRecord?.operationId, cleanupPending: Boolean(error?.journal) || error?.cleanupPending === true || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
     } finally {
@@ -1975,4 +1985,4 @@ const registerSystemIpc = context => {
   return { componentTransactionReady };
 };
 
-module.exports = { awaitDurableCleanupRestart, componentTemporaryCleanupTargets, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { copyComponentIntoStaging, awaitDurableCleanupRestart, componentTemporaryCleanupTargets, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

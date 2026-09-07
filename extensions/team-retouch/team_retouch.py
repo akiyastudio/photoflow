@@ -84,8 +84,8 @@ def packaged_advanced_available():
     if not manifest_path.is_file():
         return True
     try:
-        offline = json.loads(manifest_path.read_text(encoding="utf-8")).get("advancedRuntime", {}).get("offlinePackage", {})
-        return bool(offline.get("path") and offline.get("sha256"))
+        runtime = json.loads(manifest_path.read_text(encoding="utf-8")).get("advancedRuntime", {})
+        return runtime.get("apiVersion") == 1
     except (OSError, ValueError, TypeError):
         return False
 

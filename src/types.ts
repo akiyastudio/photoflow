@@ -1090,7 +1090,7 @@ export interface IElectronAPI {
   clearLogs: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
   clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
-  installComponent: (request: ComponentInstallRequest) => Promise<{ success: boolean; cancelled?: boolean; recovered?: boolean; packageSizeBytes?: number; operationId?: string; cleanupPending?: boolean; outcomeUnknown?: boolean; error?: string }>;
+  installComponent: (request: ComponentInstallRequest, confirm: (presentation: { title: string; message: string; detail: string }) => Promise<boolean>) => Promise<{ success: boolean; cancelled?: boolean; recovered?: boolean; packageSizeBytes?: number; operationId?: string; cleanupPending?: boolean; outcomeUnknown?: boolean; error?: string }>;
   setComponentEnabled: (componentId: string, enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; cancelled?: boolean; error?: string }>;
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
   uninstallComponent: (componentId: string, options: { clearUserData: boolean }) => Promise<{ success: boolean; cancelled?: boolean; recovered?: boolean; dataCleared?: boolean; cleanupWarnings?: string[]; operationId?: string; cleanupPending?: boolean; outcomeUnknown?: boolean; error?: string }>;

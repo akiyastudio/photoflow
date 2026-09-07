@@ -15,6 +15,26 @@ from team_retouch import bounded_planning_box, emit_progress, identify_people, m
 from patch_merge import align_patch, constrain_person_boundary, edit_weight_and_delta, fuse_patch_delta, merge
 
 def main():
+    with tempfile.TemporaryDirectory() as runtime_fixture:
+        runtime_root = Path(runtime_fixture)
+        with mock.patch.object(team_retouch, 'component_directory', return_value=runtime_root):
+            for plugin_version in ('26.9.7', '26.9.8'):
+                (runtime_root / 'component.json').write_text(json.dumps({
+                    'version': plugin_version, 'advancedRuntime': {'apiVersion': 1, 'packageVersion': '26.9.4'},
+                }), encoding='utf-8')
+                assert team_retouch.packaged_advanced_available(), 'base updates must retain independent advanced detection'
+                runner = mock.Mock()
+                runner.run_pairdetr.side_effect = RuntimeError('independent-runtime-called')
+                with mock.patch.object(team_retouch, 'load_rgb', return_value=np.zeros((32, 32, 3), dtype=np.uint8)), mock.patch.object(team_retouch, 'infer_rtmdet', return_value=[{'box': [1, 1, 20, 20], 'score': 0.9}]), redirect_stdout(io.StringIO()):
+                    try:
+                        team_retouch.detect(runtime_root / 'fixture.png', runtime_root / 'output', session_bundle=(object(), [], 'cpu'), advanced_runner=runner, advanced_mode='advanced')
+                    except RuntimeError as error:
+                        assert 'independent-runtime-called' in str(error), str(error)
+                    else:
+                        raise AssertionError('Base plugin silently skipped the installed advanced detector')
+                runner.run_pairdetr.assert_called_once()
+            (runtime_root / 'component.json').write_text('{"advancedRuntime":{"apiVersion":999}}', encoding='utf-8')
+            assert not team_retouch.packaged_advanced_available(), 'unsupported runtime API must remain disabled'
     from work_tile_scenarios import verify_work_tile_modes
     verify_work_tile_modes()
     command = "printf '%s' \"a path/O'Name/$literal\""

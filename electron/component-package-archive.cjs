@@ -381,7 +381,10 @@ const assertSafeExtractionParents = async (targetRoot, target) => {
   for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
     current = path.join(current, segment);
     let stat = await fs.promises.lstat(current).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
-    if (!stat) { await fs.promises.mkdir(current, { recursive: false }); stat = await fs.promises.lstat(current); }
+    if (!stat) {
+      await fs.promises.mkdir(current, { recursive: false }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+      stat = await fs.promises.lstat(current);
+    }
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`ZIP 条目父路径包含链接或非目录项：${current}`);
     const canonical = await fs.promises.realpath(current);
     const realRelative = path.relative(canonicalRoot, canonical);
@@ -447,11 +450,21 @@ const extractComponentArchive = async (inspection, targetRoot, options = {}) => 
     const extractionInspection = { ...inspection, targetRoot };
     const actualBudget = { bytes: 0 };
     const outputReceipts = [];
-    for (const entry of inspection.entries) {
-      const target = path.join(targetRoot, ...entry.name.replace(/\/$/, '').split('/'));
-      const outputReceipt = await extractEntry(archiveHandle, extractionInspection, entry, target, actualBudget, operation);
-      if (outputReceipt) outputReceipts.push(outputReceipt);
-    }
+    // Bounded parallelism overlaps file creation and durable writes. Drain every
+    // worker before cleanup so no writer can recreate files after a failure.
+    let nextEntry = 0;
+    let failure = null;
+    await Promise.all(Array.from({ length: Math.min(4, inspection.entries.length) }, async () => {
+      while (!failure && nextEntry < inspection.entries.length) {
+        const entry = inspection.entries[nextEntry++];
+        try {
+          const target = path.join(targetRoot, ...entry.name.replace(/\/$/, '').split('/'));
+          const outputReceipt = await extractEntry(archiveHandle, extractionInspection, entry, target, actualBudget, operation);
+          if (outputReceipt) outputReceipts.push(outputReceipt);
+        } catch (error) { failure ||= error; }
+      }
+    }));
+    if (failure) throw failure;
     if (inspection.inspectionToken && !sameFileIdentity(inspection.inspectionToken.identity, fileIdentity(await archiveHandle.stat()))) throw new Error('组件快照在提取期间发生变化');
     const manifestPath = path.join(targetRoot, ...inspection.manifestEntry.split('/'));
     const manifestStat = await fs.promises.stat(manifestPath);

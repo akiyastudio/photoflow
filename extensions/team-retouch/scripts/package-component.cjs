@@ -59,8 +59,7 @@ const advancedPackageName=`PhotoFlow-team-retouch-advanced-${advancedPackageVers
 const advancedPackageSource=advancedPackagePath(advancedPackageName);
 delete manifest.advancedRuntime.offlinePackage;
 manifest.requiredFiles = manifest.requiredFiles.filter(file => file !== advancedPackageName);
-if(withAdvanced){
-  if(!fs.existsSync(advancedPackageSource)||!fs.statSync(advancedPackageSource).isFile()) throw new Error(`Trusted advanced package is missing: run npm run package:advanced first (${advancedPackageName})`);
+{
   const lifecycleDirectory=path.join(packageRoot,'advanced-installer'); fs.mkdirSync(lifecycleDirectory,{recursive:true});
   for(const name of ['setup-team-retouch-advanced.ps1','uninstall-team-retouch-advanced.ps1']) fs.copyFileSync(path.join(root,'advanced-installer',name),path.join(lifecycleDirectory,name));
   const advancedScriptsDirectory=path.join(packageRoot,'advanced'); fs.mkdirSync(advancedScriptsDirectory,{recursive:true});
@@ -71,19 +70,13 @@ if(withAdvanced){
   fs.copyFileSync(path.join(root,'image_safety.py'),path.join(packageRoot,'image_safety.py'));
   fs.copyFileSync(path.join(root,'advanced_geometry.py'),path.join(packageRoot,'advanced_geometry.py'));
   fs.copyFileSync(path.join(root,'checkpoint_lock.py'),path.join(packageRoot,'checkpoint_lock.py'));
-  fs.copyFileSync(advancedPackageSource,path.join(packageRoot,advancedPackageName));
-  manifest.advancedRuntime.offlinePackage={path:advancedPackageName,sha256:sha256File(advancedPackageSource)};
-  manifest.requiredFiles.push(advancedPackageName);
-  manifest.requiredFiles.push('advanced/pairdetr_service.py','advanced/sam2_service.py','image_safety.py','advanced_geometry.py','checkpoint_lock.py');
-} else {
-  delete manifest.componentHost.service.lifecycleActions;
-  manifest.componentHost.service.capabilities = manifest.componentHost.service.capabilities.filter(value => value !== 'component.lifecycle');
-  manifest.componentHost.service.permissions = manifest.componentHost.service.permissions.filter(value => !value.startsWith('component.lifecycle.'));
-  const managementMethods = new Set(['team.advanced.preflight.v1','team.advanced.install.v1','team.advanced.uninstall.v1']);
-  manifest.componentHost.service.rpcMethods = manifest.componentHost.service.rpcMethods.filter(value => !managementMethods.has(value));
-  for (const contribution of manifest.componentHost.contributions) {
-    if (Array.isArray(contribution.rpcMethods)) contribution.rpcMethods = contribution.rpcMethods.filter(value => !managementMethods.has(value));
+  if(withAdvanced){
+    if(!fs.existsSync(advancedPackageSource)||!fs.statSync(advancedPackageSource).isFile()) throw new Error(`Trusted advanced package is missing: run npm run package:advanced first (${advancedPackageName})`);
+    fs.copyFileSync(advancedPackageSource,path.join(packageRoot,advancedPackageName));
+    manifest.advancedRuntime.offlinePackage={path:advancedPackageName,sha256:sha256File(advancedPackageSource)};
+    manifest.requiredFiles.push(advancedPackageName);
   }
+  manifest.requiredFiles.push('advanced/pairdetr_service.py','advanced/sam2_service.py','image_safety.py','advanced_geometry.py','checkpoint_lock.py');
 }
 for(const action of Object.values(manifest.componentHost.service.lifecycleActions||{})) action.sha256=sha256File(path.join(packageRoot,action.entry));
 fs.writeFileSync(path.join(packageRoot,'component.json'),`${JSON.stringify(manifest,null,2)}\n`); writePackageInventory(packageRoot, { componentId: manifest.id, version: manifest.version, buildMode: developmentPackage ? 'development' : 'release', variant: withAdvanced ? 'advanced' : 'base' }); for(const file of [packagedEntrypoint,...(manifest.requiredFiles||[])]) if(!fs.existsSync(path.join(packageRoot,file))) throw new Error(`Packaged component is missing required file: ${file}`);

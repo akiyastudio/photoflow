@@ -70,10 +70,21 @@ export const TeamAdvancedSettingsContent = ({ notice }: { notice: (message: stri
           <div className="team-settings-banner pf-banner" data-tone={advanced.tone === 'danger' ? 'danger' : advanced.tone === 'warning' ? 'warning' : undefined}>{(advanced.state === 'error' || advanced.state === 'repair-needed' || advanced.state === 'unavailable') && <AlertCircle size={15}/>}<span>{advanced.description}</span></div>
           <div className="team-settings-actions">
             {(advanced.state === 'error' || advanced.state === 'unavailable') && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void refreshEnvironment()} disabled={Boolean(busy)}><RotateCcw size={14}/>重新检查</button>}
-            {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('检查安装条件', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败')); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>}
+            {canManageEnvironment && <button type="button" className="pf-button inline-flex items-center gap-2" onClick={() => void run('检查安装条件', async () => { assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败'); await refreshEnvironment(); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>}
             {canManageEnvironment && <button type="button" className="pf-button pf-button-primary inline-flex items-center gap-2" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.install.v1'), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>}
             {canManageEnvironment && <button type="button" className="pf-button pf-button-danger" onClick={() => void run('卸载增强版', async () => { if (!await appDialog.confirm({ title: '卸载人物检测增强版吗？', message: '将删除 PairDETR、SAM 2.1 和独立运行环境；基础检测和身份识别不受影响。', confirmLabel: '卸载增强版', tone: 'danger' })) return false; assertSuccess(await durableRpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); applyLifecycleResult({ success: true, state: 'not-installed', installed: false, runtimeSource: 'packaged' }); return true; })} disabled={Boolean(busy)}>卸载</button>}
           </div>
+        </div>
+      </SettingsRow>
+      <SettingsRow title="如何安装增强版" description="高级环境单独安装一次；日常更新基础插件后继续使用。" align="start">
+        <div className="team-settings-status">
+          <ol className="list-decimal space-y-2 pl-5 text-sm">
+            <li>准备单独的团片协作高级环境 ZIP，无需解压，也无需放入主程序的组件目录。完整插件包和 evidence 资料包不能用于此处。</li>
+            <li>点击「检查条件」，在文件选择窗口中选择高级环境 ZIP。检查通过后会记住该文件位置。</li>
+            <li>点击「安装 / 修复」，等待完成，确认状态显示「可用」。也可直接点击「安装 / 修复」选择环境包并安装。</li>
+            <li>以后照常更新基础插件，高级环境会保留并自动复用；只有安装或修复环境时才需要该 ZIP。</li>
+          </ol>
+          {buildWithoutAdvanced && <p className="pf-settings-description">当前插件不支持此高级环境接口，请先更新团片协作基础插件。</p>}
         </div>
       </SettingsRow>
       <SettingsRow title="安装条件" description="Windows x64、WSL 2、支持 WSL CUDA 的 NVIDIA 显卡与驱动，以及至少 35 GB 可用空间。建议至少 8 GB 显存和 16 GB 系统内存。"><span className="team-settings-badge pf-status">离线安装</span></SettingsRow>

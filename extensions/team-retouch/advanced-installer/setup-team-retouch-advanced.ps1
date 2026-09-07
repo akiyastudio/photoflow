@@ -20,6 +20,41 @@ function Resolve-AdvancedPackageVersion([object]$ComponentManifest) {
     if ($value -notmatch '^\d+(\.\d+)+$') { throw 'Invalid pinned advanced runtime package version.' }
     return $value
 }
+function Select-AdvancedPackageFile {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = 'PhotoFlow - Select standalone advanced runtime ZIP'
+    $dialog.Filter = 'Advanced runtime ZIP (*.zip)|*.zip'
+    $dialog.CheckFileExists = $true
+    $dialog.Multiselect = $false
+    try {
+        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { throw 'Advanced runtime package selection cancelled.' }
+        return $dialog.FileName
+    } finally { $dialog.Dispose() }
+}
+function Resolve-AdvancedPackageSource([object]$ComponentManifest, [string]$ComponentRoot, [string]$RequestedPath, [string]$SourceRecord) {
+    $embedded = $ComponentManifest.advancedRuntime.offlinePackage
+    $declaration = if ($embedded) { $embedded } else { $ComponentManifest.advancedRuntime.externalPackage }
+    $name = [string]$declaration.path
+    if (-not $name -or [IO.Path]::GetFileName($name) -ne $name -or [string]$declaration.sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Component manifest does not declare one safe advanced package and digest.' }
+    if ($embedded) {
+        $target = [IO.Path]::GetFullPath((Join-Path $ComponentRoot $name))
+        if ($RequestedPath -and -not ([IO.Path]::GetFullPath($RequestedPath)).Equals($target, [StringComparison]::OrdinalIgnoreCase)) { throw 'Embedded advanced package path mismatch.' }
+    } else {
+        $target = $RequestedPath
+        Assert-SafeLocalPath $SourceRecord | Out-Null
+        if (-not $target -and (Test-Path -LiteralPath $SourceRecord -PathType Leaf)) {
+            try {
+                $saved = Get-Content -LiteralPath $SourceRecord -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ([string]$saved.sha256 -eq [string]$declaration.sha256 -and (Test-Path -LiteralPath ([string]$saved.path) -PathType Leaf)) { $target = [string]$saved.path }
+            } catch { $target = '' }
+        }
+        if (-not $target) { $target = Select-AdvancedPackageFile }
+    }
+    $target = Assert-SafeLocalPath $target
+    if (-not [IO.Path]::GetExtension($target).Equals('.zip', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'Select the standalone advanced runtime .zip package.' }
+    return @{ Path=$target; Sha256=([string]$declaration.sha256).ToLowerInvariant(); External=(-not [bool]$embedded) }
+}
 function Get-AdvancedWslText([string]$Name, [string]$User, [string[]]$CommandArguments) {
     $lines = @(& wsl.exe -d $Name -u $User --exec @CommandArguments)
     if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or -not ([string]$lines[0]).Trim()) { throw 'Unable to resolve an advanced runtime path in WSL.' }
@@ -366,15 +401,10 @@ $manifestAdvancedRuntimeApiVersion = [int]$componentManifest.advancedRuntime.api
 if (-not $ExpectedComponentVersion.Trim()) { $ExpectedComponentVersion = $manifestComponentVersion }
 if ($ExpectedAdvancedRuntimeApiVersion -le 0) { $ExpectedAdvancedRuntimeApiVersion = $manifestAdvancedRuntimeApiVersion }
 if ($ExpectedComponentVersion -ne $manifestComponentVersion -or $ExpectedAdvancedRuntimeApiVersion -ne $manifestAdvancedRuntimeApiVersion) { throw 'Host lifecycle contract does not match the installed component manifest.' }
-$declaredPackage = [string]$componentManifest.advancedRuntime.offlinePackage.path
-$declaredPackageSha256 = [string]$componentManifest.advancedRuntime.offlinePackage.sha256
-if (-not $declaredPackage -or [IO.Path]::GetFileName($declaredPackage) -ne $declaredPackage -or $declaredPackageSha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Component manifest does not declare one safe advanced package and digest.' }
-$declaredPackagePath = [IO.Path]::GetFullPath((Join-Path $componentRoot $declaredPackage))
-if (-not $PackagePath.Trim()) { $PackagePath = $declaredPackagePath }
-$PackagePath = [IO.Path]::GetFullPath($PackagePath)
-Assert-SafeLocalPath $PackagePath | Out-Null
-if (-not [IO.Path]::GetExtension($PackagePath).Equals('.zip', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $PackagePath -PathType Leaf)) { throw 'Only the component advanced .zip package is accepted.' }
-if (-not $PackagePath.Equals($declaredPackagePath, [StringComparison]::OrdinalIgnoreCase)) { throw 'Only the advanced package embedded in this installed component is accepted.' }
+$sourceRecord = Join-Path $stateRoot 'package-source.json'
+$source = Resolve-AdvancedPackageSource $componentManifest $componentRoot $PackagePath $sourceRecord
+$PackagePath = $source.Path
+$declaredPackageSha256 = $source.Sha256
 $validatedPackage = Open-ValidatedAdvancedArchive $PackagePath
 $packageHash = [string]$validatedPackage.PackageSha256
 if ($ExpectedPackageSha256.Trim() -and $packageHash -ne $ExpectedPackageSha256.ToLowerInvariant()) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced package does not match the Host-pinned SHA256.' }
@@ -395,6 +425,10 @@ $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($componentDataRoot))
 $existingBytes = if ($registration -and (Test-Path -LiteralPath $stableVhd -PathType Leaf)) { (Get-Item -LiteralPath $stableVhd).Length } else { 0 }
 $peakBytes = [int64]([Math]::Ceiling(([int64]$manifest.installedSizeBytes * 2 + $existingBytes) * 1.15) + 2GB)
 Assert-AdvancedPreflight ([Environment]::Is64BitOperatingSystem) ([double]$compute[0]) $drive.DriveType $drive.AvailableFreeSpace $peakBytes
+if ($source.External) {
+    New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
+    Write-JsonAtomic $sourceRecord @{ path=$PackagePath; sha256=$packageHash }
+}
 if ($CheckOnly) { Close-ValidatedAdvancedArchive $validatedPackage; Write-Host 'OFFLINE_PREFLIGHT_OK|trusted package, WSL 2, NVIDIA CUDA, precision and disk ready'; exit 0 }
 
 $priorState = $null; $priorMarker = $null
