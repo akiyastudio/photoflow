@@ -63,6 +63,9 @@ assert(
   'publish-release must bind strict approval to its selected installer and immutable delivery manifest',
 );
 assert(generateReleaseJson.includes('const requiresReleaseApproval = shouldPublish || published'), 'published records and network publishing must both require strict approval');
-assert(generateReleaseJson.includes('if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath)'), 'generate-release-json must invoke the strict gate for all publishable records');
+assert(
+  generateReleaseJson.includes('if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath, stagedEvidence.manifestPath)'),
+  'generate-release-json must bind the strict gate to the selected installer and immutable delivery manifest for all publishable records',
+);
 
 console.log('Privacy, legal structure, and strict release-gate contract tests passed');
