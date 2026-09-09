@@ -4,18 +4,25 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { privateOutputPath } = require('./project-output-paths.cjs');
 
 const root = path.resolve(__dirname, '..');
 const legalRoot = path.join(root, 'docs', 'legal');
-const documentNames = [
-  'README.md',
-  'RELEASE_EVIDENCE_GUIDE.md',
-  'PIPIA_TEMPLATE.md',
-  'DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md',
-  'THIRD_PARTY_DISTRIBUTION_EVIDENCE.md',
+const publicDocumentNames = [
+  'CHILDREN_PRIVACY.html',
+  'CUSTOMER_DATA_PROCESSING_TERMS.html',
+  'FACE_RECOGNITION_RULES.html',
+  'INSTALLER_TERMS.html',
+  'INSTALLER_TERMS.txt',
+  'OPEN_SOURCE_NOTICES.html',
+  'PERMISSIONS.html',
+  'PERSONAL_INFORMATION_LIST.html',
+  'PRIVACY_POLICY.html',
+  'THIRD_PARTY_SERVICES.html',
+  'USER_AGREEMENT.html',
 ];
 const approvalTemplatePath = path.join(legalRoot, 'RELEASE_APPROVAL_TEMPLATE.json');
-const approvalPath = path.join(legalRoot, 'RELEASE_APPROVAL.json');
+const approvalPath = privateOutputPath(root, 'audits', 'legal', 'RELEASE_APPROVAL.json');
 const requireReady = process.argv.includes('--require-ready');
 const installerArgumentIndex = process.argv.indexOf('--installer');
 const installerArgument = installerArgumentIndex >= 0 ? process.argv[installerArgumentIndex + 1] : '';
@@ -41,15 +48,11 @@ const assertNotIgnored = repositoryPath => {
 };
 
 assert(fs.existsSync(legalRoot), 'missing legal document directory: docs/legal/');
-const documents = new Map(documentNames.map(name => {
-  const file = path.join(legalRoot, name);
-  assert(fs.existsSync(file), `missing legal evidence document: ${name}`);
-  assertNotIgnored(`docs/legal/${name}`);
-  return [name, fs.readFileSync(file, 'utf8')];
-}));
-
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-assert(documents.get('README.md').includes(`适用版本：照片流 ${packageJson.version} 公测版`), 'legal README version must match package.json');
+for (const name of publicDocumentNames) {
+  assert(fs.existsSync(path.join(legalRoot, name)), `missing public legal document: ${name}`);
+  assertNotIgnored(`docs/legal/${name}`);
+}
 
 assert(fs.existsSync(approvalTemplatePath), 'missing legal release approval template');
 assertNotIgnored('docs/legal/RELEASE_APPROVAL_TEMPLATE.json');
@@ -114,28 +117,11 @@ const validateApprovalShape = (approval, { strict }) => {
 const approvalTemplate = JSON.parse(fs.readFileSync(approvalTemplatePath, 'utf8'));
 validateApprovalShape(approvalTemplate, { strict: false });
 
-const approvalIsTrackedAndClean = () => {
-  const repositoryPath = 'docs/legal/RELEASE_APPROVAL.json';
-  const runGit = args => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true });
-    if (result.error) throw result.error;
-    if (result.status !== 0 && result.status !== 1) {
-      throw new Error(`git ${args.join(' ')} failed with status ${result.status}: ${String(result.stderr || '').trim()}`);
-    }
-    return result.status;
-  };
-  return runGit(['ls-files', '--error-unmatch', '--', repositoryPath]) === 0
-    && runGit(['diff', '--quiet', '--', repositoryPath]) === 0
-    && runGit(['diff', '--cached', '--quiet', '--', repositoryPath]) === 0;
+const approvalIsPrivateRegularFile = () => {
+  const stat = fs.lstatSync(approvalPath, { throwIfNoEntry: false });
+  return Boolean(stat?.isFile() && !stat.isSymbolicLink() && stat.size >= 2 && stat.size <= 64 * 1024);
 };
 
-const publicDocumentSection = (documents.get('README.md').split('## 对外文件')[1] || '').split(/^## /m)[0];
-const publicDocumentNames = [...publicDocumentSection.matchAll(/`([^`]+\.(?:html|txt))`/gi)].map(match => match[1]);
-assert(publicDocumentNames.length > 0, 'legal README must list public HTML/TXT documents');
-for (const name of publicDocumentNames) {
-  assert(fs.existsSync(path.join(legalRoot, name)), `missing public legal document: ${name}`);
-  assertNotIgnored(`docs/legal/${name}`);
-}
 const legalExtraResources = (packageJson.build?.extraResources || []).filter(entry => entry?.from === 'docs/legal');
 assert.strictEqual(legalExtraResources.length, 1, 'package build must have exactly one docs/legal extraResources rule');
 assert.deepStrictEqual(legalExtraResources[0].filter, ['*.html'], 'runtime legal resources must include public HTML only');
@@ -143,29 +129,6 @@ assert(!legalExtraResources[0].filter.some(pattern => /(?:\.md|\.json|RELEASE_AP
 const publicHtmlNames = publicDocumentNames.filter(name => name.toLowerCase().endsWith('.html')).sort();
 const legalHtmlNames = fs.readdirSync(legalRoot).filter(name => name.toLowerCase().endsWith('.html')).sort();
 assert.deepStrictEqual(legalHtmlNames, publicHtmlNames, 'the *.html package filter must resolve exactly to the README public HTML set');
-
-const blockerSection = documents.get('README.md').split('## 发布阻断项')[1] || '';
-const blockerItems = blockerSection.match(/^\d+\. /gm) || [];
-assert.strictEqual(blockerItems.length, 5, 'legal README must retain exactly five release blockers');
-assert(!/^\s*- \[[xX]\]/m.test(blockerSection), 'release blockers must not be checked as complete');
-
-for (const [name, markdown] of documents) {
-  const links = [...markdown.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].map(match => match[1]);
-  for (const link of links) {
-    if (/^(?:https?:|mailto:|#)/i.test(link)) continue;
-    const target = decodeURIComponent(link.split('#')[0]);
-    assert(fs.existsSync(path.resolve(legalRoot, target)), `${name} has missing local link target: ${link}`);
-  }
-}
-
-for (const [name, required] of Object.entries({
-  'RELEASE_EVIDENCE_GUIDE.md': ['营业执照扫描件', '文件 ID', 'SHA-256', 'SLA', '身份核验', '内部证据库'],
-  'PIPIA_TEMPLATE.md': ['第五十五条', '第五十六条', '单独同意', '未成年人', '至少保存三年', '[待填写]'],
-  'DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md': ['180 天', '修复后 90 天', '最迟不超过 1 年', 'type` 为 `timer`', '幂等', '复制/导出', '[待核验]'],
-  'THIRD_PARTY_DISTRIBUTION_EVIDENCE.md': ['基础 Windows 安装包', '可选组件', 'SBOM', 'PairDETR', '不得公开发行', '[待填写]'],
-})) {
-  for (const text of required) assert(documents.get(name).includes(text), `${name} must include: ${text}`);
-}
 
 const vendorRoot = path.join(root, 'extensions', 'video-tools', 'media-runtime', 'vendor', 'windows-x64');
 for (const repositoryPath of [
@@ -232,21 +195,25 @@ const sha256File = filePath => new Promise((resolve, reject) => {
 });
 
 const run = async () => {
-  const openFields = [...documents.values()].reduce((count, text) => count + (text.match(/\[(?:待填写|待核验)[^\]]*\]/g) || []).length, 0);
+  const openFields = (JSON.stringify(approvalTemplate).match(/(?:待填写|待核验|PLACEHOLDER|YYYY|64_HEX|APPROVER_ROLE|EVIDENCE_ID)/gi) || []).length;
   let approval = null;
   let releaseReady = false;
-  if (fs.existsSync(approvalPath)) {
-    assertNotIgnored('docs/legal/RELEASE_APPROVAL.json');
+  if (approvalIsPrivateRegularFile()) {
     approval = JSON.parse(fs.readFileSync(approvalPath, 'utf8'));
-    validateApprovalShape(approval, { strict: true });
-    releaseReady = approvalIsTrackedAndClean();
+    validateApprovalShape(approval, { strict: false });
+    try {
+      validateApprovalShape(approval, { strict: true });
+      releaseReady = true;
+    } catch (error) {
+      if (requireReady) throw error;
+    }
   }
 
   if (requireReady && !approval) {
-    throw new Error('legal release approval is missing: copy RELEASE_APPROVAL_TEMPLATE.json to RELEASE_APPROVAL.json and complete only the non-sensitive evidence index');
+    throw new Error(`legal release approval is missing: copy docs/legal/RELEASE_APPROVAL_TEMPLATE.json to ${approvalPath} and complete the private evidence index`);
   }
   if (requireReady && !releaseReady) {
-    throw new Error('legal release approval must be tracked by Git and identical in the work tree, index, and HEAD');
+    throw new Error('legal release approval must be a regular JSON file in the configured private audit root');
   }
   if (requireReady && installerArgument) {
     const installerPath = path.resolve(installerArgument);
@@ -267,23 +234,23 @@ const run = async () => {
     assert.strictEqual(ancestry.status, 0, 'approval commit must descend from the immutable buildSourceCommit');
   }
 
-  console.log('Legal release evidence structural, local-link, and FFmpeg integrity checks completed.');
+  console.log('Public legal resources, private approval structure, and FFmpeg integrity checks completed.');
   console.log(JSON.stringify({
     releaseReady,
-    approvalIndex: approval ? 'docs/legal/RELEASE_APPROVAL.json' : null,
+    approvalIndex: approval ? approvalPath : null,
     openTemplateFields: openFields,
     sumsDocumentHash,
     ffmpegHashFindings: hashFindings,
   }, null, 2));
-  if (!releaseReady) console.log('Release remains blocked until the non-sensitive approval index references completed evidence and approvals in the controlled evidence repository.');
+  if (!releaseReady) console.log('Release remains blocked until the private approval index references completed evidence and approvals in the controlled evidence repository.');
 
   if (requireReady) return;
 
   const strict = spawnSync(process.execPath, [__filename, '--require-ready'], { cwd: root, encoding: 'utf8', windowsHide: true });
   if (releaseReady) {
-    assert.strictEqual(strict.status, 0, 'strict legal release readiness must pass for a valid, tracked, clean approval index');
+    assert.strictEqual(strict.status, 0, 'strict legal release readiness must pass for a valid private approval index');
   } else {
-    assert.notStrictEqual(strict.status, 0, 'strict legal release readiness must fail until a valid, tracked, clean approval index exists');
+    assert.notStrictEqual(strict.status, 0, 'strict legal release readiness must fail until a valid private approval index exists');
   }
 
   if (!approval) {
@@ -298,6 +265,7 @@ const run = async () => {
     const childEnv = {
       ...process.env,
       NODE_OPTIONS: `${String(process.env.NODE_OPTIONS || '').trim()} --require=${preloadPath}`.trim(),
+      PHOTOFLOW_PRIVATE_ROOT: path.join(fixtureRoot, 'private'),
       PHOTOFLOW_ADMIN_TOKEN: 'test-token-must-not-be-used',
     };
     const publish = spawnSync(process.execPath, [
@@ -345,11 +313,11 @@ const run = async () => {
   const publishRun = publishSource.slice(publishSource.indexOf('const run = async'));
   assert(publishRun.indexOf('runLegalReleaseReadyGate(installerPath, manifestPath)') < publishRun.indexOf('process.env.PHOTOFLOW_ADMIN_TOKEN'), 'publish-release must run the strict staged gate before reading an admin token');
   assert(publishRun.indexOf('runLegalReleaseReadyGate(installerPath, manifestPath)') < publishRun.indexOf('assertPublisherReady(token)'), 'publish-release must run the strict staged gate before network readiness checks');
-  assert(publishRun.includes("'--delivery-manifest', manifestPath"), 'publish-release must bind legal approval to the stable delivery manifest');
-  assert(publishRun.includes("'--installer', installerPath"), 'publish-release must pass the approved installer path to generate-release-json');
+  assert(publishSource.includes("'--delivery-manifest', manifestPath"), 'publish-release must bind legal approval to the stable delivery manifest');
+  assert(publishRun.includes('sha256: stagedEvidence.setup.sha256'), 'publish-release must use the approved staged installer hash');
   const generateSource = fs.readFileSync(path.join(root, 'scripts', 'generate-release-json.cjs'), 'utf8');
   const generateRun = generateSource.slice(generateSource.indexOf('const run = async'));
-  assert(generateRun.indexOf('runLegalReleaseReadyGate(installerPath)') < generateRun.indexOf('publishRelease(record)'), 'generate-release-json must run the strict gate before publishing');
+  assert(generateRun.indexOf('runLegalReleaseReadyGate(installerPath, stagedEvidence.manifestPath)') < generateRun.indexOf('publishRelease(record)'), 'generate-release-json must run the strict staged gate before publishing');
   assert(generateRun.includes('const published = booleanValue(args.published, false)'), 'candidate release JSON must default to published false');
   assert(generateRun.includes('const requiresReleaseApproval = shouldPublish || published'), 'both network publishing and importable published JSON must require approval');
 };

@@ -96,15 +96,12 @@
 
 ### 法律发布材料与发布验收
 
-- `docs/legal/DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md`
-- `docs/legal/PIPIA_TEMPLATE.md`
-- `docs/legal/README.md`
 - `docs/legal/RELEASE_APPROVAL_TEMPLATE.json`
-- `docs/legal/RELEASE_EVIDENCE_GUIDE.md`
-- `docs/legal/THIRD_PARTY_DISTRIBUTION_EVIDENCE.md`
+- 私有根目录的 `audits/legal/RELEASE_APPROVAL.json`（实际批准与证据索引，不进入源码仓库）
 - `package.json`（法律证据结构与发布严格门禁命令）
 - `scripts/check-project.cjs`（默认结构检查与 `--release-ready` 严格模式）
 - `scripts/generate-release-json.cjs`
+- `scripts/prepare-release-approval.cjs`
 - `scripts/publish-release.cjs`
 - `scripts/test-legal-release-evidence.cjs`
 

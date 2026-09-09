@@ -160,7 +160,7 @@ const run = async () => {
   const args = parseArguments(process.argv.slice(2));
   const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
   const version = String(packageJson.version || '').trim();
-  if (!VERSION_PATTERN.test(version)) throw new Error('package.json 中的版本号无效；请先运行 set-version.bat');
+  if (!VERSION_PATTERN.test(version)) throw new Error('package.json 中的版本号无效；请先运行 npm run version:set');
   const versionFields = version.split('.').map(Number);
   if (versionFields.some(value => !Number.isSafeInteger(value) || value < 0)
     || versionFields[1] > 99 || versionFields[2] > 99) {

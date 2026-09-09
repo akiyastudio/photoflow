@@ -4,12 +4,15 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { PREPARE_STEPS, writeSessionLogBestEffort } = require('./prepare-release.cjs');
+const { parseManifestArgument, writeJsonExclusiveAtomic } = require('./prepare-release-approval.cjs');
 const { writeQualityReceipt, validateQualityReceipt, clearQualityReceipt, readGitHead, assertGitHead, captureGitSourceFence, assertGitSourceFence, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 
 const root = path.resolve(__dirname, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 assert.deepEqual(PREPARE_STEPS, ['check:release:quality', 'electron:build', 'build:components']);
 assert.equal(packageJson.scripts['release:prepare'], 'node scripts/prepare-release.cjs');
+assert.equal(packageJson.scripts['release:approval'], 'node scripts/prepare-release-approval.cjs');
+assert.equal(packageJson.scripts.release, 'node scripts/run-release.cjs');
 assert.equal(packageJson.scripts['check:release:quality'], 'node scripts/check-project.cjs --release-quality');
 assert.equal(packageJson.scripts['check:release:final'], 'node scripts/check-final-release-ready.cjs');
 const finalSource = fs.readFileSync(path.join(root, 'scripts', 'check-final-release-ready.cjs'), 'utf8');
@@ -24,10 +27,20 @@ const releaseJsonSource = fs.readFileSync(path.join(root, 'scripts', 'generate-r
 assert(releaseJsonSource.includes('captureArtifactIdentity(installerPath)') && releaseJsonSource.indexOf('assertSourceIdentity(installerPath, installerIdentity)') < releaseJsonSource.indexOf('await publishRelease(record)'), 'release record publishing must retain the approved installer identity fence through network publication');
 assert(releaseJsonSource.includes('release:json 只能生成未发布草稿'), 'direct release:json must reject published or network modes');
 assert(publishSource.indexOf('await publishReleaseOnce(') < publishSource.indexOf('fs.renameSync(temporaryPath, outputPath)'), 'prepared published evidence must only be promoted after confirmed remote success');
+const releaseRunnerSource = fs.readFileSync(path.join(root, 'scripts', 'run-release.cjs'), 'utf8');
+assert(releaseRunnerSource.indexOf("runNpmScript('release:prepare')") < releaseRunnerSource.indexOf("runNpmScript('release:approval'"), 'one-command release must prepare before drafting approval');
+assert(releaseRunnerSource.indexOf('await waitForApproval(approvalPath)') < releaseRunnerSource.indexOf("runNpmScript('check:release:final'"), 'one-command release must wait for actual approval before the final gate');
+assert(releaseRunnerSource.indexOf("runNpmScript('check:release:final'") < releaseRunnerSource.indexOf("runNpmScript('release:publish'"), 'one-command release must pass the final gate before publishing');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-release-receipt-'));
 const privateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-private-receipt-'));
 process.env.PHOTOFLOW_PRIVATE_ROOT = privateRoot;
 try {
+  assert.equal(parseManifestArgument(['--manifest', 'release/DELIVERY-MANIFEST.json']), 'release/DELIVERY-MANIFEST.json');
+  assert.equal(parseManifestArgument(['--manifest=release/DELIVERY-MANIFEST.json']), 'release/DELIVERY-MANIFEST.json');
+  const approvalDraft = path.join(privateRoot, 'approval-test', 'RELEASE_APPROVAL.json');
+  writeJsonExclusiveAtomic(approvalDraft, { status: 'pending' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(approvalDraft, 'utf8')), { status: 'pending' });
+  assert.throws(() => writeJsonExclusiveAtomic(approvalDraft, { status: 'replacement' }), /EEXIST/);
   const blockedLogRoot = path.join(fixtureRoot, 'not-a-directory'); fs.writeFileSync(blockedLogRoot, 'file');
   assert.equal(writeSessionLogBestEffort(blockedLogRoot, 'attempt', {}, () => {}), false, 'session log failure must not invalidate successful immutable staging');
   fs.rmSync(blockedLogRoot);

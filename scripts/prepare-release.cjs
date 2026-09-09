@@ -53,7 +53,8 @@ const run = async () => {
     writeSessionLogBestEffort(logRoot, attemptId, { schemaVersion: 1, attemptId, gitCommit, startedAt, finishedAt: new Date().toISOString(), status: 'prepared', steps: results, manifestPath: staged.manifestPath });
     console.log(`\nImmutable release staging: ${staged.root}`);
     console.log(`Stable delivery manifest: ${staged.manifestPath}`);
-    console.log('STOP: approve both the final Setup SHA-256 and DELIVERY-MANIFEST.json SHA-256, then run check:release:final -- --manifest <path>. No approval was created automatically.');
+    console.log(`Next: npm run release:approval -- --manifest "${staged.manifestPath}"`);
+    console.log('This creates a private, prefilled approval draft. Complete its evidence references and approvals before running the final gate.');
   } finally {
     releaseLock(lock);
   }

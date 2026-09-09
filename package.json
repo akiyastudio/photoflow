@@ -14,6 +14,8 @@
     "release:publish": "node scripts/publish-release.cjs",
     "release:manifest": "node scripts/generate-delivery-manifest.cjs",
     "release:prepare": "node scripts/prepare-release.cjs",
+    "release:approval": "node scripts/prepare-release-approval.cjs",
+    "release": "node scripts/run-release.cjs",
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
     "build:recycle-bin-service": "node scripts/build-recycle-bin-service.cjs",
     "build:file-clipboard-service": "node scripts/build-file-clipboard-service.cjs",
