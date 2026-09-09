@@ -99,6 +99,7 @@ const provenPublishedOwnership = async (error, identityMatches, resolvePath) => 
 };
 
 const registerFileOperationsIpc = context => {
+  context = require('../services/rename-performance-diagnostics.cjs').instrumentRenameContext(context);
   const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseCleanupOwnership = defaultReleaseCleanupOwnership, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, scheduleMediaTrackingScan, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const nativeFileDragFallbackIcon = nativeImage ? createFallbackDragIcon(nativeImage) : null;
@@ -527,7 +528,7 @@ const registerFileOperationsIpc = context => {
     const responseContext = { operationId: '', taskNotificationOwned: false, affectedDirectories: [], count: 0 };
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root) || [];
+      const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root, operation === 'rename' ? { relativePaths } : undefined) || [];
       const sourceBelongsToProject = candidate => pathInside(root, candidate) || projectLinkHints.some(hint => (
         hint?.externalTargetRoot && pathInside(hint.externalTargetRoot, candidate)
       ));

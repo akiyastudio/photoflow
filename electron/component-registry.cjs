@@ -432,6 +432,47 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     admittedHostCandidates = new Set(values.map(candidate => hostCandidateKey(candidate.expectedId, candidate.componentRoot)));
     return values;
   };
+  // Folder protection only depends on installed policy metadata. Revalidating
+  // every plugin's complete Host descriptor on each rename is unnecessary.
+  // Atomic installs, manifest edits, enablement changes and development edits
+  // all change this token; no time-based stale-policy window is introduced.
+  const hostPolicyRevision = () => {
+    const token = [enablementStateTrusted, ...[...disabledComponentIds].sort()];
+    const identity = file => {
+      try { const stat = fs.lstatSync(file, { bigint: true }); return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`; }
+      catch (error) { if (error.code === 'ENOENT') return 'missing'; throw error; }
+    };
+    for (const root of roots) {
+      token.push(root.path, identity(root.path));
+      if (!fs.existsSync(root.path)) continue;
+      for (const entry of fs.readdirSync(root.path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+        const container = path.join(root.path, entry.name);
+        const runtime = path.join(container, 'runtime');
+        token.push(entry.name, identity(container), identity(runtime), identity(path.join(container, 'component.json')), identity(path.join(runtime, 'component.json')));
+        for (const directory of [container, runtime]) {
+          const manifestPath = path.join(directory, 'component.json');
+          if (!fs.existsSync(manifestPath)) continue;
+          try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const files = new Set();
+            const collect = (value, key = '') => {
+              if (typeof value === 'string' && ['entry', 'icon', 'path', 'entrypoints', 'requiredFiles'].includes(key)) files.add(value);
+              else if (Array.isArray(value)) value.forEach(item => collect(item, key));
+              else if (value && typeof value === 'object') for (const [field, item] of Object.entries(value)) collect(item, key === 'entrypoints' ? key : field);
+            };
+            collect(manifest);
+            for (const relative of [...files].sort()) {
+              const candidate = path.resolve(directory, relative);
+              token.push(relative, isInside(directory, candidate) ? identity(candidate) : 'unsafe');
+            }
+          } catch (error) { if (error instanceof SyntaxError) token.push('invalid-json'); else throw error; }
+        }
+      }
+    }
+    if (!isPackaged) token.push(developmentComponentMetadataToken(developmentOptions));
+    return token.join('|');
+  };
   const admitHostDescriptor = (descriptor, componentRoot) => {
     if (!descriptor || !admittedHostCandidates.has(hostCandidateKey(descriptor.componentId, componentRoot))) return false;
     if (COMPONENT_DEFINITIONS[descriptor.componentId]?.integrityManifest) verifyDirectory(descriptor.componentId, componentRoot, true);
@@ -461,7 +502,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     catch (error) { disabledComponentIds.add(id); throw error; }
     return true;
   };
-  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
+  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, hostPolicyRevision, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
 };
 
 module.exports = { COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, validateComponentPackageInspection, createComponentRegistry };

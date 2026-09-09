@@ -2,6 +2,7 @@ const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 
 const registerVersionIpc = context => {
+  context = require('../services/rename-performance-diagnostics.cjs').instrumentRenameContext(context);
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog: unsafeWriteLog = () => undefined } = context;
   const writeLog = (...args) => {
     try {
@@ -757,8 +758,18 @@ const registerVersionIpc = context => {
       workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
-      const current = (listed.progressFolders || []).find(progress => progress.id === String(request.progressId || ''));
+      context.cancelMediaTrackingScan?.(workspaceRoot, projectName);
+      // An explicit progress ID already identifies this mutation. Read its
+      // persisted snapshot without reconciling every folder in the project.
+      // Externally moved/missing paths still take the recovery-aware list path.
+      let listed = versionService.snapshotProgress
+        ? await versionService.snapshotProgress(workspaceRoot, projectName, true)
+        : await versionService.listProgress(workspaceRoot, projectName, true);
+      let current = (listed.progressFolders || []).find(progress => progress.id === String(request.progressId || ''));
+      if (versionService.snapshotProgress && (!listed.success || !current || current.externalLinkRelativePath || !fs.existsSync(current.folderPath))) {
+        listed = await versionService.listProgress(workspaceRoot, projectName, true);
+        current = (listed.progressFolders || []).find(progress => progress.id === String(request.progressId || ''));
+      }
       if (!current || current.nodeRole !== 'progress') throw new Error('progress_folder_rename_role_invalid: 只能重命名已登记的 progress 目录');
       const expectedRelativePath = normalizeProjectRelativePath(request.expectedRelativePath);
       const externalRoute = String(current.externalLinkRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -831,10 +842,11 @@ const registerVersionIpc = context => {
         mutationToken,
       });
       mutationToken = '';
-      const warnings = [];
-      await refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => { warnings.push({ code: 'WORKSPACE_CATALOG_REFRESH_FAILED', message: refreshError.message || String(refreshError) }); writeLog('warn', 'Unable to refresh workspace catalog after committed progress rename', { projectName, error: refreshError.message || String(refreshError) }); });
+      // The committed progress and exact new path are returned below. Catalog
+      // refresh is presentation maintenance and must not extend the write lock.
+      void refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => { writeLog('warn', 'Unable to refresh workspace catalog after committed progress rename', { projectName, error: refreshError.message || String(refreshError) }); });
       if (scheduleMediaTrackingScan) setTimeout(() => scheduleMediaTrackingScan(workspaceRoot, projectName, [], true), 250);
-      return { ...result, ...(warnings.length ? { warnings } : {}) };
+      return result;
     } catch (error) {
       if (mutationToken && workspaceRoot) await versionService.finishProgressTreeUpdate(workspaceRoot, { projectName, mutationToken }).catch(() => undefined);
       return { success: false, error: error.message || String(error) };

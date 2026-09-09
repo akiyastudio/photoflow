@@ -132,7 +132,7 @@ const componentHostRegistry = createComponentHostRegistry({
   candidateProvider: componentRegistry.hostCandidates,
   admitDescriptor: componentRegistry.admitHostDescriptor,
 });
-configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list });
+configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list, descriptorRevisionProvider: componentRegistry.hostPolicyRevision });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastViewManager;
 let componentCapabilityBroker; let abortComponentNetworkRequests;
 let getApplicationQuitState = () => 'idle';
@@ -270,7 +270,7 @@ const workspaceSqliteCoordinator = new WorkspaceSqliteCoordinator();
 
 const recycleBinService = createRecycleBinService({ app, shell, projectRoot, processSupervisor });
 const fileClipboardService = createFileClipboardService({ app, projectRoot, processSupervisor });
-const filePublicationService = createFilePublicationService({ app, projectRoot, processSupervisor });
+const filePublicationService = createFilePublicationService({ app, projectRoot, processSupervisor, persistentRename: true });
 const shellNewService = createShellNewService({ app });
 const fileSystemService = createFileSystemService({
   recycleBinService,
@@ -1307,6 +1307,7 @@ registerBrollImportIpc({
 });
 registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: () => mainWindow });
 app.whenReady().then(async () => {
+  void filePublicationService.warmRename()?.catch(error => writeLog('warn', 'Unable to warm file rename service', { error: error.message }));
   configMutationService = createConfigMutationService({ fs, crypto, getConfigPath, readSavedConfig, legacySettingsAdoptionsProvider: componentHostRegistry.list }); await configMutationService.ready; await configMutationService.adoptLegacySettings();
   registerComponentIconProtocol({ protocol, registry: componentHostRegistry, fs, writeLog });
   const mediaProtocolHandler = async request => {
@@ -1398,7 +1399,7 @@ app.whenReady().then(async () => {
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dns, ensureWorkspace, fetch: electronNet.fetch.bind(electronNet), fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber, nativeImage, net: nodeNet, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resolveRemoteHost: async hostname => (await electronNet.resolveHost(hostname)).endpoints, resumeToastViewAfterNativeDrag, samePathIdentity, scheduleMediaTrackingScan, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ cancelMediaTrackingScan, Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   videoPlaybackService = registerVideoPlaybackIpc({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
@@ -1529,6 +1530,7 @@ getApplicationQuitState = registerConfigDrainBeforeQuit({
         domainCommandJournal.stop();
       },
       cleanup: [
+        () => filePublicationService.stop(),
         () => imageThumbnailRuntime.stop(),
         () => thumbnailService?.stop({ discardAccessTimes: true }),
         () => videoPlaybackService?.dispose(),

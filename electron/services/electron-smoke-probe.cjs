@@ -9,6 +9,11 @@ const runElectronSmokeProbe = async ({ app, mainWindow, rendererEntryFile, loadR
   });
   loadRenderer();
   await rendererLoaded;
+  if (process.env.PHOTOFLOW_RENAME_BENCHMARK === '1') {
+    await require('./rename-performance-probe.cjs').runRenamePerformanceProbe({ app, mainWindow });
+    setImmediate(() => app.quit());
+    return;
+  }
   const setupProjects = process.env.PHOTOFLOW_SMOKE_SETUP_PROJECTS === '1';
   const smokeMediaPath = String(process.env.PHOTOFLOW_SMOKE_MEDIA_PATH || '');
   const idleComponentId = String(process.env.PHOTOFLOW_SMOKE_IDLE_COMPONENT_ID || '');

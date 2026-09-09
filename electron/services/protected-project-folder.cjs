@@ -10,11 +10,17 @@ const CORE_PROJECT_FOLDER_NAMES = Object.freeze([
 
 const normalizeName = name => String(name || '').trim().toLocaleLowerCase('zh-CN');
 
-const createProtectedProjectFolderRegistry = ({ descriptors = [], descriptorProvider = null } = {}) => {
+const createProtectedProjectFolderRegistry = ({ descriptors = [], descriptorProvider = null, descriptorRevisionProvider = null } = {}) => {
+  let cachedRevision;
+  let cachedNames;
   const policyNames = () => {
+    const revision = descriptorRevisionProvider?.();
+    if (descriptorRevisionProvider && cachedNames && revision === cachedRevision) return cachedNames;
     const protectedNames = new Set(CORE_PROJECT_FOLDER_NAMES.map(normalizeName));
     const progressRelocationNames = new Set(CORE_PROJECT_FOLDER_NAMES.map(normalizeName));
-    const currentDescriptors = descriptorProvider ? descriptorProvider() : descriptors;
+    const currentDescriptors = require('./rename-performance-diagnostics.cjs').measureRenameSync(
+      'componentFolderPolicyDiscovery', () => descriptorProvider ? descriptorProvider() : descriptors,
+    );
     for (const descriptor of currentDescriptors) {
       for (const policy of descriptor?.service?.projectFolders || []) {
         const name = normalizeName(policy.name);
@@ -23,7 +29,9 @@ const createProtectedProjectFolderRegistry = ({ descriptors = [], descriptorProv
         if (policy.reserveProgressRelocationName) progressRelocationNames.add(name);
       }
     }
-    return { protectedNames, progressRelocationNames };
+    const names = { protectedNames, progressRelocationNames };
+    if (descriptorRevisionProvider) { cachedRevision = revision; cachedNames = names; }
+    return names;
   };
 
   const isProtectedProjectFolderName = name => policyNames().protectedNames.has(normalizeName(name));

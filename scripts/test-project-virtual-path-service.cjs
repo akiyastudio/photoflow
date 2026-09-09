@@ -106,6 +106,16 @@ try {
   service.createManagedExternalLink(path.join(projectRoot, 'linked-photo.jpg.lnk'), { target: externalFile, kind: 'file', displayName: 'linked-photo.jpg' });
   const boundedRoot = path.join(projectRoot, 'bounded-scan'); fs.mkdirSync(path.join(boundedRoot, 'a', 'b'), { recursive: true });
   fs.writeFileSync(path.join(boundedRoot, 'a', 'ordinary.txt'), 'ordinary');
+  const scoped = service.listManagedExternalLinks(projectRoot, { relativePaths: ['bounded-scan/a/b'] });
+  assert.strictEqual(scoped.directoriesScanned, 1, 'rename scans only its affected subtree, not siblings');
+  assert.strictEqual(scoped.length, 0);
+  service.createManagedExternalLink(path.join(boundedRoot, 'a', 'b', 'nested.lnk'), { target: externalRoot, kind: 'folder', displayName: 'nested' });
+  const scopedAfterExternalChange = service.listManagedExternalLinks(projectRoot, { relativePaths: ['bounded-scan'] });
+  assert(scopedAfterExternalChange.some(link => link.shortcutVirtualPath === 'bounded-scan/a/b/nested.lnk'), 'new links below a renamed ancestor are discovered without a stale cache');
+  assert(!scopedAfterExternalChange.some(link => link.shortcutVirtualPath === 'RAW.lnk'), 'unaffected links are not rescanned');
+  assert(service.listManagedExternalLinks(projectRoot, { relativePaths: ['RAW.lnk'] })[0].isExternalLinkRoot, 'a directly renamed external link retains its root identity');
+  assert.throws(() => service.listManagedExternalLinks(projectRoot, { relativePaths: ['../outside'] }), /路径/);
+  fs.unlinkSync(path.join(boundedRoot, 'a', 'b', 'nested.lnk'));
   const bounded = service.listManagedExternalLinks(projectRoot, { maxEntries: 1, maxDirectories: 2, maxDepth: 1 });
   assert.strictEqual(Array.isArray(bounded), true);
   assert.strictEqual(bounded.truncated, true, 'managed external-link enumeration must expose bounded truncation without changing its Array return type');

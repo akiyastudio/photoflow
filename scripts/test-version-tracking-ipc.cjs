@@ -163,7 +163,7 @@ registerVersionIpc({
   projectVirtualPaths,
   releaseWorkspaceWatchPath: value => (calls.releasedWatchPaths ||= []).push(value),
   refreshManagedExternalWatchers: async () => { calls.externalWatcherRefreshes = (calls.externalWatcherRefreshes || 0) + 1; },
-  refreshWorkspaceCatalog: async () => { if (calls.failCatalogRefresh) throw new Error('injected catalog refresh failure'); },
+  refreshWorkspaceCatalog: async () => { if (calls.failCatalogRefresh) throw new Error('injected catalog refresh failure'); if (calls.catalogRefreshGate) await calls.catalogRefreshGate; },
   resolveProjectEntry: (_root, _status, _projectName, relativePath) => {
     const projectPath = path.join(workspaceRoot, 'Project');
     const resolved = path.resolve(projectPath, String(relativePath || ''));
@@ -698,11 +698,17 @@ async function main() {
     calls.renameProgressRequest = request;
     return { success: true, progressId: request.progressId, oldRelativePath: 'Move me', newRelativePath: request.newName };
   };
+  versionService.snapshotProgress = versionService.listProgress;
+  const recoveryList = versionService.listProgress;
+  versionService.listProgress = async () => { throw new Error('local rename must not reconcile the whole project'); };
+  const renameWarnings = [];
+  writeLogImplementation = (...args) => renameWarnings.push(args);
   calls.failCatalogRefresh = true; const renamedProgress = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
     progressId: 'moved-node', expectedFolderId: localFolderId, expectedRelativePath: 'Move me', newName: '客户自由命名',
   }); calls.failCatalogRefresh = false;
   assert.strictEqual(renamedProgress.success, true, renamedProgress.error);
-  assert.strictEqual(renamedProgress.warnings[0].code, 'WORKSPACE_CATALOG_REFRESH_FAILED', 'a post-commit catalog refresh failure is a degraded warning, not a false transaction failure');
+  assert(renameWarnings.some(args => String(args[1]).includes('after committed progress rename')), 'a deferred catalog failure is logged without turning a committed rename into a failure');
+  writeLogImplementation = () => undefined;
   const { reservedProjectFolderNames, ...renameProgressRequest } = calls.renameProgressRequest;
   assert(Array.isArray(reservedProjectFolderNames) && reservedProjectFolderNames.includes('raw'), 'Host must inject its current generic relocation policy');
   assert.deepStrictEqual(renameProgressRequest, {
@@ -716,6 +722,18 @@ async function main() {
   });
   assert.strictEqual(staleRename.success, false);
   assert.match(staleRename.error, /identity_mismatch/);
+  let releaseCatalog;
+  calls.catalogRefreshGate = new Promise(resolve => { releaseCatalog = resolve; });
+  let renameDeadline;
+  try {
+    const result = await Promise.race([
+      renameProgressFolder({}, workspaceRoot, 'active', 'Project', { progressId: 'moved-node', expectedFolderId: localFolderId, expectedRelativePath: 'Move me', newName: '快速提交' }),
+      new Promise((_, reject) => { renameDeadline = setTimeout(() => reject(new Error('rename waited for the catalog')), 1000); }),
+    ]);
+    assert.strictEqual(result.success, true, 'committed progress rename returns while the catalog refresh remains blocked');
+  } finally { clearTimeout(renameDeadline); releaseCatalog(); delete calls.catalogRefreshGate; }
+  versionService.listProgress = recoveryList;
+  delete versionService.snapshotProgress;
 
   const externalFolderId = 'external-folder-id';
   let externalListedRoute = 'external-progress.lnk';

@@ -73,6 +73,7 @@ internal static class FilePublicationService
     private static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+        if (args.Length == 1 && args[0] == "serve-moves") return ServeMoves();
         try {
             if (args.Length < 1) throw new ArgumentException("缺少操作名称");
             var options = Parse(args);
@@ -93,14 +94,39 @@ internal static class FilePublicationService
             else throw new ArgumentException("不支持的操作：" + args[0]);
             Write(result); return 0;
         } catch (Exception error) {
+            Write(Failure(error));
+            return 1;
+        }
+    }
+    private static object Failure(Exception error)
+    {
             var native = error as Win32Exception;
             var code = error is OwnershipConflictException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
             var failure = new Dictionary<string, object> { { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } };
             var committed = error as PostCommitException;
             if (committed != null) { failure["published"] = true; failure["outcomeUnknown"] = true; failure["publishedPath"] = committed.PublishedPath; failure["identity"] = committed.IdentityValue; }
-            Write(failure);
-            return 1;
+            return failure;
+    }
+    private static int ServeMoves()
+    {
+        Console.InputEncoding = Encoding.UTF8;
+        var serializer = new JavaScriptSerializer { MaxJsonLength = 512 * 1024 };
+        Write(new { ready = true, protocol = "photoflow-rename-v1" });
+        string line;
+        while ((line = Console.ReadLine()) != null) {
+            string id = "";
+            object result;
+            try {
+                if (line.Length > 512 * 1024) throw new ArgumentException("请求过大");
+                var request = serializer.Deserialize<Dictionary<string, string>>(line);
+                if (request == null || request.Count != 3) throw new ArgumentException("请求字段无效");
+                id = Required(request, "id");
+                if (id.Length > 64) throw new ArgumentException("请求序号无效");
+                result = MoveNoReplace(Required(request, "source"), Required(request, "target"));
+            } catch (Exception error) { result = Failure(error); }
+            Write(new { id = id, result = result });
         }
+        return 0;
     }
 
     private static object MoveNoReplace(string sourceValue, string targetValue)

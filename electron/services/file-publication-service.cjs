@@ -17,7 +17,7 @@ const runPublicationJson = (command, args, timeoutMs, processSupervisor, options
   const timer = setTimeout(() => { if (settled || terminating) return; terminating = true; const timeoutError = Object.assign(new Error('文件发布服务响应超时，操作结果未知'), { code: 'FILE_PUBLICATION_TIMEOUT', outcomeUnknown: true }); void terminateAndWait(child, Date.now() + (options.terminationTimeoutMs || 5000), options.terminationOptions).then(() => finish(timeoutError), terminationError => finish(Object.assign(timeoutError, { terminationError, pid: child.pid || null }))); }, timeoutMs);
 });
 const digest = async filePath => { const hash = crypto.createHash('sha256'); const stream = fs.createReadStream(filePath); for await (const chunk of stream) hash.update(chunk); return hash.digest('hex'); };
-const createFilePublicationService = ({ app, projectRoot, processSupervisor = null, platform = process.platform, invokeOverride = null, spawnImpl = null, batchTimeoutMs = publicationBatchTimeoutMs, portableFaultInjector = async () => undefined }) => {
+const createFilePublicationService = ({ app, projectRoot, processSupervisor = null, platform = process.platform, invokeOverride = null, spawnImpl = null, persistentRename = false, batchTimeoutMs = publicationBatchTimeoutMs, portableFaultInjector = async () => undefined }) => {
   const MAX_BATCH_ITEMS = 2048;
   const MAX_BATCH_MANIFEST_BYTES = 512 * 1024;
   const binaryName = platform === 'win32' ? 'file-publication-service.exe' : 'file-publication-service';
@@ -54,7 +54,17 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       throw error;
     }
   };
-  const moveNoReplace = (source, target) => invoke('move-no-replace', { source: path.resolve(source), target: path.resolve(target) });
+  const renameWorker = persistentRename && platform === 'win32' && !invokeOverride
+    ? require('./persistent-rename-service.cjs').createPersistentRenameService({ idleMs: processSupervisor ? 0 : 60000, launch: () => {
+      ensure();
+      const args = ['serve-moves'];
+      return processSupervisor
+        ? processSupervisor.launch({ id: `csharp:file-rename:${++sequence}`, kind: 'csharp-helper', command: executable(), args, options: { stdio: ['pipe', 'pipe', 'pipe'] }, ephemeral: true, windowsJob: true }).child
+        : (spawnImpl || spawn)(executable(), args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    } }) : null;
+  const moveNoReplace = (source, target) => renameWorker
+    ? renameWorker.move(path.resolve(source), path.resolve(target)).catch(error => { error.operation = 'move-no-replace'; throw error; })
+    : invoke('move-no-replace', { source: path.resolve(source), target: path.resolve(target) });
   const moveNoReplaceBatch = async requests => {
     if (!Array.isArray(requests) || requests.length === 0) return [];
     if (requests.length > MAX_BATCH_ITEMS) throw Object.assign(new Error(`单次批量发布不得超过 ${MAX_BATCH_ITEMS} 项`), { code: 'EINVAL' });
@@ -248,6 +258,8 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
   const portableCommitTreeFile = async ({ source, target, sha256, size, identity }) => { const resolved = path.resolve(source); const quarantine = await createPortableQuarantine(resolved); let handle; let deleted = false; await moveToQuarantine(resolved, quarantine); try { handle = await fs.promises.open(quarantine.recovery, 'r'); const sourceStat = await assertRecoveryIdentity(handle, quarantine.recovery, identity, '跨卷源文件'); const [targetStat, sourceHash, targetHash] = await Promise.all([fs.promises.stat(target), digestHandle(handle), digest(target)]); if (sourceStat.size !== Number(size) || targetStat.size !== Number(size) || sourceHash !== sha256 || targetHash !== sha256) throw Object.assign(new Error('跨卷文件身份或摘要不匹配'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await assertPrivateDirectory(quarantine); await assertRecoveryIdentity(handle, quarantine.recovery, identity, '跨卷源文件'); await fs.promises.unlink(quarantine.recovery); deleted = true; await handle.close(); handle = null; await finalizePortableDeletion(quarantine, resolved); return { success: true, deleted: true }; } catch (error) { if (handle) await handle.close().catch(() => undefined); await closeQuarantineDirectory(quarantine); throw annotatePortableCleanupFailure(error, deleted, quarantine, resolved); } };
   const portableDeleteDirectory = async ({ source, identity }) => { const resolved = path.resolve(source); const quarantine = await createPortableQuarantine(resolved); let handle; let deleted = false; await moveToQuarantine(resolved, quarantine); try { handle = await fs.promises.open(quarantine.recovery, 'r'); const stat = await assertRecoveryIdentity(handle, quarantine.recovery, identity, '源目录'); if (!stat.isDirectory() || (await fs.promises.readdir(quarantine.recovery)).length) throw Object.assign(new Error('源目录身份变化或不为空'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await assertPrivateDirectory(quarantine); await assertRecoveryIdentity(handle, quarantine.recovery, identity, '源目录'); await fs.promises.rmdir(quarantine.recovery); deleted = true; await handle.close(); handle = null; await finalizePortableDeletion(quarantine, resolved); return { success: true, deleted: true }; } catch (error) { if (handle) await handle.close().catch(() => undefined); await closeQuarantineDirectory(quarantine); throw annotatePortableCleanupFailure(error, deleted, quarantine, resolved); } };
   return {
+    warmRename: () => renameWorker?.warm(),
+    stop: () => renameWorker?.stop(),
     moveNoReplace,
     moveNoReplaceBatch,
     inspectPathsBatch,

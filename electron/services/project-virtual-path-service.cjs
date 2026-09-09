@@ -434,7 +434,16 @@ const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = re
     const maxEntries = Math.max(1, Math.min(500000, numericLimit(options.maxEntries, 50000)));
     const cancelled = typeof options.cancel === 'function' ? options.cancel : () => false;
     const links = [];
-    const pending = [{ directory: root, virtualDirectory: '', depth: 0 }];
+    const pending = [];
+    if (options.relativePaths === undefined) pending.push({ directory: root, virtualDirectory: '', depth: 0 });
+    else {
+      if (!Array.isArray(options.relativePaths)) throw new Error('外链扫描范围无效');
+      for (const relative of new Set(options.relativePaths)) {
+        const resolution = resolve(root, relative, { externalRootMode: 'link' });
+        if (resolution.viaExternalLink) { links.push(resolution); continue; }
+        if (fs.statSync(resolution.physicalPath).isDirectory()) pending.push({ directory: resolution.physicalPath, virtualDirectory: resolution.virtualPath, depth: 0 });
+      }
+    }
     const visited = new Set();
     let directoriesScanned = 0; let entriesScanned = 0; let skipped = 0; let truncated = false; let wasCancelled = false;
     while (pending.length && !truncated) {
