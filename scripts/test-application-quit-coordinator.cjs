@@ -51,7 +51,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true, task
   assert.match(quitWiring, /applicationQuitAccepted = true;\s*hideApplicationWindowForQuit\(\);\s*armApplicationQuitDeadline\(\);/, '用户确认后应立即隐藏整个应用界面，再在后台收尾');
   assert.doesNotMatch(quitWiring, /setPhase\('failed'/, '收尾失败不能恢复成重试退出界面');
   const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
-  assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续退出'[\s\S]*?buttons:\s*\[presentation\.continueLabel,\s*'取消'\],\s*defaultId:\s*1,\s*cancelId:\s*1/, '卸载确认锁定真实退出文案与安全默认项');
+  assert.match(systemIpcSource, /uninstall:[\s\S]*?continueLabel:\s*'关闭后台进程并继续卸载'[\s\S]*?confirmLabel:\s*presentation\.continueLabel,\s*cancelDefault:\s*true/, '卸载确认锁定真实卸载文案与安全默认项');
   let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
   const mainWindow = new EventEmitter();
   mainWindow.close = () => {
