@@ -53,8 +53,15 @@ assert.throws(
   'removing the legal default step must fail the default-gate contract',
 );
 assert.equal(checkProject.includes("['run', 'check']"), false, 'check-project must not recursively invoke itself');
-assert(publishRelease.includes('runLegalReleaseReadyGate(installerPath)'), 'publish-release must invoke the strict approval gate for its selected installer');
-assert(publishRelease.includes("'--installer', installerPath"), 'publish-release must forward its selected installer to release JSON generation');
+assert(
+  publishRelease.includes('runLegalReleaseReadyGate(installerPath, manifestPath)'),
+  'publish-release must invoke the strict approval gate for its selected installer and delivery manifest',
+);
+assert(
+  publishRelease.includes("'--installer', installerPath")
+    && publishRelease.includes("'--delivery-manifest', manifestPath"),
+  'publish-release must bind strict approval to its selected installer and immutable delivery manifest',
+);
 assert(generateReleaseJson.includes('const requiresReleaseApproval = shouldPublish || published'), 'published records and network publishing must both require strict approval');
 assert(generateReleaseJson.includes('if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath)'), 'generate-release-json must invoke the strict gate for all publishable records');
 
