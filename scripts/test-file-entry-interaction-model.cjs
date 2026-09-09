@@ -128,6 +128,55 @@ const { pathToFileURL } = require('url');
   for (const handler of ['onClick={event => handleEntryClick(event, entry)}', 'onDoubleClick={event => handleEntryDoubleClick(event, entry)}']) assert(versionEntrySource.includes(handler), `version-tree entries must wire ${handler}`);
   for (const layoutMarker of ['searchResultGroups.map', "viewMode === 'list'", 'renderedFileEntries.map']) assert(workspaceSource.includes(layoutMarker), `${layoutMarker} file surface must remain mounted`);
   const inlineRenameSource = workspaceSource.slice(workspaceSource.indexOf('const renderEntryName'), workspaceSource.indexOf('const renderEntryIcon'));
+  const renameCommitSource = workspaceSource.slice(workspaceSource.indexOf('const commitInlineRename ='), workspaceSource.indexOf('const beginRename ='));
+  const renameEvents = [];
+  let completeRename;
+  const renameResult = new Promise(resolve => { completeRename = resolve; });
+  const renameContext = {
+    inlineRenamePath: 'old-folder', inlineRenameValue: 'new-folder', renameCommitRef: { current: false },
+    finalViewOpen: false, currentRelativePathRef: { current: '' }, project: { path: 'D:/project' },
+    projectPathRef: { current: 'D:/project' }, activeFileEntries: [{ name: 'old-folder', relativePath: 'old-folder', path: 'D:/project/old-folder', kind: 'folder' }],
+    normalizeProjectRelativePath: value => value.replace(/^\/+|\/+$/g, ''),
+    isProtectedRenameEntry: () => false, registeredProgressFolderForEntry: () => undefined,
+    startPendingFileOperation: operation => ({ ...operation, id: 'rename' }), cancelInlineRename: () => {},
+    projectWorkspaceClient: { projectFileOperation: () => renameResult }, workspacePath: 'D:/workspace',
+    clearPendingFileOperation: () => renameEvents.push('unlock'),
+    // A slow authoritative scan must not hold up an already committed rename.
+    reconcilePendingFileOperation: () => new Promise(() => {}),
+    renamedEntryDestinationPath, refreshSequenceRef: { current: 3 },
+    upsertOptimisticDirectoryEntry: (_directory, entry, source) => {
+      assert.equal(source, 'old-folder');
+      assert.equal(entry.relativePath, 'actual-folder');
+      renameEvents.push('cache-commit');
+    },
+    settleDirectoryPreviewRenames: () => renameEvents.push('preview-commit'),
+    refreshRecursiveResults: () => {},
+    mutatedEntryCanBeRevealed: () => true, browseModeRef: { current: 'normal' },
+    selectAndRevealFileEntry: destination => { assert.equal(destination, 'actual-folder'); renameEvents.push('select'); },
+    onNotice: () => {}, operationRefreshDirectories: () => [''],
+    scheduleDirectoryRefresh: () => renameEvents.push('background-refresh'),
+  };
+  const ts = require('typescript');
+  const renameCompiled = ts.transpileModule(renameCommitSource, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const commitRename = new Function(...Object.keys(renameContext), `${renameCompiled}\nreturn commitInlineRename;`)(...Object.values(renameContext));
+  const committing = commitRename();
+  assert.deepEqual(renameEvents, [], 'the filesystem write must complete before the folder becomes actionable');
+  completeRename({ success: true, movedItems: [{ sourceRelativePath: 'old-folder', destinationRelativePath: 'actual-folder' }] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(renameEvents, ['cache-commit', 'unlock', 'preview-commit', 'select', 'background-refresh'], 'the actual destination becomes usable before a slow directory rescan');
+  assert.equal(renameContext.refreshSequenceRef.current, 4, 'pre-rename directory reads cannot overwrite the committed destination');
+  await committing;
+  renameEvents.length = 0;
+  let completeNavigatedRename;
+  const navigatedRenameResult = new Promise(resolve => { completeNavigatedRename = resolve; });
+  renameContext.projectWorkspaceClient.projectFileOperation = () => navigatedRenameResult;
+  renameContext.mutatedEntryCanBeRevealed = () => false;
+  const committingWhileNavigating = new Function(...Object.keys(renameContext), `${renameCompiled}\nreturn commitInlineRename;`)(...Object.values(renameContext))();
+  renameContext.currentRelativePathRef.current = 'other-folder';
+  completeNavigatedRename({ success: true, movedItems: [{ sourceRelativePath: 'old-folder', destinationRelativePath: 'actual-folder' }] });
+  await committingWhileNavigating;
+  assert.equal(renameContext.refreshSequenceRef.current, 4, 'finishing a rename after navigation must not invalidate the new directory read');
+  assert(!renameEvents.includes('select'), 'a rename completion must not steal selection after navigation');
   assert(inlineRenameSource.includes('onBlur={() => { void commitInlineRename(); }}'), 'clicking outside an inline rename input must commit the new name');
   assert(inlineRenameSource.includes("if (event.key === 'Escape') { event.preventDefault(); cancelInlineRename(); }"), 'Escape must continue to cancel an inline rename');
   const selectionControlSource = workspaceSource.slice(workspaceSource.indexOf('const renderEntrySelectionControl'), workspaceSource.indexOf('const startEntryDrag'));

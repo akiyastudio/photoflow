@@ -32,6 +32,14 @@ const task = (id, state = 'failed', updatedAt = 1, extra = {}) => ({
 });
 const delta = (revision, upserts = [], removeIds = []) => ({ revision, upserts, removeIds });
 
+for (const state of ['completed', 'failed', 'cancelled', 'interrupted']) {
+  assert.equal(toastModel.isBackgroundTaskDismissible(task('terminal', state)), true, `${state} records can be cleared`);
+  assert.equal(toastModel.isBackgroundTaskDismissible(task('retrying', state, 1, { retryPending: true })), false, 'an in-flight retry must retain its source record');
+}
+for (const state of ['queued', 'running', 'pausing', 'paused', 'resuming']) {
+  assert.equal(toastModel.isBackgroundTaskDismissible(task('active', state)), false, `${state} tasks must survive clearing history`);
+}
+
 const localTimestamp = (year, month, day, hour, minute) => new Date(year, month - 1, day, hour, minute).getTime();
 const referenceTime = localTimestamp(2026, 8, 25, 18, 0);
 assert.equal(toastModel.formatBackgroundTaskStartedAt(localTimestamp(2026, 8, 25, 9, 5), referenceTime), '09:05', 'tasks started today must show only the local clock time');

@@ -50,4 +50,70 @@ assert.equal(modelModule.exports.clampNumber(200, 260, 640), 260);
 assert.equal(modelModule.exports.clampNumber(720, 260, 640), 640);
 assert.equal(modelModule.exports.clampNumber(420, 260, 640), 420);
 
-console.log('background task resizable drawer tests passed');
+const loadRendererModule = (source, dependencies) => {
+  const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const loaded = { exports: {} };
+  new Function('require', 'module', 'exports', 'window', output)(name => {
+    if (name in dependencies) return dependencies[name];
+    throw new Error(`Unexpected drawer dependency: ${name}`);
+  }, loaded, loaded.exports, { requestAnimationFrame: () => {} });
+  return loaded.exports;
+};
+const toastModel = loadRendererModule(read('src/features/background-tasks/task-toast-model.ts'), {});
+const findClearButton = node => {
+  if (!node || typeof node !== 'object') return undefined;
+  if (node.props?.['aria-label'] === '清空已结束的任务') return node;
+  for (const child of [node.props?.children].flat(Infinity)) {
+    const result = findClearButton(child);
+    if (result) return result;
+  }
+};
+const exerciseClearButton = async (rejectOne = false) => {
+  const dismissed = [];
+  const dismissedPanels = [];
+  const openChanges = [];
+  const stateChanges = [];
+  let finishDismiss;
+  const gate = new Promise(resolve => { finishDismiss = resolve; });
+  const tasks = ['completed', 'failed', 'cancelled', 'interrupted', 'queued', 'running', 'pausing', 'paused', 'resuming'].map(state => ({
+    id: state, state, title: state, metadata: {}, capabilities: {}, taskCenterPolicy: 'always',
+  }));
+  tasks.push({ ...tasks[1], id: 'retry-source', retryPending: true });
+  tasks.push({ ...tasks[1], id: 'old-failure' });
+  tasks[0].retryOfTaskId = 'old-failure';
+  const { BackgroundTaskIndicator } = loadRendererModule(indicator, {
+    'react/jsx-runtime': require('react/jsx-runtime'),
+    react: { useMemo: fn => fn(), useRef: value => ({ current: value }), useState: value => [value, next => stateChanges.push(next)] },
+    'react-dom': { createPortal: node => node },
+    'lucide-react': Object.fromEntries(['Activity', 'Pause', 'Play', 'RotateCcw', 'Trash2', 'X'].map(name => [name, name])),
+    '../../components/ProgressBar': { ProgressBar: 'progress' },
+    '../../components/LayerProvider': { useEscapeLayer: () => {} },
+    '../../components/useTaskPresentation': { formatTaskBytes: String, taskStateLabel: task => task.state },
+    './panel-task-session-model': {},
+    './task-toast-model': toastModel,
+    './TaskCenter': { useTaskCenter: () => ({
+      backgroundTasks: tasks,
+      panelTasks: Object.fromEntries(['completed', 'running', 'failed'].map(state => [state, { key: state, ownerPageId: 'page', state }])),
+      dismissBackgroundTask: async id => { dismissed.push(id); await gate; return { success: !(rejectOne && id === 'failed') }; },
+      dismissPanelTask: key => dismissedPanels.push(key),
+      isTaskToastMinimized: () => false,
+    }) },
+  });
+  const tree = BackgroundTaskIndicator({ ownerPageIds: new Set(['page']), open: true, onOpenChange: value => openChanges.push(value), drawerHostRef: { current: {} } });
+  const button = findClearButton(tree);
+  assert(button && !button.props.disabled, 'the drawer header exposes the clear button');
+  button.props.onClick();
+  button.props.onClick();
+  assert.deepEqual(dismissed, ['completed', 'failed', 'cancelled', 'interrupted', 'old-failure'], 'clear retains active/retrying work, includes hidden retry predecessors, and prevents duplicate submissions');
+  assert.deepEqual(openChanges, [], 'the drawer stays open until dismissal completes');
+  finishDismiss();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(dismissedPanels, ['completed', 'failed'], 'running panel tasks survive');
+  assert.deepEqual(openChanges, rejectOne ? [] : [false], 'only successful clearing closes the drawer');
+  if (rejectOne) assert(stateChanges.some(value => typeof value === 'string' && value.includes('部分任务未能清除')), 'partial failures stay visible');
+};
+(async () => {
+  await exerciseClearButton();
+  await exerciseClearButton(true);
+  console.log('background task resizable drawer tests passed');
+})().catch(error => { console.error(error); process.exitCode = 1; });

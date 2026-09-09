@@ -113,7 +113,7 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
 
   const dismissPanelTask = useCallback((key: string) => {
     setPanelTasks(current => {
-      if (!current[key]) return current;
+      if (!current[key] || current[key].state === 'running') return current;
       const next = { ...current };
       delete next[key];
       return next;

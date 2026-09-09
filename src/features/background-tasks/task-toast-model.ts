@@ -4,6 +4,9 @@ const FAILURE_TOAST_MS = 10_000;
 const RESULT_TOAST_MS = 6_000;
 const TERMINAL_TASK_STATES = new Set<BackgroundTask['state']>(['completed', 'failed', 'cancelled', 'interrupted']);
 
+export const isBackgroundTaskDismissible = (task: Pick<BackgroundTask, 'state' | 'retryPending'>) =>
+  TERMINAL_TASK_STATES.has(task.state) && !task.retryPending;
+
 const twoDigits = (value: number) => String(value).padStart(2, '0');
 
 export const formatBackgroundTaskStartedAt = (value: number, now = Date.now()) => {

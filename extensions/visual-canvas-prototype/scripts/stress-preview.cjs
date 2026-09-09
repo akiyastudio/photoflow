@@ -1,0 +1,15 @@
+const fs=require('node:fs');
+const path=require('node:path');
+const {randomUUID}=require('node:crypto');
+const {Repository}=require('../service/repository.cjs');
+const {Application}=require('../service/application.cjs');
+const {pack,unpack}=require('../service/format.cjs');
+const {privateOutputPath}=require('../../../scripts/project-output-paths.cjs');
+const privateRoot=privateOutputPath(path.resolve(__dirname,'../../..'),'diagnostics','visual-canvas-prototype');
+const runs=fs.readdirSync(privateRoot).filter(n=>n.startsWith('tests-')).sort().reverse();
+const run=runs.find(n=>fs.existsSync(path.join(privateRoot,n,'500-images/component-private/visual-qs/documents.sqlite3')));if(!run)throw new Error('Run npm test first');
+const source=new Repository(path.join(privateRoot,run,'500-images/component-private/visual-qs'));
+const target=new Repository(path.join(privateRoot,'preview/component-private/visual-qs'));
+const doc=unpack(pack(source.load('fixture-project',source.list('fixture-project')[0].id),source),target);doc.id=randomUUID();doc.title='500 张测试图片 · 视口验证';
+const app=new Application(()=>{});for(const o of doc.objects)app.mediaCopy(target,target.asset(o.payload.assetId));
+target.create('fixture-project',doc);source.close();target.close();console.log(JSON.stringify({id:doc.id,title:doc.title,images:doc.objects.length}));

@@ -2446,12 +2446,17 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return;
     }
     const renamedName = renamedPath.split('/').pop() || nextName;
+    if (normalizeProjectRelativePath(currentRelativePathRef.current) === sourceDirectoryPath) refreshSequenceRef.current += 1;
     upsertOptimisticDirectoryEntry(sourceDirectoryPath, {
       ...entry,
       name: renamedName,
       path: `${pathSeparatorIndex >= 0 ? entry.path.slice(0, pathSeparatorIndex + 1) : ''}${renamedName}`,
       relativePath: renamedPath,
     }, sourcePath);
+    // The backend has committed the rename and the cache now holds its actual
+    // destination. Directory/metadata refreshes must not extend the write lock.
+    clearPendingFileOperation(pendingOperation.id);
+    settleDirectoryPreviewRenames([optimisticRenameEntry], true);
     refreshRecursiveResults(sourceDirectoryPath);
     if (progressFolder?.nodeRole === 'progress') {
       const renamedProgress = 'progressFolder' in result ? result.progressFolder : undefined;
@@ -2465,10 +2470,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           versionProgressLocationRef.current = nextLocation;
         }
       }
-      await loadProgressFolders();
     }
-    await reconcilePendingFileOperation(pendingOperation, 'affectedDirectories' in result ? result : { affectedDirectories: [sourceDirectoryPath] });
-    settleDirectoryPreviewRenames([optimisticRenameEntry], true);
     const canReveal = mutatedEntryCanBeRevealed({
       requestedProjectPath,
       currentProjectPath: projectPathRef.current,
@@ -2478,6 +2480,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     });
     if (canReveal) selectAndRevealFileEntry(renamedPath);
     onNotice(`已重命名为“${nextName}”`);
+    scheduleDirectoryRefresh(operationRefreshDirectories(pendingOperation, 'affectedDirectories' in result ? result : undefined));
+    if (progressFolder?.nodeRole === 'progress') await loadProgressFolders();
   };
   const beginRename = (targetPaths = selectedPaths) => {
     if (!targetPaths.length) return;
