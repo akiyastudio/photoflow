@@ -802,7 +802,7 @@ def _safe_metadata(source: Path | None) -> dict[str, object]:
         return {}
 
 
-def _write_image_atomic(destination: Path, image: np.ndarray, source: Path | None = None) -> None:
+def _write_image_atomic(destination: Path, image: np.ndarray, source: Path | None = None, *, expected_source_stat=None) -> None:
     suffix = destination.suffix.lower()
     params: list[int] = []
     if suffix in {".jpg", ".jpeg"}:
@@ -847,7 +847,14 @@ def _write_image_atomic(destination: Path, image: np.ndarray, source: Path | Non
         if suffix in {".png", ".bmp", ".tif", ".tiff"} and not np.array_equal(verification, image):
             raise RuntimeError("裁剪输出像素未通过完整性验证")
         try:
-            _publish_file_no_replace(temporary, destination)
+            if expected_source_stat is not None:
+                current = destination.stat()
+                identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+                if source != destination or identity(current) != identity(expected_source_stat):
+                    raise RuntimeError("原图已发生变化，请重新打开后裁剪")
+                os.replace(temporary, destination)
+            else:
+                _publish_file_no_replace(temporary, destination)
         except PublicationUnsupportedError:
             preserve_staging = True
             raise
@@ -898,10 +905,11 @@ def analyze_main_image(input_path: str) -> dict[str, object]:
         return result
 
 
-def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主图") -> dict[str, object]:
+def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主图", replace_source: bool = False) -> dict[str, object]:
     source = Path(input_path).resolve()
     result: dict[str, object] = {"input": str(source), "inputName": source.name, "success": False, "cropped": False}
     try:
+        source_stat = source.stat() if replace_source else None
         source, original = _load_source(input_path)
         original_height, original_width = original.shape[:2]
         values = [int(value) for value in rectangle.split(",")]
@@ -911,13 +919,17 @@ def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主�
         right, bottom = left + crop_width, top + crop_height
         if left < 0 or top < 0 or crop_width < 20 or crop_height < 20 or right > original_width or bottom > original_height:
             raise ValueError("裁剪范围超出图片边界")
-        while True:
-            destination = _unique_output_path(source, "裁剪" if output_suffix == "裁剪" else "主图")
-            try:
-                _write_image_atomic(destination, original[top:bottom, left:right], source)
-                break
-            except FileExistsError:
-                continue
+        if replace_source:
+            destination = source
+            _write_image_atomic(destination, original[top:bottom, left:right], source, expected_source_stat=source_stat)
+        else:
+            while True:
+                destination = _unique_output_path(source, "裁剪" if output_suffix == "裁剪" else "主图")
+                try:
+                    _write_image_atomic(destination, original[top:bottom, left:right], source)
+                    break
+                except FileExistsError:
+                    continue
         result.update(
             success=True,
             cropped=True,
@@ -989,6 +1001,7 @@ def run(args_list: list[str]) -> None:
     crop_parser.add_argument("--input", action="append", required=True, dest="inputs")
     crop_parser.add_argument("--rectangle", action="append", required=True, dest="rectangles")
     crop_parser.add_argument("--output-suffix", choices=("主图", "裁剪"), default="主图")
+    crop_parser.add_argument("--replace-source", action="store_true")
     args = parser.parse_args(args_list)
 
     if args.command == "crop" and len(args.inputs) != len(args.rectangles):
@@ -1010,7 +1023,7 @@ def run(args_list: list[str]) -> None:
         if args.command == "analyze":
             results.append(analyze_main_image(input_path))
         elif args.command == "crop":
-            results.append(crop_main_image(input_path, args.rectangles[index - 1], args.output_suffix))
+            results.append(crop_main_image(input_path, args.rectangles[index - 1], args.output_suffix, args.replace_source))
         else:
             results.append(extract_main_image(input_path))
         print(json.dumps({

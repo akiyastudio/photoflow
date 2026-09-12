@@ -124,7 +124,7 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
   onContextMenu: (event: React.MouseEvent<HTMLElement>) => void;
   onContextMenuAt: (x: number, y: number) => void;
   onAnalyzeImageCrop: (entry: ProjectFileEntry) => Promise<PreviewImageCropAnalysis>;
-  onConfirmImageCrop: (entry: ProjectFileEntry, crop: CropRectangle) => Promise<{ success: boolean; error?: string }>;
+  onConfirmImageCrop: (entry: ProjectFileEntry, crop: CropRectangle) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
   onTrimVideo: (start: number, end: number, saveMode: 'new' | 'replace', operationId: string, sourceDuration: number) => Promise<{ success: boolean; started?: boolean; cancelled?: boolean; error?: string }>;
   onLoadVideoTimelineFrames: (times: number[]) => Promise<{ success: boolean; frames?: string[]; error?: string }>;
   onOpen: () => void;
@@ -559,7 +559,7 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
       return;
     }
     setImageCropPhase('editing');
-    setImageCropError(result.error || '裁剪失败');
+    setImageCropError(result.cancelled ? '' : result.error || '裁剪失败');
   };
   const handleVideoPlayerError = (message: string) => {
     setVideoPlaybackFailed(true);

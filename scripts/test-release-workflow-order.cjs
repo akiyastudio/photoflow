@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { PREPARE_STEPS, writeSessionLogBestEffort } = require('./prepare-release.cjs');
 const { parseManifestArgument, writeJsonExclusiveAtomic } = require('./prepare-release-approval.cjs');
+const { findInstaller, idempotencyKeyFor, parseArguments: parseReleasePushArguments, parseMandatory } = require('./push-release-info.cjs');
 const { writeQualityReceipt, validateQualityReceipt, clearQualityReceipt, readGitHead, assertGitHead, captureGitSourceFence, assertGitSourceFence, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -12,7 +13,8 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 
 assert.deepEqual(PREPARE_STEPS, ['check:release:quality', 'electron:build', 'build:components']);
 assert.equal(packageJson.scripts['release:prepare'], 'node scripts/prepare-release.cjs');
 assert.equal(packageJson.scripts['release:approval'], 'node scripts/prepare-release-approval.cjs');
-assert.equal(packageJson.scripts.release, 'node scripts/run-release.cjs');
+assert.equal(packageJson.scripts.release, 'node scripts/push-release-info.cjs');
+assert.equal(packageJson.scripts['release:full'], 'node scripts/run-release.cjs');
 assert.equal(packageJson.scripts['check:release:quality'], 'node scripts/check-project.cjs --release-quality');
 assert.equal(packageJson.scripts['check:release:final'], 'node scripts/check-final-release-ready.cjs');
 const finalSource = fs.readFileSync(path.join(root, 'scripts', 'check-final-release-ready.cjs'), 'utf8');
@@ -31,10 +33,25 @@ const releaseRunnerSource = fs.readFileSync(path.join(root, 'scripts', 'run-rele
 assert(releaseRunnerSource.indexOf("runNpmScript('release:prepare')") < releaseRunnerSource.indexOf("runNpmScript('release:approval'"), 'one-command release must prepare before drafting approval');
 assert(releaseRunnerSource.indexOf('await waitForApproval(approvalPath)') < releaseRunnerSource.indexOf("runNpmScript('check:release:final'"), 'one-command release must wait for actual approval before the final gate');
 assert(releaseRunnerSource.indexOf("runNpmScript('check:release:final'") < releaseRunnerSource.indexOf("runNpmScript('release:publish'"), 'one-command release must pass the final gate before publishing');
+const releasePushSource = fs.readFileSync(path.join(root, 'scripts', 'push-release-info.cjs'), 'utf8');
+for (const forbidden of ['release:prepare', 'release:approval', 'check:release:final', 'electron:build', 'build:components']) {
+  assert(!releasePushSource.includes(forbidden), `default release push must not invoke ${forbidden}`);
+}
+assert(releasePushSource.includes('await publishReleaseOnce({'), 'default release must directly push one release record');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-release-receipt-'));
 const privateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-private-receipt-'));
 process.env.PHOTOFLOW_PRIVATE_ROOT = privateRoot;
 try {
+  assert.deepEqual(parseReleasePushArguments(['--notes', '修复说明', '--mandatory=false']), { notes: '修复说明', mandatory: 'false' });
+  assert.equal(parseMandatory('false'), false);
+  assert.equal(parseMandatory('是'), true);
+  assert.throws(() => parseMandatory('maybe'), /mandatory/);
+  const directInstaller = path.join(privateRoot, 'existing-installer.exe');
+  fs.writeFileSync(directInstaller, 'installer');
+  assert.equal(findInstaller('1.0.0', directInstaller), path.resolve(directInstaller));
+  const releaseRecord = { channel: 'stable', downloadUrl: 'https://download.invalid', mandatory: false, notes: 'notes', platform: 'win32', sha256: 'a'.repeat(64), version: '1.0.0', versionCode: 10000 };
+  assert.match(idempotencyKeyFor(releaseRecord), /^[a-f0-9]{64}$/);
+  assert.equal(idempotencyKeyFor(releaseRecord), idempotencyKeyFor({ ...releaseRecord, publishedAt: new Date().toISOString() }), 'retry identity must ignore the publication timestamp');
   assert.equal(parseManifestArgument(['--manifest', 'release/DELIVERY-MANIFEST.json']), 'release/DELIVERY-MANIFEST.json');
   assert.equal(parseManifestArgument(['--manifest=release/DELIVERY-MANIFEST.json']), 'release/DELIVERY-MANIFEST.json');
   const approvalDraft = path.join(privateRoot, 'approval-test', 'RELEASE_APPROVAL.json');

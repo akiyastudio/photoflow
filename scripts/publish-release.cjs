@@ -263,4 +263,4 @@ if (require.main === module) run().catch(error => {
   process.exitCode = 1;
 });
 
-module.exports = { publishReleaseOnce };
+module.exports = { hiddenQuestion, persistWindowsUserToken, publishReleaseOnce, readWindowsUserToken, validateAdminToken };

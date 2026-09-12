@@ -19,7 +19,8 @@ const run = async () => {
       mediaService: { authorizeInput: async value => path.resolve(value), toUrl: value => `photoflow-media://file/${path.basename(value)}` },
       path,
       pluginService: {
-        list: () => [{
+        list() { throw new Error('Playback must not scan installer packages'); },
+        listInstalled: () => [{
           id: 'fixture-player', name: 'Fixture Player', installed: true, compatible: true,
           manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', displayName: 'Fixture decoder', backendVersion: '1.2.3', transport: 'media-playback-backend-v1', priority: 1000, probe: { containers: ['mp4', 'mov'], codecs: { video: ['h264', 'hevc'], audio: ['aac'] }, extensions: ['.mp4', '.mov'] }, features: { transforms: { aspectModes: ['source','contain','cover'], rotation:true, flip:true, crop:false }, hdr: { passthrough:true,toneMapping:true,algorithms:['auto','bt2390'],targetPeakControl:true }, statistics: { basic:true,decode:true,hdr:true,timing:true,cache:true,gpu:true,maxUpdateHz:4 }, subtitles: { embedded:true,external:true,ass:true,styles:true }, hardwareDecoding: {supported:true,selectable:false,softwareFallback:true}, capture: { sourceFrame:false,displayedFrame:true } } }] },
         }, { id: 'undeclared-runtime', name: 'Old Runtime', installed: true, compatible: true, manifest: {} }],

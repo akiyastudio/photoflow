@@ -68,8 +68,9 @@ export const useFolderTabNavigation = ({
       event.stopPropagation();
       setSourceDragActive(false);
       try {
-        const payload = JSON.parse(serialized) as { kind?: string; project?: WorkspaceProject };
-        if (payload.kind === 'project' && payload.project && typeof payload.project.id === 'string' && typeof payload.project.path === 'string') openProjectInNewTab(payload.project);
+        const payload = JSON.parse(serialized) as { kind?: string; project?: WorkspaceProject; rootPath?: string; relativePath?: string };
+        if (payload.kind === 'inspiration' && payload.rootPath === rootPath && typeof payload.relativePath === 'string') openInNewTab(payload.relativePath);
+        else if (payload.kind === 'project' && payload.project && typeof payload.project.id === 'string' && typeof payload.project.path === 'string') openProjectInNewTab(payload.project);
       } catch { /* ignore unrelated or malformed drag payloads */ }
     },
   };

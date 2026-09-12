@@ -1145,7 +1145,7 @@ export interface IElectronAPI {
   listWorkspaceFolders: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; relativePath: string; parentRelativePath: string; depth: number; externalLink?: boolean; externalLinkOffline?: boolean; viaExternalLink?: boolean }>; truncated?: boolean; externalLinkScanTruncated?: boolean; skippedCount?: number; error?: string }>;
   addInspirationToProject: (inspirationRoot: string, targetWorkspacePath: string, targetStatus: ProjectStatus, targetProjectName: string, relativePaths: string[]) => Promise<{ success: boolean; count?: number; fileCount?: number; shortcutCount?: number; planningFolder?: string; error?: string }>;
   extractOfficeImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<OfficeImageExtractionResult>;
-  extractScreenshotMainImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], options?: { requestId?: string; analyzeOnly?: boolean; crops?: Array<{ x: number; y: number; width: number; height: number }>; outputSuffix?: '主图' | '裁剪' }) => Promise<{
+  extractScreenshotMainImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], options?: { requestId?: string; analyzeOnly?: boolean; crops?: Array<{ x: number; y: number; width: number; height: number }>; outputSuffix?: '主图' | '裁剪'; saveMode?: 'new' | 'replace' }) => Promise<{
     success: boolean;
     inputCount?: number;
     croppedCount?: number;

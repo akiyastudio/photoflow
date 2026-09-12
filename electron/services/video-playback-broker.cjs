@@ -12,7 +12,7 @@ const CHROMIUM_FEATURES = Object.freeze({
 });
 
 const createVideoPlaybackBroker = ({ pluginService, path }) => {
-  const contributions = () => pluginService.list().flatMap(component => {
+  const contributions = () => (pluginService.listInstalled ? pluginService.listInstalled() : pluginService.list()).flatMap(component => {
     if (!component?.installed || component.enabled === false || !component.compatible) return [];
     let declared = [];
     try { declared = parseMediaPlaybackBackendContributions(component.manifest); } catch { return []; }

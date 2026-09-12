@@ -22,7 +22,7 @@ Node 脚本使用 `scripts/project-output-paths.cjs` 的 `privateOutputPath()`�
 
 `npm run release:approval -- --manifest <path>` 会根据不可变交付清单，在上述私有位置生成已经填入版本、源码提交和两个发布哈希的待批准草稿。命令不会自动批准，也不会覆盖已有记录；旧记录必须先人工核验并归档。
 
-日常正式发布使用单一入口 `npm run release`。它依次准备不可变 staging、生成或复用私有批准文件、等待人工确认、执行最终门禁并发布；发布说明等参数会转交给 `release:publish`。分步命令保留用于审查、恢复和故障定位。
+`npm run release` 只读取当前版本和已有 Setup、计算发布记录所需的 SHA-256，并直接向 CloudBase 推送版本信息；它不检查、不构建、不生成 staging。完整的构建、审查、批准和发布流程保留为 `npm run release:full`。
 
 `.gitignore` 不会移动文件，也不会替任意外部程序改变保存位置。这项约定由项目指令和已接入的生成脚本共同执行。新增脚本必须遵循同一规则。
 

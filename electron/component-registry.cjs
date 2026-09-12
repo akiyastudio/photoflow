@@ -382,6 +382,8 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     }
     return byId;
   };
+  // Playback discovery does not need to inspect downloadable installer ZIPs.
+  const listInstalled = () => [...installedComponents().values()];
   const list = () => {
     const installed = installedComponents(); const packages = packageComponents(); const ids = new Set([...installed.keys(), ...packages.keys()]);
     return [...ids].map(id => {
@@ -502,7 +504,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     catch (error) { disabledComponentIds.add(id); throw error; }
     return true;
   };
-  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, hostPolicyRevision, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
+  return { inspect, list, listInstalled, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, hostPolicyRevision, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
 };
 
 module.exports = { COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, validateComponentPackageInspection, createComponentRegistry };

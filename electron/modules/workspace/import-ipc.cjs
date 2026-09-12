@@ -320,6 +320,7 @@ const registerWorkspaceImportIpc = dependencies => {
     const analyzeOnly = options?.analyzeOnly === true;
     const confirmedCrops = Array.isArray(options?.crops) ? options.crops : null;
     const outputSuffix = options?.outputSuffix === '裁剪' ? '裁剪' : '主图';
+    const replaceSource = options?.saveMode === 'replace';
     const publish = payload => {
       try {
         if (requestId && event?.sender && !event.sender.isDestroyed()) event.sender.send('workspace-screenshot-main-image-progress', { requestId, ...payload });
@@ -330,6 +331,7 @@ const registerWorkspaceImportIpc = dependencies => {
       const requestedPaths = allRequestedPaths.slice(0, 2000);
       const inputTruncated = allRequestedPaths.length > requestedPaths.length;
       if (!requestedPaths.length) throw new Error('没有选择图片');
+      if (replaceSource && (analyzeOnly || !confirmedCrops || requestedPaths.length !== 1)) throw new Error('覆盖保存需要确认单张图片的裁剪范围');
       const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
       const targetResolutions = requestedPaths.map(relativePath => resolveToolSource(projectRoot, relativePath));
       const targets = targetResolutions.map(resolution => resolution.physicalPath);
@@ -345,7 +347,7 @@ const registerWorkspaceImportIpc = dependencies => {
       for (let offset = 0; offset < targets.length; offset += 60) {
         const chunk = targets.slice(offset, offset + 60);
         const cropChunk = confirmedCrops?.slice(offset, offset + chunk.length) || [];
-        const args = [command, ...(confirmedCrops && outputSuffix === '裁剪' ? ['--output-suffix', '裁剪'] : []), ...chunk.flatMap((target, index) => {
+        const args = [command, ...(replaceSource ? ['--replace-source'] : []), ...(confirmedCrops && outputSuffix === '裁剪' ? ['--output-suffix', '裁剪'] : []), ...chunk.flatMap((target, index) => {
           if (!confirmedCrops) return ['--input', target];
           const crop = cropChunk[index] || {};
           const values = ['x', 'y', 'width', 'height'].map(key => Math.round(Number(crop[key]) || 0));

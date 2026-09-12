@@ -94,6 +94,7 @@ const createPluginService = ({ app, registry, runJsonCommand, processSupervisor 
     resolvePackage: pluginId => registry.resolvePackage(pluginId),
     resolveRunConfig,
     resolveRunConfigAsync,
+    listInstalled: () => registry.listInstalled(),
     resolveRunConfigForCapability: (capability, args = []) => {
       const { component, declaration } = runtimeCapability(capability);
       return resolveRunConfig(component.id, [...declaration.argsPrefix, ...args]);

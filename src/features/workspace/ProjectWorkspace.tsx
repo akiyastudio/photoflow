@@ -2346,16 +2346,26 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
-  const savePreviewImageCrop = async (entry: ProjectFileEntry, crop: CropRectangle): Promise<{ success: boolean; error?: string }> => {
+  const savePreviewImageCrop = async (entry: ProjectFileEntry, crop: CropRectangle): Promise<{ success: boolean; cancelled?: boolean; error?: string }> => {
     try {
-      const extraction = await projectWorkspaceClient.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { crops: [crop], outputSuffix: '裁剪' });
+      const saveMode = await appDialog.choice({
+        title: '保存裁剪图片',
+        message: entry.name,
+        detail: '保存将替换原图；另存为会在原图旁创建一张裁剪图片。',
+        choices: [{ value: 'replace', label: '保存' }, { value: 'new', label: '另存为' }],
+        defaultValue: 'new',
+        cancelLabel: '取消',
+        cancelDefault: true,
+      });
+      if (saveMode !== 'replace' && saveMode !== 'new') return { success: false, cancelled: true };
+      const extraction = await projectWorkspaceClient.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { crops: [crop], outputSuffix: '裁剪', saveMode });
       const result = extraction.results[0];
       if (!result?.success || !result.cropped) return { success: false, error: result?.error || extraction.error || '裁剪失败' };
       directoryEntriesCacheRef.current.clear();
       refreshRecursiveResults(projectRelativeParentPath(entry.relativePath));
       await refresh(currentRelativePathRef.current);
       if (finalViewOpen) await loadFinalViewEntries();
-      onNotice(`裁剪完成：${result.outputName || '已在原图旁生成裁剪图片'}`);
+      onNotice(saveMode === 'replace' ? `已保存裁剪：${entry.name}` : `已另存为：${result.outputName || '已在原图旁生成裁剪图片'}`);
       return { success: true };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : String(error) };
@@ -4764,8 +4774,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <button disabled={selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : selectedContainsBlockedProgressRenameEntry ? '已登记版本目录暂不支持批量或混合批量重命名' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
         <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
-        {clipboardPending && <span role="status" aria-live="polite" className="text-xs text-slate-400">正在同步剪贴板…</span>}
-        <button disabled={clipboardPending || finalViewOpen || !clipboardHasFiles} title={clipboardPending ? '正在同步系统剪贴板' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action"><ClipboardPaste size={16}/>粘贴</button>
+        <button disabled={clipboardPending || finalViewOpen || !clipboardHasFiles} title={clipboardPending ? '正在同步系统剪贴板' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action" aria-busy={clipboardPending}>{clipboardPending ? <Loader2 size={16} className="animate-spin"/> : <ClipboardPaste size={16}/>}粘贴</button>
         <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '删除'} onClick={() => runFileOperation('trash')} className="project-action-button project-action-danger compact-hide-file-action"><Trash2 size={16}/>删除</button>
         <button disabled={!selectedPaths.length} title="取消选择" onClick={() => setSelectedPaths([])} className="project-action-button"><X size={16}/>取消选择</button>
         <div className="project-toolbar-secondary contents">
