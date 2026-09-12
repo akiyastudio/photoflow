@@ -215,6 +215,7 @@ const createVideoPlaybackProcessService = ({
         processId: 0,
         inputToken: '',
         pendingAuthorizedSubtitles: [],
+        mediaLoaded: false,
         surfaceAttachPromise: null,
         surfaceAttachError: null,
         surfaceController: null,
@@ -251,7 +252,11 @@ const createVideoPlaybackProcessService = ({
           return;
         }
         const value = { ...received.payload, type: received.type };
-        if(value.type==='file-loaded'&&session.pendingAuthorizedSubtitles.length){for(const subtitlePath of session.pendingAuthorizedSubtitles)sendCommand(session,{command:'subtitle-add',path:subtitlePath});session.pendingAuthorizedSubtitles=[];}
+        if (value.type === 'file-loaded') {
+          session.mediaLoaded = true;
+          for (const subtitlePath of session.pendingAuthorizedSubtitles) sendCommand(session, { command: 'subtitle-add', path: subtitlePath });
+          session.pendingAuthorizedSubtitles = [];
+        }
         if (value.type === 'diagnostic') {
           try { emit(session, { type: 'diagnostic', diagnostic: cleanPlaybackDiagnostics(value.diagnostic) }); }
           catch (error) { writeLog('warn', 'Playback backend emitted invalid diagnostics', { sessionId: session.id, error: error.message || String(error) }); }
@@ -360,11 +365,17 @@ const createVideoPlaybackProcessService = ({
       assertCurrentLaunch();
       await readyPromise;
       assertCurrentLaunch();
-      if (subtitleInputService) session.pendingAuthorizedSubtitles = await subtitleInputService.discover(authorizedPath);
-      assertCurrentLaunch();
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
       sendCommand(session, { command: 'subtitle-style', fontSize: normalizeSubtitleFontSize(settings.subtitleSize), style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard' });
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动视频播放器');
+      // A slow/unavailable sidecar directory must not delay the first frame.
+      // Only attach authorized subtitles to the still-current, loaded session.
+      if (subtitleInputService) void Promise.resolve().then(() => subtitleInputService.discover(authorizedPath)).then(subtitles => {
+        if (session.stopped) return;
+        if (session.mediaLoaded) {
+          for (const subtitlePath of subtitles) sendCommand(session, { command: 'subtitle-add', path: subtitlePath });
+        } else session.pendingAuthorizedSubtitles = subtitles;
+      }).catch(error => writeLog('warn', 'Unable to discover video sidecar subtitles', { sessionId: id, error: error.message || String(error) }));
       writeLog('info', 'Advanced video decoder started', { sessionId: id, filePath: authorizedPath });
       return { sessionId: id, playerId: normalizedPlayerId, requestId: normalizedRequestId };
     } catch (error) {

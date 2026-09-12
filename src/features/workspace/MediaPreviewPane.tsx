@@ -124,7 +124,7 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
   onContextMenu: (event: React.MouseEvent<HTMLElement>) => void;
   onContextMenuAt: (x: number, y: number) => void;
   onAnalyzeImageCrop: (entry: ProjectFileEntry) => Promise<PreviewImageCropAnalysis>;
-  onConfirmImageCrop: (entry: ProjectFileEntry, crop: CropRectangle) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>;
+  onConfirmImageCrop: (entry: ProjectFileEntry, crop: CropRectangle, saveMode: 'replace' | 'new') => Promise<{ success: boolean; error?: string }>;
   onTrimVideo: (start: number, end: number, saveMode: 'new' | 'replace', operationId: string, sourceDuration: number) => Promise<{ success: boolean; started?: boolean; cancelled?: boolean; error?: string }>;
   onLoadVideoTimelineFrames: (times: number[]) => Promise<{ success: boolean; frames?: string[]; error?: string }>;
   onOpen: () => void;
@@ -158,6 +158,9 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
   const [trimProgressVisible, setTrimProgressVisible] = useState(false);
   const [imageCropEditor, setImageCropEditor] = useState<{ crop: CropRectangle; snapGuides: { x: number[]; y: number[] }; originalSize: { width: number; height: number } } | null>(null);
   const [imageCropPhase, setImageCropPhase] = useState<'analyzing' | 'editing' | 'saving' | ''>('');
+  const [cropSaveMenuOpen, setCropSaveMenuOpen] = useState(false);
+  const cropSaveMenuRef = useRef<HTMLDivElement>(null);
+  const cropConfirmRef = useRef<HTMLButtonElement>(null);
   const [imageCropError, setImageCropError] = useState('');
   // A restored main-process task must suppress the player on the very first
   // render; waiting for the synchronization effect would briefly reopen and
@@ -417,6 +420,17 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
   useEscapeLayer(fullscreen, () => setFullscreen(false));
   useEscapeLayer(Boolean(trimEditor), () => { if (!trimBusy) setTrimEditor(null); }, !trimBusy);
   useEscapeLayer(Boolean(imageCropPhase), cancelImageCrop, imageCropPhase !== 'saving');
+  useEscapeLayer(cropSaveMenuOpen, () => { setCropSaveMenuOpen(false); cropConfirmRef.current?.focus(); });
+  useEffect(() => { setCropSaveMenuOpen(false); }, [entry?.path, imageCropPhase]);
+  useEffect(() => {
+    if (!cropSaveMenuOpen) return;
+    cropSaveMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
+    const dismiss = (event: PointerEvent) => {
+      if (!cropSaveMenuRef.current?.contains(event.target as Node)) setCropSaveMenuOpen(false);
+    };
+    window.addEventListener('pointerdown', dismiss, true);
+    return () => window.removeEventListener('pointerdown', dismiss, true);
+  }, [cropSaveMenuOpen]);
 
   // Fit against the full preview viewport. The previous 12px inset on every
   // side became especially visible after a portrait RAW was rotated.
@@ -537,8 +551,9 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
     });
     setImageCropPhase('editing');
   };
-  const confirmImageCrop = async () => {
+  const confirmImageCrop = async (saveMode: 'replace' | 'new') => {
     if (!entry || !imageCropEditor || imageCropPhase !== 'editing') return;
+    setCropSaveMenuOpen(false);
     const requestId = imageCropRequestRef.current;
     const { originalSize } = imageCropEditor;
     const x = Math.max(0, Math.min(originalSize.width - 20, Math.round(imageCropEditor.crop.x)));
@@ -551,7 +566,7 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
     };
     setImageCropError('');
     setImageCropPhase('saving');
-    const result = await onConfirmImageCrop(entry, crop);
+    const result = await onConfirmImageCrop(entry, crop, saveMode);
     if (imageCropRequestRef.current !== requestId) return;
     if (result.success) {
       setImageCropEditor(null);
@@ -559,7 +574,7 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
       return;
     }
     setImageCropPhase('editing');
-    setImageCropError(result.cancelled ? '' : result.error || '裁剪失败');
+    setImageCropError(result.error || '裁剪失败');
   };
   const handleVideoPlayerError = (message: string) => {
     setVideoPlaybackFailed(true);
@@ -667,10 +682,23 @@ export const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSe
       <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">{imageCropPhase ? '裁剪' : trimEditor ? '剪辑' : '预览'}</p><p className="truncate text-sm font-semibold text-slate-700">{entry?.name || '未选择媒体'}</p></div>
       {imageCropPhase ? <div className="ml-2 flex shrink-0 items-center gap-2">
         <button type="button" disabled={imageCropPhase === 'saving'} onClick={cancelImageCrop} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">取消</button>
-        <button type="button" disabled={imageCropPhase !== 'editing'} onClick={() => void confirmImageCrop()} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-blue-500 disabled:bg-blue-400">
+        <div ref={cropSaveMenuRef} className="relative" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node)) setCropSaveMenuOpen(false); }}>
+        <button ref={cropConfirmRef} type="button" disabled={imageCropPhase !== 'editing'} aria-haspopup="menu" aria-expanded={cropSaveMenuOpen} onClick={() => setCropSaveMenuOpen(current => !current)} className="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-2.5 py-1.5 text-xs font-bold text-white shadow-sm hover:bg-blue-500 disabled:bg-blue-400">
           {(imageCropPhase === 'analyzing' || imageCropPhase === 'saving') && <Loader2 size={13} className="animate-spin"/>}
           {imageCropPhase === 'analyzing' ? '识别边缘中' : imageCropPhase === 'saving' ? '正在裁剪…' : '确定裁剪'}
         </button>
+        {cropSaveMenuOpen && <div role="menu" aria-label="裁剪保存方式" className="project-context-menu absolute right-0 top-full z-50 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onKeyDown={event => {
+          if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+          event.preventDefault();
+          const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+          const index = items.indexOf(document.activeElement as HTMLButtonElement);
+          const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + items.length) % items.length;
+          items[next]?.focus();
+        }}>
+          <button type="button" role="menuitem" className="project-menu-item w-full" onClick={() => void confirmImageCrop('replace')}>保存<span className="ml-auto text-xs text-slate-400">覆盖原图</span></button>
+          <button type="button" role="menuitem" className="project-menu-item w-full" onClick={() => void confirmImageCrop('new')}>另存为<span className="ml-auto text-xs text-slate-400">保留原图</span></button>
+        </div>}
+        </div>
       </div> : trimEditor ? <button type="button" disabled={trimExportProgress?.phase === 'cancelling'} onClick={cancelVideoTrim} className="rounded-md px-2.5 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-40">{trimBusy ? trimExportProgress?.phase === 'cancelling' ? '正在取消…' : '取消导出' : '取消剪辑'}</button> : <div className="flex items-center gap-1">{entry && <><button type="button" onClick={() => setFullscreen(true)} title="全屏查看" aria-label="全屏查看" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>{ratingAvailable && (ratingMode === 'stars' ? <div className="flex items-center" aria-label={`图片评分 ${rating} 星`}>{[1, 2, 3, 4, 5].map(star => <button key={star} type="button" disabled={ratingLoading || ratingBusy} onClick={() => onChangeRating(rating === star ? 0 : star)} title={rating === star ? `清除 ${star} 星评分` : `设为 ${star} 星`} aria-label={rating === star ? `清除 ${star} 星评分` : `设为 ${star} 星`} className={`rounded p-1 transition hover:bg-amber-50 hover:text-amber-500 disabled:opacity-40 ${rating >= star ? 'text-amber-400' : 'text-slate-300'}`}><Star size={15} fill={rating >= star ? 'currentColor' : 'none'}/></button>)}</div> : <button type="button" disabled={ratingLoading || ratingBusy} onClick={() => onChangeRating(rating > 0 ? 0 : 5)} title={rating > 0 ? `取消喜欢（当前 ${rating} 星）` : ratingLoading ? '正在读取图片评分' : '喜欢（写入五星）'} aria-label={rating > 0 ? '取消喜欢' : '标记为喜欢'} className={`rounded-md p-2 transition hover:bg-red-50 hover:text-red-600 disabled:opacity-40 ${rating > 0 ? 'text-red-500' : 'text-slate-500'}`}><Heart size={16} fill={rating > 0 ? 'currentColor' : 'none'}/></button>)}{photoshopAvailable && (entry.kind === 'image' || entry.kind === 'raw') && <button type="button" onClick={onOpenInPhotoshop} title="使用 Photoshop 打开" aria-label="使用 Photoshop 打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><PhotoshopIcon size={16}/></button>}{(entry.kind !== 'video' || videoTrimAvailable) && <button type="button" disabled={entry.kind === 'raw' || isUnsupportedShortcutContent(entry) || entry.kind === 'video' && !videoDuration} onClick={entry.kind === 'video' ? openVideoTrim : () => void beginImageCrop()} title={entry.kind === 'video' ? videoDuration ? `剪辑视频（${videoTrimExportMode === 'fast' ? '快速导出' : '精确导出'}）` : '正在读取视频时长' : entry.kind === 'raw' ? 'RAW 暂不支持直接裁剪' : '裁剪图片（识别并磁吸边缘）'} aria-label={entry.kind === 'video' ? '剪辑视频' : '裁剪图片'} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-35"><Crop size={16}/></button>}</>}<button type="button" onClick={onTogglePinned} title={pinned ? '取消固定预览面板' : '固定预览面板'} aria-label={pinned ? '取消固定预览面板' : '固定预览面板'} aria-pressed={pinned} className={`rounded-md p-2 transition hover:bg-blue-50 hover:text-blue-600 ${pinned ? 'bg-blue-50 text-blue-600' : 'text-slate-500'}`}><Pin size={16} fill={pinned ? 'currentColor' : 'none'}/></button><button type="button" onClick={onClose} title="关闭预览" aria-label="关闭预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button></div>}
     </header>}
     {fullscreen && fullscreenControlsVisible && <button type="button" onClick={() => setFullscreen(false)} title="退出全屏（Esc）" aria-label="退出全屏" className="fixed right-5 top-5 z-[520] rounded-full bg-black/60 p-2.5 text-white shadow-lg backdrop-blur transition hover:bg-black/80"><X size={20}/></button>}

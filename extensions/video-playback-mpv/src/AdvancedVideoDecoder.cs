@@ -108,7 +108,10 @@ namespace PhotoFlow.AdvancedVideoDecoder
             context = create();
             if (context == IntPtr.Zero) throw new InvalidOperationException("libmpv 初始化内存失败");
             if (videoWindow != IntPtr.Zero) SetOption("wid", videoWindow.ToInt64().ToString(CultureInfo.InvariantCulture));
-            SetOption("vo", probeOnly ? "null" : "gpu-next,gpu");
+            // Prefer the D3D11 renderer that does not require libplacebo's
+            // interop path; gpu-next can crash in d3d11.dll after media.open
+            // even when mpv_initialize succeeds, so its fallback never runs.
+            SetOption("vo", probeOnly ? "null" : "gpu,gpu-next");
             if (probeOnly) SetOption("audio", "no");
             else
             {

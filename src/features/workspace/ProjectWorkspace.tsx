@@ -685,6 +685,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, []);
   const [clipboardHasFiles, setClipboardHasFiles] = useState(false);
   const [clipboardPending, setClipboardPending] = useState(false);
+  const clipboardActionPending = {
+    cut: pendingFileOperations.some(operation => operation.kind === 'cut'),
+    copy: pendingFileOperations.some(operation => operation.kind === 'copy'),
+    paste: pendingFileOperations.some(operation => operation.kind === 'paste'),
+  };
+  const renderClipboardActionIcon = (operation: 'cut' | 'copy' | 'paste', size: number) => {
+    if (clipboardActionPending[operation]) return <Loader2 size={size} className="animate-spin" aria-hidden="true"/>;
+    const Icon = operation === 'cut' ? Cut : operation === 'copy' ? Copy : ClipboardPaste;
+    return <Icon size={size} aria-hidden="true"/>;
+  };
   const [photoshopAvailable, setPhotoshopAvailable] = useState(false);
   const [conversionTargets, setConversionTargets] = useState<string[]>([]);
   const [conversionCollecting, setConversionCollecting] = useState(false);
@@ -2346,18 +2356,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   };
-  const savePreviewImageCrop = async (entry: ProjectFileEntry, crop: CropRectangle): Promise<{ success: boolean; cancelled?: boolean; error?: string }> => {
+  const savePreviewImageCrop = async (entry: ProjectFileEntry, crop: CropRectangle, saveMode: 'replace' | 'new'): Promise<{ success: boolean; error?: string }> => {
     try {
-      const saveMode = await appDialog.choice({
-        title: '保存裁剪图片',
-        message: entry.name,
-        detail: '保存将替换原图；另存为会在原图旁创建一张裁剪图片。',
-        choices: [{ value: 'replace', label: '保存' }, { value: 'new', label: '另存为' }],
-        defaultValue: 'new',
-        cancelLabel: '取消',
-        cancelDefault: true,
-      });
-      if (saveMode !== 'replace' && saveMode !== 'new') return { success: false, cancelled: true };
       const extraction = await projectWorkspaceClient.extractScreenshotMainImages(workspacePath, project.status, project.name, [entry.relativePath], { crops: [crop], outputSuffix: '裁剪', saveMode });
       const result = extraction.results[0];
       if (!result?.success || !result.cropped) return { success: false, error: result?.error || extraction.error || '裁剪失败' };
@@ -4697,9 +4697,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {photoshopAvailable && isPhotoshopOpenEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isPhotoshopOpenEntry) : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isPhotoshopOpenEntry).length > 1 ? `（${selectedEntries.filter(isPhotoshopOpenEntry).length} 个）` : ''}</button>}
         {fileMenuHasToolActions && <div className="my-1 border-t border-slate-100"/>}
         <button disabled={fileMenuContainsShortcutContent || fileMenuContainsProtectedRenameEntry || fileMenuContainsBlockedProgressRenameEntry} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : fileMenuContainsProtectedRenameEntry ? '该文件夹由项目工作流管理，不能普通重命名' : fileMenuContainsBlockedProgressRenameEntry ? '已登记版本目录暂不支持批量或混合批量重命名' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
-        <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }}><Cut size={14}/>剪切</button>
-        <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('copy', undefined, targets); }}><Copy size={14}/>复制</button>
-        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || !clipboardHasFiles} title={fileMenuContainsShortcutContent ? '快捷方式指向的外部文件夹是只读浏览区域' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到此文件所在文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }}><ClipboardPaste size={14}/>粘贴</button>
+        <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }} aria-busy={clipboardActionPending.cut}>{renderClipboardActionIcon('cut', 14)}剪切</button>
+        <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('copy', undefined, targets); }} aria-busy={clipboardActionPending.copy}>{renderClipboardActionIcon('copy', 14)}复制</button>
+        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || !clipboardHasFiles} title={fileMenuContainsShortcutContent ? '快捷方式指向的外部文件夹是只读浏览区域' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到此文件所在文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }} aria-busy={clipboardActionPending.paste}>{renderClipboardActionIcon('paste', 14)}粘贴</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item project-menu-danger" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('trash', undefined, targets); }}><Trash2 size={14}/>删除</button>
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openEntryDetails(entry); }}><Info size={14}/>详细信息</button>
         <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); copyEntryPath(entry); }}><FileText size={14}/>{isFolderLikeEntry(fileMenu.entry) ? '复制文件夹地址' : '复制文件地址'}</button>
@@ -4716,7 +4716,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {componentContributions.filter(item => item.type === 'project.exportProvider').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scopeRelativePath = surfaceMenu.targetRelativePath; setSurfaceMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope: { scopeRelativePath, selectedRelativePaths: [], sourcePageId: pageId, contentKind: componentContentKind } } })); }}><ExternalLink size={14}/>{item.label}</button>)}
         {projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); togglePanel('match'); }}><FileText size={14}/>从文件名选片</button>}
         <div className="my-1 border-t border-slate-100"/>
-        <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? `粘贴到“${surfaceMenu.targetLabel}”` : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void runFileOperation('paste', undefined, [], target); }}><ClipboardPaste size={14}/>粘贴</button>
+        <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? `粘贴到“${surfaceMenu.targetLabel}”` : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void runFileOperation('paste', undefined, [], target); }} aria-busy={clipboardActionPending.paste}>{renderClipboardActionIcon('paste', 14)}粘贴</button>
         <button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void copyCurrentDirectoryPath(target); }}><FileText size={14}/>复制此文件夹地址</button>
         {hasExternalFolderLinks && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void materializeExternalLinks(); }}><FolderInput size={14}/>移动所有外链文件夹到项目内</button>}
         {projectWorkflows && <><div className="my-1 border-t border-slate-100"/><button className="project-menu-item project-menu-danger" onClick={() => { setSurfaceMenu(null); setPanel('trash'); }}><Trash2 size={14}/>将项目移入回收站</button></>}
@@ -4772,9 +4772,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <span aria-hidden className="project-toolbar-core-divider toolbar-divider"/>
         {selectedPaths.length > 0 && <span className="project-toolbar-selection mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
         <button disabled={selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : selectedContainsBlockedProgressRenameEntry ? '已登记版本目录暂不支持批量或混合批量重命名' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
-        <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
-        <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
-        <button disabled={clipboardPending || finalViewOpen || !clipboardHasFiles} title={clipboardPending ? '正在同步系统剪贴板' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action" aria-busy={clipboardPending}>{clipboardPending ? <Loader2 size={16} className="animate-spin"/> : <ClipboardPaste size={16}/>}粘贴</button>
+        <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action" aria-busy={clipboardActionPending.cut}>{renderClipboardActionIcon('cut', 16)}剪切</button>
+        <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action" aria-busy={clipboardActionPending.copy}>{renderClipboardActionIcon('copy', 16)}复制</button>
+        <button disabled={clipboardPending || finalViewOpen || !clipboardHasFiles} title={clipboardPending ? '正在同步系统剪贴板' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到当前文件夹' : '剪贴板中没有文件'} onClick={() => runFileOperation('paste')} className="project-action-button compact-hide-file-action" aria-busy={clipboardActionPending.paste}>{renderClipboardActionIcon('paste', 16)}粘贴</button>
         <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '删除'} onClick={() => runFileOperation('trash')} className="project-action-button project-action-danger compact-hide-file-action"><Trash2 size={16}/>删除</button>
         <button disabled={!selectedPaths.length} title="取消选择" onClick={() => setSelectedPaths([])} className="project-action-button"><X size={16}/>取消选择</button>
         <div className="project-toolbar-secondary contents">
@@ -4796,9 +4796,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           {showToolbarOverflowMenu && <div role="menu" aria-label="更多工具栏操作" className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setShowToolbarOverflowMenu(false); (event.currentTarget.previousElementSibling as HTMLButtonElement | null)?.focus(); } }} onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
             <div className="project-toolbar-overflow-primary">
               <button disabled={selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} onClick={() => beginRename()} className="project-menu-item"><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
-              <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('cut')} className="project-menu-item"><Cut size={14}/>剪切</button>
-              <button disabled={selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('copy')} className="project-menu-item"><Copy size={14}/>复制</button>
-              <button disabled={finalViewOpen || !clipboardHasFiles} onClick={() => runFileOperation('paste')} className="project-menu-item"><ClipboardPaste size={14}/>粘贴</button>
+              <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('cut')} className="project-menu-item" aria-busy={clipboardActionPending.cut}>{renderClipboardActionIcon('cut', 14)}剪切</button>
+              <button disabled={selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('copy')} className="project-menu-item" aria-busy={clipboardActionPending.copy}>{renderClipboardActionIcon('copy', 14)}复制</button>
+              <button disabled={finalViewOpen || !clipboardHasFiles} onClick={() => runFileOperation('paste')} className="project-menu-item" aria-busy={clipboardActionPending.paste}>{renderClipboardActionIcon('paste', 14)}粘贴</button>
               <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('trash')} className="project-menu-item project-menu-danger"><Trash2 size={14}/>删除</button>
             </div>
             <div className="project-toolbar-overflow-compact">

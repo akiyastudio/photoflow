@@ -35,7 +35,7 @@ const backend = manifest.runtimeContributions.find(item => item.type === 'media.
 for (const extension of addedExtensions) assert(backend.probe.extensions.includes(extension), `playback backend must declare ${extension}`);
 
 const decoder = fs.readFileSync(path.join(root, 'extensions/video-playback-mpv/src/AdvancedVideoDecoder.cs'), 'utf8');
-assert(decoder.includes('SetOption("vo", probeOnly ? "null" : "gpu-next,gpu")'), 'advanced playback must prefer gpu-next with gpu fallback');
+assert(decoder.includes('SetOption("vo", probeOnly ? "null" : "gpu,gpu-next")'), 'advanced playback must prefer the stable D3D11 gpu renderer');
 assert.equal((decoder.match(/fflags=\+genpts\+igndts/g) || []).length, 1, 'timestamp repair must be limited to the bounded recovery path');
 
 const bundledRuntime = fs.readFileSync(path.join(root, 'electron/services/bundled-python-runtime.cjs'), 'utf8');
