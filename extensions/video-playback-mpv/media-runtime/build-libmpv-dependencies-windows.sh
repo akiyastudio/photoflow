@@ -213,13 +213,20 @@ cmake -S "$source_root/spirv-cross" -B "$build_root/spirv-cross" -G Ninja \
 cmake --build "$build_root/spirv-cross" --parallel "$jobs"
 cmake --install "$build_root/spirv-cross"
 
-LDFLAGS="-Wl,--as-needed -static $LDFLAGS" meson setup "$build_root/libplacebo" "$source_root/libplacebo" \
+shaderc_pkg_config_dir="${PHOTOFLOW_SHADERC_PKG_CONFIG_DIR:-/ucrt64/lib/pkgconfig}"
+test -f "$shaderc_pkg_config_dir/shaderc.pc" || { echo 'Missing shaderc pkg-config metadata for libplacebo' >&2; exit 1; }
+libplacebo_setup=()
+if [[ -f "$build_root/libplacebo/build.ninja" ]]; then libplacebo_setup+=(--reconfigure); fi
+PKG_CONFIG_PATH="$PKG_CONFIG_PATH:$shaderc_pkg_config_dir" \
+PKG_CONFIG_LIBDIR="$PKG_CONFIG_LIBDIR:$shaderc_pkg_config_dir" \
+LDFLAGS="-Wl,--as-needed -static $LDFLAGS" meson setup "${libplacebo_setup[@]}" "$build_root/libplacebo" "$source_root/libplacebo" \
   --buildtype=release --default-library=shared --prefix="$prefix" \
   -Dauto_features=disabled -Dvulkan=disabled -Dopengl=disabled -Dd3d11=enabled \
-  -Dglslang=disabled -Dshaderc=disabled -Dlcms=disabled -Ddovi=disabled \
+  -Dglslang=disabled -Dshaderc=enabled -Dlcms=disabled -Ddovi=disabled \
   -Dlibdovi=disabled -Dunwind=disabled -Dxxhash=disabled \
   -Ddemos=false -Dtests=false -Dbench=false -Dfuzz=false
 meson compile -C "$build_root/libplacebo" -j "$jobs"
+grep -Eq '^#define PL_HAVE_SHADERC 1' "$build_root/libplacebo/src/include/libplacebo/config.h" || { echo 'libplacebo lacks required shaderc support' >&2; exit 1; }
 meson install -C "$build_root/libplacebo"
 
 ffmpeg_flags=(
@@ -275,8 +282,8 @@ done
 rm -rf "$package_root"
 mkdir -p "$package_root/source/build-materials" "$package_root/licenses"
 if [[ -n "$bootstrap_dependency_root" ]]; then
-  cp "$bootstrap_root/source/dependency-corresponding-source.zip" "$artifact_root/dependency-corresponding-source.zip"
-  cp "$bootstrap_root/licenses/dependency-licenses.zip" "$artifact_root/dependency-licenses.zip"
+  cp -a "$bootstrap_dependency_root/." "$package_root/source/"
+  bsdtar -xf "$bootstrap_root/licenses/dependency-licenses.zip" -C "$package_root/licenses"
 else
   git -C "$source_root/ffmpeg" archive --format=zip --output="$package_root/source/ffmpeg-$ffmpeg_commit.zip" HEAD
   git -C "$source_root/zlib" archive --format=zip --output="$package_root/source/zlib-$zlib_commit.zip" HEAD
@@ -296,6 +303,7 @@ fi
 
 cp "$repo_root/media-runtime.lock.json" "$package_root/source/build-materials/media-runtime.lock.json"
 cp "$repo_root/media-runtime/build-libmpv-dependencies-windows.sh" "$package_root/source/build-materials/"
+cp "$build_root/libplacebo/src/include/libplacebo/config.h" "$package_root/source/build-materials/libplacebo-config.h"
 cp "$repo_root/media-runtime/patches/libass-disable-iconv.patch" "$package_root/source/build-materials/"
 cp "$repo_root/media-runtime/patches/freetype-disable-bzip2.patch" "$package_root/source/build-materials/"
 cp "$repo_root/media-runtime/patches/libplacebo-static-winpthread.patch" "$package_root/source/build-materials/"
@@ -339,10 +347,8 @@ zip_directory() {
   powershell.exe -NoLogo -NoProfile -NonInteractive -Command \
     "Compress-Archive -CompressionLevel Optimal -Path '$source_win\\*' -DestinationPath '$destination_win' -Force"
 }
-if [[ -z "$bootstrap_dependency_root" ]]; then
-  zip_directory "$package_root/source" "$artifact_root/dependency-corresponding-source.zip"
-  zip_directory "$package_root/licenses" "$artifact_root/dependency-licenses.zip"
-fi
+zip_directory "$package_root/source" "$artifact_root/dependency-corresponding-source.zip"
+zip_directory "$package_root/licenses" "$artifact_root/dependency-licenses.zip"
 
 printf '%s\n' "$ffmpeg_commit" > "$artifact_root/ffmpeg-commit.txt"
 printf '%s\n' "$prefix" > "$artifact_root/prefix-path.txt"

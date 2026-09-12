@@ -10,6 +10,7 @@ try {
   const lock = { mpv: { version: 'fixture', commit: 'mpv-commit' }, ffmpeg: { commit: 'ffmpeg-commit' } };
   write('media-runtime.lock.json', JSON.stringify(lock));
   write('component.template.json', JSON.stringify({ id: 'video-playback-mpv', entrypoints: { 'win32-x64': 'advanced-video-decoder.exe' } }));
+  write('scripts/vendor/playback-runtime-capabilities.cjs', 'fixture');
   for (const file of ['src/AdvancedVideoDecoder.cs', 'scripts/build.cjs', 'scripts/prepare-development.cjs', 'scripts/vendor/runtime-policy.cjs', 'scripts/vendor/component-integrity.cjs', 'scripts/vendor/deterministic-dotnet-assembly.cjs', 'scripts/vendor/pe-dependency-closure.cjs']) write(file, 'fixture');
   const runtime = { mpv: lock.mpv, linkedFfmpeg: lock.ffmpeg, files: [{ file: 'libmpv-2.dll' }, { file: 'dependency.dll' }], complianceArtifacts: { sourceArchive: { file: 'source.zip' }, licenseArchive: { file: 'licenses.zip' } } };
   const runtimeRelative = 'artifacts/installers/media-runtime/libmpv-lgpl-windows-x64';

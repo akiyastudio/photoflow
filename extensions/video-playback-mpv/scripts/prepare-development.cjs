@@ -24,6 +24,7 @@ const prepareDevelopmentBackend = ({
   const lock = readJson(path.join(componentRoot, 'media-runtime.lock.json'));
   const manifest = readJson(path.join(componentRoot, 'component.template.json'));
   const candidates = environment.PHOTOFLOW_MPV_ROOT ? [path.resolve(environment.PHOTOFLOW_MPV_ROOT)] : [
+    path.resolve(componentRoot, '..', '..', 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64'),
     path.join(componentRoot, 'vendor'),
     path.join(componentRoot, 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64'),
   ];
@@ -41,6 +42,7 @@ const prepareDevelopmentBackend = ({
     'component.template.json', 'media-runtime.lock.json', 'src/AdvancedVideoDecoder.cs',
     'scripts/build.cjs', 'scripts/prepare-development.cjs', 'scripts/vendor/runtime-policy.cjs',
     'scripts/vendor/component-integrity.cjs', 'scripts/vendor/deterministic-dotnet-assembly.cjs', 'scripts/vendor/pe-dependency-closure.cjs',
+    'scripts/vendor/playback-runtime-capabilities.cjs',
   ].map(name => path.join(componentRoot, name));
   inputFiles.push(path.join(runtimeRoot, 'runtime-manifest.json'), ...runtimeFiles,
     ...Object.values(runtime.complianceArtifacts || {}).map(item => containedFile(runtimeRoot, item.file)));

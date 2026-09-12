@@ -7,6 +7,7 @@ const { readJson, validateMpvManifest } = require(path.join(root, 'scripts', 've
 const { createComponentIntegrityManifest } = require(path.join(root, 'scripts', 'vendor', 'component-integrity.cjs'));
 const { normalizeDotnetAssembly } = require(path.join(root, 'scripts', 'vendor', 'deterministic-dotnet-assembly.cjs'));
 const { verifyPeDependencyClosure } = require(path.join(root, 'scripts', 'vendor', 'pe-dependency-closure.cjs'));
+const { verifyLibplaceboCompiler } = require('./vendor/playback-runtime-capabilities.cjs');
 
 const sourceRoot = root;
 const templatePath = path.join(sourceRoot, 'component.template.json');
@@ -37,6 +38,7 @@ if (!fs.existsSync(runtimeManifestPath)) {
   throw new Error(`找不到 libmpv LGPL 运行时清单：${runtimeManifestPath}\n组件构建不接受无法证明许可证、构建参数和文件哈希的第三方二进制。`);
 }
 const runtimeManifest = validateMpvManifest(readJson(runtimeManifestPath), mpvRoot);
+verifyLibplaceboCompiler(mpvRoot, runtimeManifest);
 const mediaRuntimeLock = readJson(path.join(root, 'media-runtime.lock.json'));
 if (runtimeManifest.mpv?.version !== mediaRuntimeLock.mpv.version
   || String(runtimeManifest.mpv?.commit || '') !== mediaRuntimeLock.mpv.commit) {
@@ -142,9 +144,9 @@ const frameworkRoots = [
 const frameworkRoot = frameworkRoots.find(candidate => fs.existsSync(path.join(candidate, 'csc.exe')));
 if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建视频播放器桥接程序');
 
-const releaseRoot = path.join(root, 'dist');
-const outputRoot = path.resolve(argumentValue('--output-root') || path.join(releaseRoot, 'components'));
-const relativeOutputRoot = path.relative(releaseRoot, outputRoot);
+const assemblyRoot = path.join(root, 'dist');
+const outputRoot = path.resolve(argumentValue('--output-root') || path.join(assemblyRoot, 'components'));
+const relativeOutputRoot = path.relative(assemblyRoot, outputRoot);
 if (relativeOutputRoot.startsWith('..') || path.isAbsolute(relativeOutputRoot)) throw new Error(`组件输出目录必须位于安装包目录内：${outputRoot}`);
 const target = path.join(outputRoot, manifest.id);
 const relativeTarget = path.relative(outputRoot, target);
@@ -231,12 +233,10 @@ for (const name of archiveEntries) fs.utimesSync(path.join(target, name), zipTim
 fs.utimesSync(target, zipTimestamp, zipTimestamp);
 
 const artifactName = `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`;
+const checkout = fs.existsSync(path.resolve(root, '..', '..', '.git')) ? path.resolve(root, '..', '..') : root;
+const releaseRoot = path.resolve(argumentValue('--archive-dir') || path.join(checkout, 'artifacts', 'installers', 'base'));
+fs.mkdirSync(releaseRoot, { recursive: true });
 const artifactPath = path.join(releaseRoot, artifactName);
-for (const existingName of fs.readdirSync(releaseRoot)) {
-  if (existingName.startsWith(`PhotoFlow-${manifest.id}-`) && existingName.endsWith(`-${process.platform}-${process.arch}.zip`)) {
-    fs.rmSync(path.join(releaseRoot, existingName), { force: true });
-  }
-}
 const archive = spawnSync('tar.exe', ['-a', '-c', '-f', artifactPath,
   ...archiveEntries.map(name => path.join(manifest.id, name))], {
   cwd: outputRoot,

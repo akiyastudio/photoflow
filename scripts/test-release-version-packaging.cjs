@@ -51,3 +51,40 @@ assert.deepEqual(Array.from(baseCalls[1][1]), [
   path.resolve(__dirname, '../artifacts/installers'),
 ]);
 console.log('Version updater packaging routes passed; no packages generated.');
+
+// Follow the video route to its real host entry, with package writes and
+// subprocesses intercepted. This must select a checked runtime and write the
+// archive directly into the directory requested by build:components.
+const videoEntry = path.resolve(__dirname, '../extensions/video-playback-mpv/scripts/package-host.cjs');
+const videoRequire = createRequire(videoEntry);
+const videoLock = videoRequire('../media-runtime.lock.json');
+const videoOutput = path.resolve(__dirname, '../artifacts/installers');
+const videoCalls = [];
+let compilerChecks = 0;
+vm.runInNewContext(fs.readFileSync(videoEntry, 'utf8'), {
+  __dirname: path.dirname(videoEntry),
+  console: { log() {} },
+  process: { execPath: process.execPath, platform: process.platform, arch: process.arch,
+    argv: [process.execPath, videoEntry, '--output-dir', videoOutput] },
+  require: name => {
+    if (name === 'node:child_process') return { spawnSync: (...args) => { videoCalls.push(args); return { status: 0 }; } };
+    if (name === './vendor/playback-runtime-capabilities.cjs') return { verifyLibplaceboCompiler: () => { compilerChecks += 1; } };
+    if (name === 'node:fs') return {
+      ...fs,
+      existsSync: file => String(file).endsWith('runtime-manifest.json') || fs.existsSync(file),
+      readFileSync: (file, ...args) => String(file).endsWith('runtime-manifest.json')
+        ? JSON.stringify({ mpv: videoLock.mpv, linkedFfmpeg: videoLock.ffmpeg }) : fs.readFileSync(file, ...args),
+      statSync: file => { assert.equal(path.dirname(file), videoOutput); return { isFile: () => true }; },
+      mkdirSync() {},
+      copyFileSync() { throw new Error('Component archive must be built directly in the requested output directory'); },
+    };
+    return videoRequire(name);
+  },
+}, { filename: videoEntry });
+assert.equal(compilerChecks, 1, 'version:set video packaging must reject compiler-disabled runtimes');
+assert.equal(videoCalls.length, 1);
+const videoArguments = Array.from(videoCalls[0][1]);
+assert.equal(path.basename(videoArguments[0]), 'build.cjs');
+assert.equal(videoArguments[videoArguments.indexOf('--archive-dir') + 1], videoOutput);
+assert.equal(videoCalls[0][2].windowsHide, true);
+console.log('Video version:set runtime validation and direct artifact output passed; no packages generated.');

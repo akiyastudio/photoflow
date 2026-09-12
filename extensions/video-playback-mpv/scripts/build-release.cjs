@@ -21,7 +21,9 @@ const runtime = spawnSync('bash', [runtimeScript], {
   stdio: 'inherit',
 });
 if (runtime.status !== 0) throw new Error(`libmpv 固定运行时构建失败（exit ${runtime.status ?? 'spawn'}）`);
-const packaged = spawnSync(process.execPath, [packageScript, '--mpv-root', runtimeRoot], {
+const archiveIndex = process.argv.indexOf('--archive-dir');
+const archiveArgs = archiveIndex >= 0 ? ['--archive-dir', path.resolve(process.argv[archiveIndex + 1])] : [];
+const packaged = spawnSync(process.execPath, [packageScript, '--mpv-root', runtimeRoot, ...archiveArgs], {
   cwd: root,
   env: process.env,
   encoding: 'utf8',

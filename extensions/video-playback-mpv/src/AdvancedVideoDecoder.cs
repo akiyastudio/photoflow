@@ -108,10 +108,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
             context = create();
             if (context == IntPtr.Zero) throw new InvalidOperationException("libmpv 初始化内存失败");
             if (videoWindow != IntPtr.Zero) SetOption("wid", videoWindow.ToInt64().ToString(CultureInfo.InvariantCulture));
-            // Prefer the D3D11 renderer that does not require libplacebo's
-            // interop path; gpu-next can crash in d3d11.dll after media.open
-            // even when mpv_initialize succeeds, so its fallback never runs.
-            SetOption("vo", probeOnly ? "null" : "gpu,gpu-next");
+            // Packaging verifies libplacebo's shaderc dependency before this
+            // renderer is enabled; mpv's own shaderc setting is insufficient.
+            SetOption("vo", probeOnly ? "null" : "gpu-next,gpu");
             if (probeOnly) SetOption("audio", "no");
             else
             {

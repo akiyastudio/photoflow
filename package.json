@@ -3,7 +3,7 @@
   "productName": "照片流",
   "private": true,
   "license": "UNLICENSED",
-  "version": "26.9.9",
+  "version": "26.9.12",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

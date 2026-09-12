@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { verifyLibplaceboCompiler } = require('./vendor/playback-runtime-capabilities.cjs');
 
 const componentRoot = path.resolve(__dirname, '..');
 const repositoryRoot = path.resolve(componentRoot, '..', '..');
@@ -17,6 +18,7 @@ const compatibleRuntime = candidate => {
   if (!fs.existsSync(manifestPath)) return false;
   try {
     const runtime = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    verifyLibplaceboCompiler(candidate, runtime);
     return runtime.mpv?.version === runtimeLock.mpv.version
       && runtime.mpv?.commit === runtimeLock.mpv.commit
       && runtime.linkedFfmpeg?.commit === runtimeLock.ffmpeg.commit;
@@ -40,13 +42,12 @@ if (process.argv.includes('--check-runtime')) {
 
 if (runtimeRoot) {
   console.log(`Using compatible libmpv runtime: ${runtimeRoot}`);
-  run(process.execPath, [path.join(componentRoot, 'scripts', 'build.cjs'), '--mpv-root', runtimeRoot]);
+  run(process.execPath, [path.join(componentRoot, 'scripts', 'build.cjs'), '--mpv-root', runtimeRoot, '--archive-dir', outputRoot]);
 }
-else if (process.platform === 'win32') run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm run build:release']);
-else run('npm', ['run', 'build:release']);
+else run(process.execPath, [path.join(componentRoot, 'scripts', 'build-release.cjs'), '--archive-dir', outputRoot]);
 
 const archiveName = `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`;
-const sourceArchive = path.join(componentRoot, 'dist', archiveName);
+const sourceArchive = path.join(outputRoot, archiveName);
 if (!fs.statSync(sourceArchive, { throwIfNoEntry: false })?.isFile()) throw new Error(`没有生成插件安装包：${sourceArchive}`);
 fs.mkdirSync(outputRoot, { recursive: true });
 const outputArchive = path.join(outputRoot, archiveName);
